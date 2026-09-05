@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 560">
+<defs>
+ <linearGradient id="lockBlue" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#60A5FA"/><stop offset="52%" stop-color="#2563EB"/><stop offset="100%" stop-color="#1E40AF"/>
+ </linearGradient>
+</defs>
+<rect x="40" y="40" width="480" height="480" rx="112" fill="url(#lockBlue)"/>
+<path d="M128 150h72v118l90-101 90 101V150h72v260h-72V286l-90 99-90-99v124h-72V150z" fill="#fff"/>
+<path d="M218 184l72 82 72-82v87l-72 84-72-84z" fill="#DBEAFE"/>
+<circle cx="134" cy="445" r="14" fill="#06B6D4"/><circle cx="386" cy="445" r="14" fill="#06B6D4"/>
+<path d="M148 445h224" stroke="#06B6D4" stroke-width="10" stroke-linecap="round"/>
+<text x="590" y="220" font-family="Segoe UI, Arial, sans-serif" font-size="112" font-weight="700" fill="#0F172A">Mark</text>
+<text x="900" y="220" font-family="Segoe UI, Arial, sans-serif" font-size="112" font-weight="700" fill="#2563EB">nexia</text>
+<text x="594" y="282" font-family="Segoe UI, Arial, sans-serif" font-size="31" letter-spacing="9" fill="#64748B">READ • EXPLORE • UNDERSTAND</text>
+<text x="594" y="375" font-family="Segoe UI, Arial, sans-serif" font-size="42" fill="#0F172A">GitHub-style Markdown.</text>
+<text x="594" y="430" font-family="Segoe UI, Arial, sans-serif" font-size="42" fill="#2563EB">Native on Windows.</text>
+</svg>

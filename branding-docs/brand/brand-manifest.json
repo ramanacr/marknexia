@@ -1,0 +1,33 @@
+{
+  "brand_name": "Marknexia",
+  "tagline": "Read. Explore. Understand.",
+  "descriptor": "GitHub-style Markdown. Native on Windows.",
+  "font": {
+    "primary": "Segoe UI Variable",
+    "monospace": "Cascadia Code"
+  },
+  "palette": {
+    "primary": "#2563EB",
+    "primary_dark": "#1E40AF",
+    "ink": "#0F172A",
+    "accent": "#06B6D4",
+    "sky": "#60A5FA",
+    "light": "#F8FAFC",
+    "surface": "#FFFFFF",
+    "dark": "#0B1220",
+    "dark_surface": "#111827",
+    "muted": "#64748B",
+    "border": "#CBD5E1"
+  },
+  "assets": {
+    "symbol": "logo/marknexia-symbol.svg",
+    "wordmark_light": "logo/marknexia-wordmark-light.svg",
+    "wordmark_dark": "logo/marknexia-wordmark-dark.svg",
+    "lockup": "logo/marknexia-lockup.svg",
+    "ico": "icons/marknexia.ico",
+    "store_hero": "store/marknexia-store-hero.png",
+    "store_banner": "store/marknexia-store-banner.png",
+    "social_preview": "social/marknexia-social-preview.png"
+  },
+  "clearance_note": "Brand/domain/trademark checks are preliminary only; perform formal clearance before commercialization."
+}
