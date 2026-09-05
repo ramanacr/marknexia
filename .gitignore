@@ -38,6 +38,11 @@ ScaffoldingReadMe.txt
 *.nupkg
 # NuGet Symbol Packages
 *.snupkg
+# App packages
+*.msix
+*.appx
+*.msixbundle
+*.appxbundle
 
 # dotenv environment variables file
 .env
