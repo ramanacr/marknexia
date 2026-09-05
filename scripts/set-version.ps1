@@ -51,11 +51,11 @@ if (Test-Path $manifestPath) {
     $appxVersion = "$major.$minor.$commitCount.0"
     $manifestContent = [System.Text.RegularExpressions.Regex]::Replace(
         $manifestContent,
-        'Version="\d+\.\d+\.\d+\.\d+"',
-        "Version=""$appxVersion"""
+        '(<Identity[^>]*Version=")[^"]*(")',
+        "`${1}$appxVersion`${2}"
     )
     Set-Content -Path $manifestPath -Value $manifestContent -NoNewline
-    Write-Host "Updated Package.appxmanifest to Version=$appxVersion"
+    Write-Host "Updated Package.appxmanifest Identity to Version=$appxVersion"
 }
 
 $currentVersion = "$major.$minor.$patch"

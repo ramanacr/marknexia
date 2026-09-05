@@ -188,11 +188,19 @@ graph TD
 
 ### Running the Application
 
-To launch the unpackaged application directly from the build output:
-```powershell
-.\src\Marknexia.App\bin\x64\Debug\net10.0-windows10.0.19041.0\Marknexia.App.exe
-```
+#### Option A: Install via MSIX Package (Recommended)
+Download the signed package from the [Latest Release](https://github.com/ramanacr/marknexia/releases/latest):
+* **`Marknexia-v1.0.0-win-x64.msix`**
+* For developer sideloading, install `Marknexia-Dev.cer` into *Trusted Root Certification Authorities* once, then double-click the `.msix` to install.
 
+#### Option B: Portable Standalone Distribution
+Download **`Marknexia-v1.0.0-win-x64.zip`**, extract anywhere, and launch `Marknexia.App.exe`.
+
+#### Option C: Local Developer Run
+To launch directly from the local build output:
+```powershell
+.\src\Marknexia.App\bin\Release\net10.0-windows10.0.19041.0\Marknexia.App.exe
+```
 Or open `Marknexia.slnx` in Visual Studio and press **F5**.
 
 ---

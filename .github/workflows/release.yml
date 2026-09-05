@@ -39,12 +39,37 @@ jobs:
       - name: Build Application (Release)
         run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform="Any CPU" /m
 
-      - name: Package Distribution Zip
+      - name: Package Distribution Zip and MSIX
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
           if (-not $ver) { $ver = "1.0.0" }
           $zipName = "Marknexia-v$ver-win-x64.zip"
+          $msixName = "Marknexia-v$ver-win-x64.msix"
           $publishDir = "src/Marknexia.App/bin/Release/net10.0-windows10.0.19041.0"
+          
+          # Create Portable ZIP
           Compress-Archive -Path "$publishDir/*" -DestinationPath "$zipName" -Force
           Get-FileHash -Path "$zipName" -Algorithm SHA256 | Out-File -FilePath "$zipName.sha256"
+
+          # Create MSIX Layout
+          $msixLayout = "msix-staging"
+          New-Item -ItemType Directory -Force -Path $msixLayout
+          Copy-Item "$publishDir/*" -Destination "$msixLayout/" -Recurse
+          Copy-Item "src/Marknexia.App/Package.appxmanifest" -Destination "$msixLayout/AppxManifest.xml"
+
+          # Run MakeAppx
+          $makeAppx = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "makeappx.exe" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1).FullName
+          & "$makeAppx" pack /d "$msixLayout" /p "$msixName" /o
+          Get-FileHash -Path "$msixName" -Algorithm SHA256 | Out-File -FilePath "$msixName.sha256"
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Marknexia-*.zip
+            Marknexia-*.zip.sha256
+            Marknexia-*.msix
+            Marknexia-*.msix.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
