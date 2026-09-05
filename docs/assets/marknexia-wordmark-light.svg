@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 360">
+<defs>
+ <linearGradient id="miniBlue" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#60A5FA"/><stop offset="55%" stop-color="#2563EB"/><stop offset="100%" stop-color="#1E40AF"/>
+ </linearGradient>
+</defs>
+<rect x="32" y="32" width="296" height="296" rx="72" fill="url(#miniBlue)"/>
+<path d="M96 108h48v76l60-68 60 68v-76h48v144h-48v-56l-60 66-60-66v56H96V108z" fill="#fff"/>
+<path d="M156 127l48 54 48-54v58l-48 56-48-56z" fill="#DBEAFE"/>
+<circle cx="100" cy="277" r="8" fill="#06B6D4"/><circle cx="284" cy="277" r="8" fill="#06B6D4"/>
+<path d="M108 277h168" stroke="#06B6D4" stroke-width="6" stroke-linecap="round"/>
+<text x="370" y="190" font-family="Segoe UI, Arial, sans-serif" font-size="108" font-weight="700" fill="#0F172A">Mark</text>
+<text x="675" y="190" font-family="Segoe UI, Arial, sans-serif" font-size="108" font-weight="700" fill="#2563EB">nexia</text>
+<text x="374" y="246" font-family="Segoe UI, Arial, sans-serif" font-size="27" letter-spacing="8" fill="#64748B">READ • EXPLORE • UNDERSTAND</text>
+</svg>

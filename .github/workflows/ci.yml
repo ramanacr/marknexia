@@ -1,0 +1,40 @@
+name: CI & Quality Assurance
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Calculate & Sync Version
+        shell: pwsh
+        run: |
+          ./scripts/set-version.ps1 -SyncManifestOnly
+
+      - name: Restore Dependencies
+        run: dotnet restore Marknexia.slnx
+
+      - name: Run Test Suite
+        run: dotnet test Marknexia.slnx --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Build Application (Release)
+        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform="Any CPU" /m

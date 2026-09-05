@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Marknexia — GitHub-style Markdown. Native on Windows.</title>
+  <meta name="description" content="High-fidelity offline-first Windows Markdown and repository document viewer with GFM parity, Mermaid diagrams, and repository navigation.">
+  
+  <!-- OpenGraph / Social -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ramanacr.github.io/marknexia/">
+  <meta property="og:title" content="Marknexia — GitHub-style Markdown. Native on Windows.">
+  <meta property="og:description" content="Read. Explore. Understand. High-fidelity GitHub-compatible Markdown rendering, offline Mermaid diagrams, and repository navigation.">
+  <meta property="og:image" content="assets/marknexia-social-preview.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="assets/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/marknexia-128.png">
+
+  <style>
+    :root {
+      --primary: #2563EB;
+      --primary-dark: #1E40AF;
+      --primary-light: #60A5FA;
+      --accent: #06B6D4;
+      --bg: #0B1220;
+      --surface: #111827;
+      --surface-elevated: #1F2937;
+      --border: #374151;
+      --text: #F8FAFC;
+      --text-muted: #94A3B8;
+      --code-bg: #0D1117;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --font-sans: 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      --font-mono: 'Cascadia Code', Consolas, 'SF Mono', monospace;
+    }
+
+    [data-theme="light"] {
+      --bg: #F8FAFC;
+      --surface: #FFFFFF;
+      --surface-elevated: #F1F5F9;
+      --border: #E2E8F0;
+      --text: #0F172A;
+      --text-muted: #64748B;
+      --code-bg: #F6F8FA;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      transition: background-color 0.25s ease, color 0.25s ease;
+      overflow-x: hidden;
+    }
+
+    /* Container */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Navigation */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      background: rgba(11, 18, 32, 0.85);
+      border-bottom: 1px solid var(--border);
+    }
+    [data-theme="light"] header {
+      background: rgba(248, 250, 252, 0.85);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 72px;
+    }
+    .brand-link {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: inherit;
+      font-weight: 700;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+    .brand-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+    }
+    nav ul {
+      display: flex;
+      list-style: none;
+      gap: 28px;
+      align-items: center;
+    }
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    nav a:hover { color: var(--primary-light); }
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid transparent;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #2563EB, #1E40AF);
+      color: #FFFFFF;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #3B82F6, #2563EB);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.45);
+      transform: translateY(-1px);
+    }
+    .btn-outline {
+      border-color: var(--border);
+      color: var(--text);
+      background: var(--surface);
+    }
+    .btn-outline:hover {
+      background: var(--surface-elevated);
+      border-color: var(--primary-light);
+    }
+    .btn-sm {
+      padding: 6px 14px;
+      font-size: 0.85rem;
+    }
+    .theme-toggle {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 80px 0 60px;
+      text-align: center;
+      position: relative;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      background: rgba(37, 99, 235, 0.12);
+      border: 1px solid rgba(37, 99, 235, 0.3);
+      color: var(--primary-light);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 24px;
+    }
+    .hero h1 {
+      font-size: clamp(2.4rem, 5vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin-bottom: 20px;
+      background: linear-gradient(135deg, #FFFFFF 0%, #94A3B8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    [data-theme="light"] .hero h1 {
+      background: linear-gradient(135deg, #0F172A 0%, #334155 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p.lead {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 740px;
+      margin: 0 auto 36px;
+      font-weight: 400;
+    }
+    .hero-cta {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 50px;
+    }
+
+    /* App Preview Window Mockup */
+    .app-window {
+      max-width: 1040px;
+      margin: 0 auto;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+      text-align: left;
+    }
+    .window-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 42px;
+      background: var(--surface-elevated);
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .window-controls {
+      display: flex;
+      gap: 8px;
+    }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot.red { background: #EF4444; }
+    .dot.yellow { background: #F59E0B; }
+    .dot.green { background: #10B981; }
+    .window-tabs {
+      display: flex;
+      gap: 4px;
+      margin-left: 20px;
+    }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background: var(--surface);
+      border-radius: 6px 6px 0 0;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text);
+      border-top: 2px solid var(--primary);
+    }
+    .tab.inactive {
+      background: transparent;
+      color: var(--text-muted);
+      border-top: 2px solid transparent;
+    }
+    .window-body {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 460px;
+    }
+    .window-sidebar {
+      background: var(--surface-elevated);
+      border-right: 1px solid var(--border);
+      padding: 16px;
+      font-size: 0.85rem;
+    }
+    .sidebar-heading {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+    .tree-item {
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 2px;
+    }
+    .tree-item.active {
+      background: rgba(37, 99, 235, 0.15);
+      color: var(--primary-light);
+      font-weight: 600;
+    }
+    .window-content {
+      padding: 32px;
+      overflow-y: auto;
+      max-height: 480px;
+      font-size: 0.95rem;
+    }
+
+    /* GFM Alert styles inside preview */
+    .gfm-alert {
+      padding: 14px 18px;
+      margin: 16px 0;
+      border-left: 4px solid;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.03);
+    }
+    .gfm-alert.note { border-color: #2563EB; background: rgba(37, 99, 235, 0.08); }
+    .gfm-alert.tip { border-color: #10B981; background: rgba(16, 185, 129, 0.08); }
+    .gfm-alert.important { border-color: #8B5CF6; background: rgba(139, 92, 246, 0.08); }
+    .gfm-alert.warning { border-color: #F59E0B; background: rgba(245, 158, 11, 0.08); }
+    .gfm-alert.caution { border-color: #EF4444; background: rgba(239, 68, 68, 0.08); }
+    .alert-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .alert-note .alert-title { color: #3B82F6; }
+    .alert-warning .alert-title { color: #F59E0B; }
+
+    /* Features Section */
+    .section {
+      padding: 90px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-title {
+      text-align: center;
+      margin-bottom: 60px;
+    }
+    .section-title h2 {
+      font-size: 2.25rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+    .section-title p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 28px;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .feature-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--primary);
+    }
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 10px;
+      background: rgba(37, 99, 235, 0.12);
+      color: var(--primary-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      margin-bottom: 20px;
+    }
+    .feature-card h3 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .feature-card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    /* Comparison / Architecture */
+    .arch-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      margin-top: 30px;
+    }
+    .layers-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .layer-box {
+      background: var(--surface-elevated);
+      border: 1px solid var(--border);
+      padding: 16px;
+      border-radius: var(--radius-sm);
+    }
+    .layer-box h4 {
+      color: var(--primary-light);
+      font-size: 0.95rem;
+      margin-bottom: 6px;
+    }
+    .layer-box p {
+      color: var(--text-muted);
+      font-size: 0.82rem;
+    }
+
+    /* Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0;
+      font-size: 0.9rem;
+    }
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: var(--surface-elevated);
+      color: var(--text);
+      font-weight: 600;
+    }
+    kbd {
+      background: var(--surface-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+
+    /* Footer */
+    footer {
+      padding: 60px 0 40px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      border-top: 1px solid var(--border);
+    }
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 30px;
+      margin-bottom: 40px;
+    }
+    .footer-col h4 {
+      color: var(--text);
+      font-size: 1rem;
+      margin-bottom: 16px;
+    }
+    .footer-col ul {
+      list-style: none;
+    }
+    .footer-col li { margin-bottom: 8px; }
+    .footer-col a {
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .footer-col a:hover { color: var(--text); }
+    .legal-notice {
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 768px) {
+      .window-body { grid-template-columns: 1fr; }
+      .window-sidebar { display: none; }
+      nav ul { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="container nav-inner">
+      <a href="#" class="brand-link">
+        <img src="assets/marknexia-128.png" alt="Marknexia Logo" class="brand-logo">
+        <span>Marknexia</span>
+      </a>
+      <nav>
+        <ul>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#navigation">Navigation</a></li>
+          <li><a href="#diagrams">Diagrams</a></li>
+          <li><a href="#architecture">Architecture</a></li>
+          <li><a href="#shortcuts">Shortcuts</a></li>
+        </ul>
+      </nav>
+      <div class="nav-actions">
+        <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle Theme">🌓 Theme</button>
+        <a href="https://github.com/ramanacr/marknexia" target="_blank" class="btn btn-outline btn-sm">GitHub</a>
+        <a href="https://github.com/ramanacr/marknexia/releases/latest" class="btn btn-primary btn-sm">Download</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span>✨ Version 1.0.0 Released</span> • <span>Windows 10 & 11 Native</span>
+      </div>
+      <h1>GitHub-style Markdown.<br>Native on Windows.</h1>
+      <p class="lead">
+        <strong>Read. Explore. Understand.</strong> An offline-first, high-fidelity Markdown documentation and repository browser. GFM alerts, bundled Mermaid diagrams, resilient relative link navigation, and sandboxed execution.
+      </p>
+      <div class="hero-cta">
+        <a href="https://github.com/ramanacr/marknexia/releases/download/v1.0.0/Marknexia-v1.0.0-win-x64.zip" class="btn btn-primary">
+          <svg width="20" height="20" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a1 1 0 011 1v7.586l2.293-2.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L9 10.586V3a1 1 0 011-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"/></svg>
+          Download for Windows (x64)
+        </a>
+        <a href="https://github.com/ramanacr/marknexia" target="_blank" class="btn btn-outline">
+          View on GitHub
+        </a>
+      </div>
+
+      <!-- App Window Mockup -->
+      <div class="app-window">
+        <div class="window-titlebar">
+          <div class="window-controls">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <div class="window-tabs">
+            <div class="tab">📄 README.md ✕</div>
+            <div class="tab inactive">architecture.md</div>
+            <div class="tab inactive">api-reference.md</div>
+          </div>
+          <div style="font-size:0.75rem; opacity:0.6;">Marknexia v1.0.0</div>
+        </div>
+        <div class="window-body">
+          <div class="window-sidebar">
+            <div class="sidebar-heading">Document Outline</div>
+            <div class="tree-item active"># Marknexia Overview</div>
+            <div class="tree-item" style="padding-left:18px;">## Core Architecture</div>
+            <div class="tree-item" style="padding-left:18px;">## Navigation Engine</div>
+            <div class="tree-item" style="padding-left:26px;">### Path Resolution</div>
+            <div class="tree-item" style="padding-left:18px;">## Offline Mermaid</div>
+            <div class="tree-item"># Verification & Security</div>
+          </div>
+          <div class="window-content">
+            <h2 style="font-size:1.5rem; margin-bottom:12px;"># Marknexia — GitHub-style Markdown</h2>
+            <p style="margin-bottom:16px; color:var(--text-muted);">A production-grade Windows Markdown reader engineered for developer documentation, ADRs, and repository wikis.</p>
+            
+            <div class="gfm-alert note">
+              <div class="alert-title alert-note">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8zm9 3a1 1 0 11-2 0 1 1 0 012 0zm-.25-6.25a.75.75 0 00-1.5 0v3.5a.75.75 0 001.5 0v-3.5z"/></svg>
+                Note
+              </div>
+              <div>Deterministic heading anchor generation guarantees full link compatibility with GitHub READMEs.</div>
+            </div>
+
+            <div class="gfm-alert warning">
+              <div class="alert-title alert-warning">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0114.082 15H1.918a1.75 1.75 0 01-1.543-2.575L6.457 1.047zM8 11a1 1 0 100 2 1 1 0 000-2zm0-6a.75.75 0 00-.75.75v3.5a.75.75 0 001.5 0v-3.5A.75.75 0 008 5z"/></svg>
+                Warning
+              </div>
+              <div>Hostile links attempting directory traversal escapes (e.g. <code>../../../../Windows</code>) are sandboxed and blocked.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Grid -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="section-title">
+        <h2>Engineered for Technical Readers</h2>
+        <p>Everything you expect from GitHub's web interface, packaged as a fast, offline-first native Windows application.</p>
+      </div>
+
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>100% GFM Parity</h3>
+          <p>Native rendering of GitHub Alert callouts (<code>[!NOTE]</code>, <code>[!TIP]</code>, <code>[!IMPORTANT]</code>, <code>[!WARNING]</code>, <code>[!CAUTION]</code>), task lists, tables, footnotes, and autolinks.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3>Offline Mermaid 11.4</h3>
+          <p>Full support for flowcharts, sequence diagrams, ER graphs, state machines, and Gantt charts without runtime internet access or CDN lag.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🧭</div>
+          <h3>Repository Navigation</h3>
+          <p>Seamlessly navigate intra-document anchors, relative cross-file links, and repository-root <code>/...</code> paths resolved against the <code>.git</code> boundary.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🛡️</div>
+          <h3>Sandboxed Security</h3>
+          <p>Ganss.Xss sanitizer strips scripts, event handlers, and malicious SVGs. Strict path traversal checks prevent unauthorized filesystem access.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">📑</div>
+          <h3>WinUI 3 Modern Tabs</h3>
+          <p>Multi-tabbed document workspace with hierarchical outline tree sidebar, fast in-page search (<code>Ctrl+F</code>), and Mica/Fluent visual styling.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🎨</div>
+          <h3>GitHub Primer Themes</h3>
+          <p>True GitHub Light and GitHub Dark theme tokens with high-contrast syntax highlighting powered by an offline C# engine.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Navigation Engine Deep Dive -->
+  <section class="section" id="navigation">
+    <div class="container">
+      <div class="section-title">
+        <h2>Smart Repository Navigation</h2>
+        <p>No more broken links when browsing local repository documentation.</p>
+      </div>
+
+      <div class="arch-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Link Target</th>
+              <th>Classification</th>
+              <th>Behavior</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>#configuration</code></td>
+              <td><code>IntraDocumentAnchor</code></td>
+              <td>Instant smooth scrolling to element with deterministic heading ID.</td>
+            </tr>
+            <tr>
+              <td><code>./guides/install.md</code></td>
+              <td><code>RelativeMarkdownFile</code></td>
+              <td>Resolves relative to current document folder; opens in tab.</td>
+            </tr>
+            <tr>
+              <td><code>../api/auth.md#oauth</code></td>
+              <td><code>CrossDocumentAnchor</code></td>
+              <td>Opens target document and scrolls directly to heading anchor.</td>
+            </tr>
+            <tr>
+              <td><code>/docs/architecture.md</code></td>
+              <td><code>RepositoryRootFile</code></td>
+              <td>Discovers <code>.git</code> marker and resolves from repo root.</td>
+            </tr>
+            <tr>
+              <td><code>https://github.com/...</code></td>
+              <td><code>ExternalWeb</code></td>
+              <td>Safely dispatches URL to the default Windows browser.</td>
+            </tr>
+            <tr>
+              <td><code>../../../../Windows/System32</code></td>
+              <td><code>Unsupported</code> (Sandbox)</td>
+              <td>Traversal outside repository boundary blocked; diagnostic alerted.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section class="section" id="architecture">
+    <div class="container">
+      <div class="section-title">
+        <h2>Decoupled 10-Layer Architecture</h2>
+        <p>Clean domain separation with pure .NET 10 core libraries and zero UI leakage.</p>
+      </div>
+
+      <div class="arch-card">
+        <div class="layers-list">
+          <div class="layer-box">
+            <h4>Marknexia.Core</h4>
+            <p>Immutable models, interfaces, and GitHub heading slug generation.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Files</h4>
+            <p>Path canonicalizer, BOM/UTF encoding detection, repo root finder.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Navigation</h4>
+            <p>Classification, sandboxing, and history stack manager.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Markdown</h4>
+            <p>Markdig adapter with alerts, tables, and Mermaid block extraction.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Syntax</h4>
+            <p>Offline ColorCode pure C# syntax highlighting.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Diagrams</h4>
+            <p>Mermaid containers, copy source, and error boundaries.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Security</h4>
+            <p>Ganss.Xss sanitizer and protocol allowlisting.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Rendering</h4>
+            <p>HTML5 template engine, embedded CSS tokens, WebView2 bridge.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.Infrastructure</h4>
+            <p>SHA-256 LRU memory caches and JSON settings persistence.</p>
+          </div>
+          <div class="layer-box">
+            <h4>Marknexia.App</h4>
+            <p>WinUI 3 desktop shell, TabView, sidebars, search, and MSIX.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Shortcuts -->
+  <section class="section" id="shortcuts">
+    <div class="container">
+      <div class="section-title">
+        <h2>Keyboard Shortcuts</h2>
+        <p>Navigate and inspect repository documentation at full speed.</p>
+      </div>
+
+      <div class="arch-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Shortcut</th>
+              <th>Action</th>
+              <th>Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><kbd>Ctrl + O</kbd></td><td>Open Markdown document via file picker</td><td>Global</td></tr>
+            <tr><td><kbd>Ctrl + Shift + O</kbd></td><td>Open repository / documentation folder</td><td>Global</td></tr>
+            <tr><td><kbd>Ctrl + T</kbd></td><td>Open new document tab</td><td>Application Shell</td></tr>
+            <tr><td><kbd>Ctrl + W</kbd></td><td>Close current tab</td><td>Application Shell</td></tr>
+            <tr><td><kbd>Ctrl + Tab</kbd></td><td>Switch to next tab</td><td>Application Shell</td></tr>
+            <tr><td><kbd>Ctrl + F</kbd></td><td>Open in-page search bar</td><td>Document Viewer</td></tr>
+            <tr><td><kbd>Alt + Left</kbd></td><td>Navigate back in document history</td><td>Document Viewer</td></tr>
+            <tr><td><kbd>Alt + Right</kbd></td><td>Navigate forward in document history</td><td>Document Viewer</td></tr>
+            <tr><td><kbd>F5</kbd> / <kbd>Ctrl + R</kbd></td><td>Reload current document</td><td>Document Viewer</td></tr>
+            <tr><td><kbd>F11</kbd></td><td>Toggle Fullscreen reading mode</td><td>Application Shell</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-col" style="max-width:320px;">
+          <div class="brand-link" style="margin-bottom:12px;">
+            <img src="assets/marknexia-128.png" alt="Marknexia Logo" class="brand-logo">
+            <span>Marknexia</span>
+          </div>
+          <p>GitHub-style Markdown. Native on Windows. Read, explore, and understand documentation repositories with native speed and offline reliability.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <ul>
+            <li><a href="https://github.com/ramanacr/marknexia/releases/latest">Download Release</a></li>
+            <li><a href="https://github.com/ramanacr/marknexia#readme">Documentation</a></li>
+            <li><a href="https://github.com/ramanacr/marknexia/issues">Issue Tracker</a></li>
+            <li><a href="https://github.com/ramanacr/marknexia/blob/main/LICENSE">MIT License</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Project Info</h4>
+          <ul>
+            <li>Version: 1.0.0</li>
+            <li>Framework: .NET 10 | WinUI 3</li>
+            <li>Architecture: x64 | ARM64</li>
+            <li>Platform: Windows 10 & 11</li>
+          </ul>
+        </div>
+      </div>
+      <div class="legal-notice">
+        <p><strong>Brand Notice:</strong> Marknexia is an independent, native Windows documentation viewer. "GitHub" and the GitHub Octocat logo are registered trademarks of GitHub, Inc. Marknexia is not affiliated with, endorsed by, or sponsored by GitHub, Inc. The term "GitHub-style" is used solely to describe the rendering syntax and behavioral compatibility of Markdown documents.</p>
+        <p style="margin-top:8px;">© 2026 Marknexia. Released under the MIT License.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+    }
+  </script>
+</body>
+</html>

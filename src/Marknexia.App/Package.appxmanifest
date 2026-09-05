@@ -9,7 +9,7 @@
     Name="Marknexia"
     ProcessorArchitecture="x64"
     Publisher="CN=Marknexia"
-    Version="1.0.0.0" />
+    Version="..5.0" />
 
   <Properties>
     <DisplayName>Marknexia</DisplayName>
@@ -19,7 +19,7 @@
   </Properties>
 
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="..5.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
 
   <Resources>
