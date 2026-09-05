@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Markdig" Version="0.40.0" />
+    <PackageVersion Include="HtmlSanitizer" Version="9.2.1039" />
+    <PackageVersion Include="ColorCode.Core" Version="2.0.15" />
+    <PackageVersion Include="ColorCode.HTML" Version="2.0.15" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
+    <PackageVersion Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="FluentAssertions" Version="7.2.0" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,22 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Marknexia.Core/Marknexia.Core.csproj" />
+    <Project Path="src/Marknexia.Files/Marknexia.Files.csproj" />
+    <Project Path="src/Marknexia.Navigation/Marknexia.Navigation.csproj" />
+    <Project Path="src/Marknexia.Markdown/Marknexia.Markdown.csproj" />
+    <Project Path="src/Marknexia.Syntax/Marknexia.Syntax.csproj" />
+    <Project Path="src/Marknexia.Diagrams/Marknexia.Diagrams.csproj" />
+    <Project Path="src/Marknexia.Security/Marknexia.Security.csproj" />
+    <Project Path="src/Marknexia.Rendering/Marknexia.Rendering.csproj" />
+    <Project Path="src/Marknexia.Infrastructure/Marknexia.Infrastructure.csproj" />
+    <Project Path="src/Marknexia.App/Marknexia.App.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Marknexia.Core.Tests/Marknexia.Core.Tests.csproj" />
+    <Project Path="tests/Marknexia.Files.Tests/Marknexia.Files.Tests.csproj" />
+    <Project Path="tests/Marknexia.Navigation.Tests/Marknexia.Navigation.Tests.csproj" />
+    <Project Path="tests/Marknexia.Markdown.Tests/Marknexia.Markdown.Tests.csproj" />
+    <Project Path="tests/Marknexia.Security.Tests/Marknexia.Security.Tests.csproj" />
+    <Project Path="tests/Marknexia.Rendering.Tests/Marknexia.Rendering.Tests.csproj" />
+  </Folder>
+</Solution>

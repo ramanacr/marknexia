@@ -1,0 +1,148 @@
+<Window
+    x:Class="Marknexia.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Marknexia">
+
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Command Toolbar -->
+        <Grid Grid.Row="0" Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="8,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Brand & Sidebar Toggle -->
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" ToolTipService.ToolTip="Toggle Sidebar">
+                    <FontIcon Glyph="&#xE8A0;" FontSize="16" />
+                </Button>
+                <Image Source="Assets/Square44x44Logo.png" Width="22" Height="22" VerticalAlignment="Center" />
+                <TextBlock Text="Marknexia" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" Margin="0,0,12,0" />
+            </StackPanel>
+
+            <!-- Navigation Controls -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <Button x:Name="BackButton" Click="Back_Click" ToolTipService.ToolTip="Back (Alt+Left)">
+                    <FontIcon Glyph="&#xE72B;" FontSize="14" />
+                </Button>
+                <Button x:Name="ForwardButton" Click="Forward_Click" ToolTipService.ToolTip="Forward (Alt+Right)">
+                    <FontIcon Glyph="&#xE72A;" FontSize="14" />
+                </Button>
+                <Button x:Name="ReloadButton" Click="Reload_Click" ToolTipService.ToolTip="Reload (F5 / Ctrl+R)">
+                    <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                </Button>
+                <AppBarSeparator />
+                <Button x:Name="OpenFileButton" Click="OpenFile_Click" ToolTipService.ToolTip="Open File (Ctrl+O)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE8E5;" FontSize="14" />
+                        <TextBlock Text="Open" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="OpenFolderButton" Click="OpenFolder_Click" ToolTipService.ToolTip="Open Folder (Ctrl+Shift+O)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xED25;" FontSize="14" />
+                        <TextBlock Text="Folder" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+
+            <!-- Right Controls: Search & Theme -->
+            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <Button x:Name="SearchToggleButton" Click="ToggleSearch_Click" ToolTipService.ToolTip="Find in Document (Ctrl+F)">
+                    <FontIcon Glyph="&#xE721;" FontSize="14" />
+                </Button>
+                <ComboBox x:Name="ThemeSelector" SelectionChanged="ThemeSelector_SelectionChanged" Width="110" VerticalAlignment="Center">
+                    <ComboBoxItem Content="System" Tag="System" IsSelected="True" />
+                    <ComboBoxItem Content="Light" Tag="Light" />
+                    <ComboBoxItem Content="Dark" Tag="Dark" />
+                </ComboBox>
+            </StackPanel>
+        </Grid>
+
+        <!-- Main Workspace: SplitView for Sidebar and Document View -->
+        <SplitView Grid.Row="1" x:Name="MainSplitView" IsPaneOpen="True" DisplayMode="Inline" OpenPaneLength="280">
+            <!-- Sidebar Pane -->
+            <SplitView.Pane>
+                <Grid Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <RadioButtons x:Name="SidebarModeSelector" SelectionChanged="SidebarMode_SelectionChanged" SelectedIndex="0" Margin="8,8,8,4">
+                        <RadioButton Content="Outline" />
+                        <RadioButton Content="Repository" />
+                    </RadioButtons>
+
+                    <!-- Outline List -->
+                    <ListView x:Name="OutlineListView" Grid.Row="1" SelectionMode="Single" ItemClick="OutlineItem_Click" IsItemClickEnabled="True" Padding="4">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Text}" Margin="{Binding Margin}" FontSize="13" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <!-- Repository File List -->
+                    <ListView x:Name="RepositoryListView" Grid.Row="1" Visibility="Collapsed" SelectionMode="Single" ItemClick="RepositoryItem_Click" IsItemClickEnabled="True" Padding="4">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="{Binding IconGlyph}" FontSize="14" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding DisplayName}" FontSize="13" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </SplitView.Pane>
+
+            <!-- Document Tabs Workspace -->
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Search Bar Floating Header -->
+                <Grid x:Name="SearchBarGrid" Grid.Row="0" Visibility="Collapsed" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="12,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="SearchInputBox" PlaceholderText="Find in document..." KeyDown="SearchBox_KeyDown" Margin="0,0,8,0" />
+                    <Button Grid.Column="1" Click="FindPrevious_Click" ToolTipService.ToolTip="Previous" Margin="0,0,4,0">
+                        <FontIcon Glyph="&#xE70E;" FontSize="12" />
+                    </Button>
+                    <Button Grid.Column="2" Click="FindNext_Click" ToolTipService.ToolTip="Next" Margin="0,0,8,0">
+                        <FontIcon Glyph="&#xE70D;" FontSize="12" />
+                    </Button>
+                    <Button Grid.Column="3" Click="CloseSearch_Click" ToolTipService.ToolTip="Close">
+                        <FontIcon Glyph="&#xE711;" FontSize="12" />
+                    </Button>
+                </Grid>
+
+                <!-- Non-blocking Diagnostic InfoBar -->
+                <InfoBar x:Name="DiagnosticInfoBar" Grid.Row="1" IsOpen="False" Severity="Warning" Margin="8,4" />
+
+                <!-- Tabs -->
+                <TabView x:Name="DocumentTabView" Grid.Row="2" TabCloseRequested="TabView_TabCloseRequested" SelectionChanged="TabView_SelectionChanged" AddTabButtonClick="TabView_AddTabButtonClick" AllowDropTabs="True" CanReorderTabs="True">
+                </TabView>
+            </Grid>
+        </SplitView>
+    </Grid>
+</Window>

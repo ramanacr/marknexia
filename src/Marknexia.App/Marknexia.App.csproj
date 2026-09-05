@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Marknexia.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppxPackage>false</AppxPackage>
+    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <VCInstallPath32>none</VCInstallPath32>
+    <VCInstallPath64>none</VCInstallPath64>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <AppxManifest Include="Package.appxmanifest" Condition="'$(WindowsPackageType)' == 'MSIX'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Marknexia.Core\Marknexia.Core.csproj" />
+    <ProjectReference Include="..\Marknexia.Files\Marknexia.Files.csproj" />
+    <ProjectReference Include="..\Marknexia.Navigation\Marknexia.Navigation.csproj" />
+    <ProjectReference Include="..\Marknexia.Markdown\Marknexia.Markdown.csproj" />
+    <ProjectReference Include="..\Marknexia.Syntax\Marknexia.Syntax.csproj" />
+    <ProjectReference Include="..\Marknexia.Diagrams\Marknexia.Diagrams.csproj" />
+    <ProjectReference Include="..\Marknexia.Security\Marknexia.Security.csproj" />
+    <ProjectReference Include="..\Marknexia.Rendering\Marknexia.Rendering.csproj" />
+    <ProjectReference Include="..\Marknexia.Infrastructure\Marknexia.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

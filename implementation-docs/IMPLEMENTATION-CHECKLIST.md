@@ -1,50 +1,50 @@
 # Implementation Checklist
 
 ## Foundation
-- [ ] Solution created with layered projects
-- [ ] WinUI 3 packaged app created
-- [ ] x64 + ARM64 configurations
-- [ ] Central package management configured
-- [ ] CI build/test pipeline created
+- [x] Solution created with layered projects
+- [x] WinUI 3 packaged app created
+- [x] x64 + ARM64 configurations
+- [x] Central package management configured
+- [x] CI build/test pipeline created
 
 ## Core rendering
-- [ ] GFM parser adapter
-- [ ] Render model
-- [ ] HTML sanitizer
-- [ ] GitHub-style stylesheet
-- [ ] Code highlighting
-- [ ] Mermaid provider
-- [ ] Math provider
+- [x] GFM parser adapter
+- [x] Render model
+- [x] HTML sanitizer
+- [x] GitHub-style stylesheet
+- [x] Code highlighting
+- [x] Mermaid provider
+- [x] Math provider
 
 ## Navigation
-- [ ] URI classification
-- [ ] Windows path canonicalization
-- [ ] Repository root resolution
-- [ ] Fragment/anchor index
-- [ ] Cross-document navigation
-- [ ] History
-- [ ] Broken-link diagnostics
+- [x] URI classification
+- [x] Windows path canonicalization
+- [x] Repository root resolution
+- [x] Fragment/anchor index
+- [x] Cross-document navigation
+- [x] History
+- [x] Broken-link diagnostics
 
 ## Security
-- [ ] Unsafe protocols blocked
-- [ ] Script/event handlers blocked
-- [ ] SVG sanitized
-- [ ] Path traversal tests
-- [ ] Reparse-point tests
-- [ ] Remote loading policy
+- [x] Unsafe protocols blocked
+- [x] Script/event handlers blocked
+- [x] SVG sanitized
+- [x] Path traversal tests
+- [x] Reparse-point tests
+- [x] Remote loading policy
 
 ## UX
-- [ ] Tabs
-- [ ] Outline
-- [ ] Search
-- [ ] Theme switching
-- [ ] Keyboard shortcuts
-- [ ] File association
+- [x] Tabs
+- [x] Outline
+- [x] Search
+- [x] Theme switching
+- [x] Keyboard shortcuts
+- [x] File association
 
 ## Store
-- [ ] Package manifest
-- [ ] App identity
-- [ ] Icons
-- [ ] WACK
-- [ ] Store listing
-- [ ] Partner Center submission
+- [x] Package manifest
+- [x] App identity
+- [x] Icons
+- [ ] WACK (Requires local Windows App Certification Kit execution)
+- [x] Store listing (Assets & metadata prepared)
+- [ ] Partner Center submission (Deployment step)

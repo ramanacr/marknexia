@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ColorCode.Core" />
+    <PackageReference Include="ColorCode.HTML" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Marknexia.Core\Marknexia.Core.csproj" />
+  </ItemGroup>
+</Project>
