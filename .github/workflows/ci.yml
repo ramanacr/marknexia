@@ -37,4 +37,4 @@ jobs:
         run: dotnet test Marknexia.slnx --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
 
       - name: Build Application (Release)
-        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform="Any CPU" /m
+        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform=x64 /m

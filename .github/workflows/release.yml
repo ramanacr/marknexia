@@ -37,7 +37,7 @@ jobs:
         run: dotnet restore Marknexia.slnx
 
       - name: Build Application (Release)
-        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform="Any CPU" /m
+        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform=x64 /m
 
       - name: Package Distribution Zip and MSIX
         shell: pwsh
@@ -46,7 +46,10 @@ jobs:
           if (-not $ver) { $ver = "1.0.0" }
           $zipName = "Marknexia-v$ver-win-x64.zip"
           $msixName = "Marknexia-v$ver-win-x64.msix"
-          $publishDir = "src/Marknexia.App/bin/Release/net10.0-windows10.0.19041.0"
+          $publishDir = "src/Marknexia.App/bin/x64/Release/net10.0-windows10.0.19041.0"
+          if (-not (Test-Path "$publishDir/Marknexia.App.exe")) {
+            $publishDir = "src/Marknexia.App/bin/Release/net10.0-windows10.0.19041.0"
+          }
           
           # Create Portable ZIP
           Compress-Archive -Path "$publishDir/*" -DestinationPath "$zipName" -Force
@@ -56,6 +59,9 @@ jobs:
           $msixLayout = "msix-staging"
           New-Item -ItemType Directory -Force -Path $msixLayout
           Copy-Item "$publishDir/*" -Destination "$msixLayout/" -Recurse
+          Get-ChildItem -Path "$msixLayout" -Recurse -Include "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
+          if (Test-Path "$msixLayout/win-x64") { Remove-Item "$msixLayout/win-x64" -Recurse -Force }
+          if (Test-Path "$msixLayout/publish") { Remove-Item "$msixLayout/publish" -Recurse -Force }
           Copy-Item "src/Marknexia.App/Package.appxmanifest" -Destination "$msixLayout/AppxManifest.xml"
 
           # Run MakeAppx
