@@ -37,9 +37,7 @@ public sealed class TemplateEngine
 
         if (hasMermaid && context.EnableDiagrams)
         {
-            sb.AppendLine("  <script>");
-            sb.AppendLine(CachedMermaidJs.Value);
-            sb.AppendLine("  </script>");
+            sb.AppendLine("  <script src=\"https://marknexia.assets/mermaid.min.js\"></script>");
         }
 
         sb.AppendLine("  <script>");
@@ -49,6 +47,29 @@ public sealed class TemplateEngine
         sb.AppendLine("</html>");
 
         return sb.ToString();
+    }
+
+    public static void EnsureAssetsExtracted(string destinationDirectory)
+    {
+        Directory.CreateDirectory(destinationDirectory);
+        string mermaidPath = Path.Combine(destinationDirectory, "mermaid.min.js");
+
+        var assembly = typeof(TemplateEngine).Assembly;
+        string? resourceName = assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith("mermaid.min.js", StringComparison.OrdinalIgnoreCase));
+
+        if (resourceName != null)
+        {
+            using Stream? stream = assembly.GetManifestResourceStream(resourceName);
+            if (stream != null)
+            {
+                if (!File.Exists(mermaidPath) || new FileInfo(mermaidPath).Length != stream.Length)
+                {
+                    using var fs = new FileStream(mermaidPath, FileMode.Create, FileAccess.Write);
+                    stream.CopyTo(fs);
+                }
+            }
+        }
     }
 
     private static string LoadEmbeddedResource(string fileName)

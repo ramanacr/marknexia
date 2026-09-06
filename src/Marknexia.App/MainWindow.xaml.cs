@@ -77,6 +77,16 @@ public sealed partial class MainWindow : Window
 
         InitializeComponent();
 
+        try
+        {
+            string cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Marknexia", "RenderCache");
+            if (Directory.Exists(cacheDir))
+            {
+                Directory.Delete(cacheDir, true);
+            }
+        }
+        catch { }
+
         ApplySavedTheme();
         RegisterKeyboardAccelerators();
 
@@ -237,7 +247,32 @@ public sealed partial class MainWindow : Window
                     CoreWebView2HostResourceAccessKind.Allow);
             }
 
-            webView.NavigateToString(rendered.HtmlContent);
+            string assetsDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Marknexia",
+                "Assets");
+            TemplateEngine.EnsureAssetsExtracted(assetsDirectory);
+
+            webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                "marknexia.assets",
+                assetsDirectory,
+                CoreWebView2HostResourceAccessKind.Allow);
+
+            if (rendered.HtmlContent.Length < 1_500_000)
+            {
+                try
+                {
+                    webView.NavigateToString(rendered.HtmlContent);
+                }
+                catch (ArgumentException)
+                {
+                    NavigateHtmlViaVirtualHost(webView, rendered.HtmlContent);
+                }
+            }
+            else
+            {
+                NavigateHtmlViaVirtualHost(webView, rendered.HtmlContent);
+            }
         }
         catch (Exception ex)
         {
@@ -261,6 +296,24 @@ public sealed partial class MainWindow : Window
                 });
             });
         }
+    }
+
+    private void NavigateHtmlViaVirtualHost(WebView2 webView, string htmlContent)
+    {
+        string cacheDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Marknexia",
+            "RenderCache");
+        Directory.CreateDirectory(cacheDir);
+        string fileId = $"{Guid.NewGuid():N}.html";
+        string filePath = Path.Combine(cacheDir, fileId);
+        File.WriteAllText(filePath, htmlContent, System.Text.Encoding.UTF8);
+
+        webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+            "marknexia.page",
+            cacheDir,
+            CoreWebView2HostResourceAccessKind.Allow);
+        webView.CoreWebView2.Navigate($"https://marknexia.page/{fileId}");
     }
 
     private void CoreWebView2_WebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)

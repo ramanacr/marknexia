@@ -2,12 +2,15 @@ param(
     [string]$PackageName = "RRCLabs.Marknexia",
     [string]$PublisherId = "CN=4BC6AFD6-49C8-46B2-A096-9AF3F2B78CB8",
     [string]$PublisherDisplayName = "RRC Labs",
-    [string]$Version = "1.0.8.0"
+    [string]$Version = "1.0.9.0"
 )
 
-$publishDir = Join-Path $PSScriptRoot "..\src\Marknexia.App\bin\Release\net10.0-windows10.0.19041.0"
-if (Test-Path (Join-Path $publishDir "win-x64\Marknexia.App.exe")) {
-    $publishDir = Join-Path $publishDir "win-x64"
+$publishDir = Join-Path $PSScriptRoot "..\src\Marknexia.App\bin\x64\Release\net10.0-windows10.0.19041.0"
+if (-not (Test-Path (Join-Path $publishDir "Marknexia.App.exe"))) {
+    $publishDir = Join-Path $PSScriptRoot "..\src\Marknexia.App\bin\Release\net10.0-windows10.0.19041.0"
+    if (Test-Path (Join-Path $publishDir "win-x64\Marknexia.App.exe")) {
+        $publishDir = Join-Path $publishDir "win-x64"
+    }
 }
 $manifestPath = Join-Path $PSScriptRoot "..\src\Marknexia.App\Package.appxmanifest"
 $outputDir = Join-Path $PSScriptRoot "..\store-submission"
@@ -20,6 +23,9 @@ Write-Host "Preparing Microsoft Store package with Publisher: $PublisherId" -For
 if (Test-Path $msixStaging) { Remove-Item $msixStaging -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $msixStaging | Out-Null
 Copy-Item "$publishDir\*" -Destination "$msixStaging\" -Recurse
+Get-ChildItem -Path $msixStaging -Recurse -Include "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
+if (Test-Path (Join-Path $msixStaging "win-x64")) { Remove-Item (Join-Path $msixStaging "win-x64") -Recurse -Force }
+if (Test-Path (Join-Path $msixStaging "publish")) { Remove-Item (Join-Path $msixStaging "publish") -Recurse -Force }
 
 # Update manifest identity
 [xml]$manifest = Get-Content $manifestPath

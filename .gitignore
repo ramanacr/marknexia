@@ -31,6 +31,7 @@ project.fragment.lock.json
 artifacts/
 release-artifacts/
 dist/
+store-submission/msix-staging/
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt
