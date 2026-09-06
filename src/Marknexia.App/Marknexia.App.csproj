@@ -11,12 +11,19 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>false</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <AppxPackage>false</AppxPackage>
     <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
     <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
     <VCInstallPath32>none</VCInstallPath32>
     <VCInstallPath64>none</VCInstallPath64>
+    <Authors>Marknexia Team</Authors>
+    <Company>Marknexia</Company>
+    <Product>Marknexia</Product>
+    <Description>Fast, native GitHub-flavored Markdown viewer with offline diagram rendering.</Description>
+    <Copyright>© 2026 Marknexia. All rights reserved.</Copyright>
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,6 +50,9 @@
 
   <ItemGroup>
     <Content Include="Assets\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Microsoft.UI.Xaml\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

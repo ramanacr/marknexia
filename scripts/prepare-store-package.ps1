@@ -1,10 +1,14 @@
 param(
-    [string]$PackageName = "Marknexia",
-    [string]$PublisherId = "CN=Marknexia",
-    [string]$PublisherDisplayName = "Marknexia"
+    [string]$PackageName = "RRCLabs.Marknexia",
+    [string]$PublisherId = "CN=4BC6AFD6-49C8-46B2-A096-9AF3F2B78CB8",
+    [string]$PublisherDisplayName = "RRC Labs",
+    [string]$Version = "1.0.8.0"
 )
 
 $publishDir = Join-Path $PSScriptRoot "..\src\Marknexia.App\bin\Release\net10.0-windows10.0.19041.0"
+if (Test-Path (Join-Path $publishDir "win-x64\Marknexia.App.exe")) {
+    $publishDir = Join-Path $publishDir "win-x64"
+}
 $manifestPath = Join-Path $PSScriptRoot "..\src\Marknexia.App\Package.appxmanifest"
 $outputDir = Join-Path $PSScriptRoot "..\store-submission"
 $msixStaging = Join-Path $outputDir "msix-staging"
@@ -25,6 +29,9 @@ $publisherNode = $manifest.SelectSingleNode("//*[local-name()='PublisherDisplayN
 if ($identityNode) {
     $identityNode.SetAttribute("Name", $PackageName)
     $identityNode.SetAttribute("Publisher", $PublisherId)
+    if ($Version) {
+        $identityNode.SetAttribute("Version", $Version)
+    }
 }
 if ($publisherNode) {
     $publisherNode.InnerText = $PublisherDisplayName

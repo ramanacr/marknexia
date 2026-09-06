@@ -25,6 +25,7 @@ public sealed class TemplateEngine
         sb.AppendLine("<head>");
         sb.AppendLine("  <meta charset=\"utf-8\" />");
         sb.AppendLine("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />");
+        sb.AppendLine("  <base href=\"https://marknexia.viewer/\" />");
         sb.AppendLine("  <style>");
         sb.AppendLine(CachedCss.Value);
         sb.AppendLine("  </style>");

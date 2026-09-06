@@ -31,10 +31,35 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<TabViewItem, DocumentTabState> _tabStates = new();
     private string? _activeRepositoryRoot;
 
+    private static CoreWebView2Environment? _sharedWebViewEnvironment;
+    private static readonly SemaphoreSlim _envLock = new(1, 1);
+
+    private static async Task<CoreWebView2Environment> GetOrCreateWebViewEnvironmentAsync()
+    {
+        if (_sharedWebViewEnvironment != null)
+        {
+            return _sharedWebViewEnvironment;
+        }
+
+        await _envLock.WaitAsync();
+        try
+        {
+            if (_sharedWebViewEnvironment == null)
+            {
+                string userDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Marknexia", "WebView2Data");
+                Directory.CreateDirectory(userDataFolder);
+                _sharedWebViewEnvironment = await CoreWebView2Environment.CreateWithOptionsAsync(null, userDataFolder, null);
+            }
+            return _sharedWebViewEnvironment;
+        }
+        finally
+        {
+            _envLock.Release();
+        }
+    }
+
     public MainWindow()
     {
-        InitializeComponent();
-
         _canonicalizer = new PathCanonicalizer();
         _fileService = new FileService(_canonicalizer);
         _repoService = new RepositoryService(_canonicalizer);
@@ -49,8 +74,42 @@ public sealed partial class MainWindow : Window
             new DiagramRegistry(),
             new TemplateEngine());
 
+
+        InitializeComponent();
+
         ApplySavedTheme();
         RegisterKeyboardAccelerators();
+
+        Closed += (sender, args) =>
+        {
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string path = Path.Combine(localAppData, "Marknexia", "crash.log");
+                File.AppendAllText(path, $"[{DateTime.Now:O}] [MainWindow_Closed]\n");
+            }
+            catch { }
+        };
+
+        // Process command-line argument after window loads
+        if (Content is FrameworkElement rootElement)
+        {
+            rootElement.Loaded += (s, e) =>
+            {
+                try
+                {
+                    string[] cmdArgs = Environment.GetCommandLineArgs();
+                    if (cmdArgs.Length > 1 && !string.IsNullOrWhiteSpace(cmdArgs[1]) && File.Exists(cmdArgs[1]))
+                    {
+                        _ = OpenDocumentInTabAsync(cmdArgs[1]);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ShowDiagnostic($"Error loading startup document: {ex.Message}", DiagnosticSeverity.Warning);
+                }
+            };
+        }
     }
 
     private void RegisterKeyboardAccelerators()
@@ -141,22 +200,49 @@ public sealed partial class MainWindow : Window
         RenderedDocument rendered = await _renderer.RenderAsync(readResult.Content, renderContext);
 
         // Create Tab & WebView2
-        var webView = new WebView2();
+        var webView = new WebView2
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            DefaultBackgroundColor = currentTheme == AppTheme.Dark
+                ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
+                : Windows.UI.Color.FromArgb(255, 255, 255, 255)
+        };
+
         var tabItemNew = new TabViewItem
         {
             Header = Path.GetFileName(canonicalPath),
-            Content = webView
+            Content = webView,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch
         };
 
         var tabState = new DocumentTabState(canonicalPath, rendered, webView);
         _tabStates[tabItemNew] = tabState;
-
-        await webView.EnsureCoreWebView2Async();
-        webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
-        webView.NavigateToString(rendered.HtmlContent);
-
         DocumentTabView.TabItems.Add(tabItemNew);
         DocumentTabView.SelectedItem = tabItemNew;
+
+        try
+        {
+            var env = await GetOrCreateWebViewEnvironmentAsync();
+            await webView.EnsureCoreWebView2Async(env);
+            webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
+
+            string? docDirectory = Path.GetDirectoryName(canonicalPath);
+            if (!string.IsNullOrEmpty(docDirectory) && Directory.Exists(docDirectory))
+            {
+                webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    "marknexia.viewer",
+                    docDirectory,
+                    CoreWebView2HostResourceAccessKind.Allow);
+            }
+
+            webView.NavigateToString(rendered.HtmlContent);
+        }
+        catch (Exception ex)
+        {
+            ShowDiagnostic($"WebView2 initialization failed:\n{ex}", DiagnosticSeverity.Error);
+        }
 
         UpdateOutlineList(rendered.Headings);
 
@@ -166,11 +252,12 @@ public sealed partial class MainWindow : Window
 
         if (!string.IsNullOrEmpty(targetAnchor))
         {
-            _ = Task.Delay(300).ContinueWith(async _ =>
+            _ = Task.Run(async () =>
             {
-                await DispatcherQueue.TryEnqueueAsync(async () =>
+                await Task.Delay(400);
+                DispatcherQueue.TryEnqueue(() =>
                 {
-                    await webView.ExecuteScriptAsync($"window.marknexiaBridge.scrollToAnchor('{targetAnchor}')");
+                    _ = webView.ExecuteScriptAsync($"window.marknexiaBridge.scrollToAnchor('{targetAnchor}')");
                 });
             });
         }
@@ -295,7 +382,7 @@ public sealed partial class MainWindow : Window
 
     private DocumentTabState? GetActiveTabState()
     {
-        if (DocumentTabView.SelectedItem is TabViewItem tab && _tabStates.TryGetValue(tab, out var state))
+        if (DocumentTabView?.SelectedItem is TabViewItem tab && _tabStates.TryGetValue(tab, out var state))
         {
             return state;
         }
@@ -401,6 +488,23 @@ public sealed partial class MainWindow : Window
             var renderContext = new RenderContext(active.FilePath, _activeRepositoryRoot, GetCurrentTheme());
             RenderedDocument rendered = await _renderer.RenderAsync(readResult.Content, renderContext);
             active.Document = rendered;
+            AppTheme currentTheme = GetCurrentTheme();
+            active.WebView.DefaultBackgroundColor = currentTheme == AppTheme.Dark
+                ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
+                : Windows.UI.Color.FromArgb(255, 255, 255, 255);
+
+            if (active.WebView.CoreWebView2 != null)
+            {
+                string? docDirectory = Path.GetDirectoryName(active.FilePath);
+                if (!string.IsNullOrEmpty(docDirectory) && Directory.Exists(docDirectory))
+                {
+                    active.WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                        "marknexia.viewer",
+                        docDirectory,
+                        CoreWebView2HostResourceAccessKind.Allow);
+                }
+            }
+
             active.WebView.NavigateToString(rendered.HtmlContent);
             UpdateOutlineList(rendered.Headings);
         }
@@ -510,6 +614,8 @@ public sealed partial class MainWindow : Window
 
     private void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_settingsService == null || ThemeSelector == null) return;
+
         if (ThemeSelector.SelectedItem is ComboBoxItem item && item.Tag is string tag)
         {
             AppTheme selectedTheme = tag switch
@@ -522,7 +628,10 @@ public sealed partial class MainWindow : Window
             _settingsService.Current.Theme = selectedTheme;
             _settingsService.Save(_settingsService.Current);
             ApplyThemeToRoot(selectedTheme);
-            Reload_Click(this, new RoutedEventArgs());
+            if (GetActiveTabState() != null)
+            {
+                Reload_Click(this, new RoutedEventArgs());
+            }
         }
     }
 
@@ -551,6 +660,14 @@ public sealed partial class MainWindow : Window
 
     private void ShowDiagnostic(string message, DiagnosticSeverity severity)
     {
+        try
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string path = Path.Combine(localAppData, "Marknexia", "crash.log");
+            File.AppendAllText(path, $"[{DateTime.Now:O}] [Diagnostic:{severity}] {message}\n");
+        }
+        catch { }
+
         DiagnosticInfoBar.Message = message;
         DiagnosticInfoBar.Severity = severity switch
         {

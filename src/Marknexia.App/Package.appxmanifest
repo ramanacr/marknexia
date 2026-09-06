@@ -6,14 +6,14 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="Marknexia"
+    Name="RRCLabs.Marknexia"
     ProcessorArchitecture="x64"
-    Publisher="CN=Marknexia"
-    Version="1.0.6.0" />
+    Publisher="CN=4BC6AFD6-49C8-46B2-A096-9AF3F2B78CB8"
+    Version="1.0.8.0" />
 
   <Properties>
     <DisplayName>Marknexia</DisplayName>
-    <PublisherDisplayName>Marknexia</PublisherDisplayName>
+    <PublisherDisplayName>RRC Labs</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>GitHub-style Markdown viewer and repository browser for Windows.</Description>
   </Properties>

@@ -140,7 +140,7 @@
                 <InfoBar x:Name="DiagnosticInfoBar" Grid.Row="1" IsOpen="False" Severity="Warning" Margin="8,4" />
 
                 <!-- Tabs -->
-                <TabView x:Name="DocumentTabView" Grid.Row="2" TabCloseRequested="TabView_TabCloseRequested" SelectionChanged="TabView_SelectionChanged" AddTabButtonClick="TabView_AddTabButtonClick" AllowDropTabs="True" CanReorderTabs="True">
+                <TabView x:Name="DocumentTabView" Grid.Row="2" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" TabCloseRequested="TabView_TabCloseRequested" SelectionChanged="TabView_SelectionChanged" AddTabButtonClick="TabView_AddTabButtonClick" AllowDropTabs="True" CanReorderTabs="True">
                 </TabView>
             </Grid>
         </SplitView>
