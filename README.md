@@ -241,6 +241,15 @@ Download the architecture-matching **`Marknexia-v<version>-win-x64.zip`** or
 **`Marknexia-v<version>-win-arm64.zip`**, extract anywhere, and launch
 `Marknexia.App.exe`.
 
+#### Option C: Windows Self-Installer
+Download the architecture-matching **`Marknexia-v<version>-win-x64-setup.exe`** or
+**`Marknexia-v<version>-win-arm64-setup.exe`**. The first-party installer is
+self-contained, installs per-user without elevation, creates the Start Menu
+shortcut and Markdown file associations, and registers a clean uninstaller.
+The installer and its SHA-256 sidecar are produced by
+[`scripts/Build-Installer.ps1`](scripts/Build-Installer.ps1). On ARM64 Windows,
+use the ARM64 installer; on x64 Windows, use the x64 installer.
+
 The local `scripts/prepare-store-package.ps1` output is unsigned and intended for package-layout verification; it is not a Store-installable release until signed and validated by the release pipeline.
 
 #### Option C: Local Developer Run

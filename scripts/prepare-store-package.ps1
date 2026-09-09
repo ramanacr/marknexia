@@ -23,7 +23,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-    throw "Package version '$Version' must have four numeric components, for example 1.0.11.0."
+    throw "Package version '$Version' must have four numeric components, for example 1.0.12.0."
 }
 
 $architecture = if ($Platform -eq "ARM64") { "arm64" } else { "x64" }

@@ -61,7 +61,7 @@ jobs:
         run: |
           $releaseVersion = "${{ github.ref_name }}".TrimStart('v')
           if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Release ref '$releaseVersion' must be a three-component semantic version such as 1.0.11."
+            throw "Release ref '$releaseVersion' must be a three-component semantic version such as 1.0.12."
           }
           $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
           ./scripts/Test-Sbom.ps1
@@ -75,7 +75,7 @@ jobs:
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
           if ($ver -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Release tag '$ver' must be a three-component semantic version such as 1.0.11."
+            throw "Release tag '$ver' must be a three-component semantic version such as 1.0.12."
           }
           $packageVersion = "$ver.0"
           $packages = @(
@@ -99,6 +99,9 @@ jobs:
             $preparedName = if ($package.Platform -eq "x64") { "Marknexia-Store-Ready.msix" } else { "Marknexia-Store-Ready-ARM64.msix" }
             Copy-Item "store-submission/$preparedName" -Destination $msixName -Force
             Get-FileHash -Path $msixName -Algorithm SHA256 | Out-File -FilePath "$msixName.sha256"
+
+            ./scripts/Build-Installer.ps1 -Configuration Release -Platform $package.Platform -Version $ver -OutputDirectory "." -NoRestore
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Upload Release Assets
@@ -109,5 +112,7 @@ jobs:
             Marknexia-*.zip.sha256
             Marknexia-*.msix
             Marknexia-*.msix.sha256
+            Marknexia-*-setup.exe
+            Marknexia-*-setup.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

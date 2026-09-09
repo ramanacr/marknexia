@@ -10,6 +10,7 @@
     <Project Path="src/Marknexia.Rendering/Marknexia.Rendering.csproj" />
     <Project Path="src/Marknexia.Infrastructure/Marknexia.Infrastructure.csproj" />
     <Project Path="src/Marknexia.App/Marknexia.App.csproj" />
+    <Project Path="src/Marknexia.Setup/Marknexia.Setup.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Marknexia.Core.Tests/Marknexia.Core.Tests.csproj" />
