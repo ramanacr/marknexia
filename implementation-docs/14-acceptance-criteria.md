@@ -5,47 +5,47 @@
 ### Markdown
 
 - [ ] A `.md` file can be opened by double-click/file association.
-- [ ] Markdown renders without network access.
-- [ ] GFM-style tables render correctly.
-- [ ] Task lists render correctly.
-- [ ] Fenced code renders with syntax highlighting.
-- [ ] Footnotes work.
-- [ ] Alerts work.
+- [x] Markdown renders without network access.
+- [x] GFM-style tables render correctly.
+- [x] Task lists render correctly.
+- [x] Fenced code renders with syntax highlighting.
+- [x] Footnotes work.
+- [x] Alerts work.
 
 ### Navigation
 
-- [ ] `#section` scrolls to a heading in the current document.
-- [ ] Duplicate heading names receive deterministic distinct IDs.
-- [ ] Custom anchors can be targeted.
-- [ ] `docs/file.md` opens the correct local document.
-- [ ] `docs/file.md#section` opens the file and scrolls to the target.
-- [ ] `../README.md` resolves relative to current file.
-- [ ] `/docs/file.md` resolves relative to repository root when repository context exists.
-- [ ] Broken file targets do not crash the app.
-- [ ] Broken anchors do not crash the app.
-- [ ] Back/forward works for cross-file and fragment navigation.
+- [x] `#section` scrolls to a heading in the current document.
+- [x] Duplicate heading names receive deterministic distinct IDs.
+- [x] Custom anchors can be targeted.
+- [x] `docs/file.md` opens the correct local document.
+- [x] `docs/file.md#section` opens the file and scrolls to the target.
+- [x] `../README.md` resolves relative to current file.
+- [x] `/docs/file.md` resolves relative to repository root when repository context exists.
+- [x] Broken file targets do not crash the app.
+- [x] Broken anchors do not crash the app.
+- [x] Back/forward works for cross-file and fragment navigation.
 
 ### Assets
 
-- [ ] Relative images resolve correctly.
-- [ ] `../` asset paths work.
-- [ ] Repository-root asset paths work in repository mode.
-- [ ] Unsupported/missing images fail gracefully.
+- [x] Relative images resolve correctly.
+- [x] `../` asset paths work.
+- [x] Repository-root asset paths work in repository mode.
+- [x] Unsupported/missing images fail gracefully.
 
 ### Diagrams and math
 
-- [ ] Mermaid renders offline.
-- [ ] Mermaid syntax errors are isolated to the diagram block.
-- [ ] Math renders offline.
-- [ ] Diagram output does not permit arbitrary script execution.
+- [x] Mermaid renders offline.
+- [x] Mermaid syntax errors are isolated to the diagram block.
+- [x] Math renders offline.
+- [x] Diagram output does not permit arbitrary script execution.
 
 ### Security
 
-- [ ] `javascript:` links are blocked.
-- [ ] Inline script is blocked.
-- [ ] Event-handler attributes are blocked.
-- [ ] Local file traversal outside authorized roots is blocked in sandboxed repository mode.
-- [ ] Remote resources do not load silently by default.
+- [x] `javascript:` links are blocked.
+- [x] Inline script is blocked.
+- [x] Event-handler attributes are blocked.
+- [x] Local file traversal outside authorized roots is blocked in sandboxed repository mode.
+- [x] Remote resources do not load silently by default.
 
 ### Windows
 
@@ -54,8 +54,8 @@
 - [ ] Markdown file associations work.
 - [ ] App launches from Start menu.
 - [ ] Release package passes WACK validation.
-- [ ] x64 package validated.
-- [ ] ARM64 package validated where supported by the build environment.
+- [x] x64 package validated.
+- [x] ARM64 package validated where supported by the build environment.
 
 ## Visual acceptance
 

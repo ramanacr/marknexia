@@ -31,6 +31,12 @@ public enum AppTheme
     Dark
 }
 
+public enum MathMode
+{
+    Inline,
+    Display
+}
+
 public enum DiagnosticSeverity
 {
     Info,
@@ -125,7 +131,12 @@ public sealed record RenderedDocument(
     IReadOnlyList<HeadingInfo> Headings,
     IReadOnlyDictionary<string, AnchorTarget> AnchorIndex,
     IReadOnlyList<string> AssetReferences,
-    IReadOnlyList<DiagnosticInfo> Diagnostics);
+    IReadOnlyList<DiagnosticInfo> Diagnostics,
+    DocumentAssetContext? AssetContext = null);
+
+public sealed record MathRenderResult(
+    string HtmlContent,
+    string AccessibleText);
 
 public sealed record FileReadResult(
     string Content,

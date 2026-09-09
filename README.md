@@ -13,14 +13,20 @@
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows" alt="Platform: Windows" />
   <img src="https://img.shields.io/badge/Framework-.NET%2010%20%7C%20WinUI%203-512BD4?logo=dotnet" alt="Framework: .NET 10" />
   <img src="https://img.shields.io/badge/Architecture-x64%20%7C%20ARM64-blue" alt="Architecture" />
-  <img src="https://img.shields.io/badge/Tests-42%20Passed%20%7C%20100%25-brightgreen" alt="Tests: 42 Passed" />
-  <img src="https://img.shields.io/badge/Offline-100%25%20CDN--Free-success" alt="Offline Ready" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License: MIT" />
 </p>
 
 ---
 
 ## Overview
+
+Implementation is feature-complete at the source/test level; final native
+WinUI/WebView2 interaction and signed-release acceptance are still in progress.
+The feature list below describes the product scope, not a completed native
+acceptance audit. See the
+[completion plan and verification checkpoints](docs/superpowers/plans/2026-09-06-marknexia-completion.md)
+for tested behavior and remaining gaps, including native interaction coverage,
+signed packaging, and production-release update validation.
 
 **Marknexia** is a high-performance, offline-first native Windows Markdown viewer and repository documentation browser. Built with **C# 13**, **.NET 10**, and **WinUI 3 (Windows App SDK)**, it faithfully reproduces GitHub-rendered Markdown semantics without cloud round-trips, web wrappers, or external CDN dependencies.
 
@@ -30,7 +36,7 @@ Engineered specifically for developers, technical architects, and engineering te
 
 ## Key Features
 
-### 1. 100% GitHub-Compatible Markdown (GFM)
+### 1. GitHub-Flavored Markdown (GFM)
 * **GitHub Alert Callouts**: Native rendering of `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` blockquotes with authentic GitHub Primer iconography, colors, and border accents.
 * **Deterministic Heading Anchors**: GitHub-identical heading slug generation (`#heading-title`, duplicate suffixing `-1`, `-2`, unicode handling, punctuation stripping).
 * **Extended GFM Extensions**: Full support for GitHub-flavored tables, task lists with checkboxes, strikethrough, autolinks, footnotes, and custom containers.
@@ -40,7 +46,9 @@ Engineered specifically for developers, technical architects, and engineering te
 * **Bundled Mermaid Runtime**: Pre-packaged Mermaid 11.4 engine executing locally in an isolated DOM boundary—zero network requests.
 * **Rich Diagram Types**: Flowcharts, Sequence Diagrams, State Diagrams, Class Diagrams, Entity Relationship (ER) diagrams, and Gantt charts.
 * **Interactive Diagram Containers**: Built-in "Copy Source" and "Toggle Source / Diagram" controls, with friendly fallback error boundaries for malformed diagram syntax.
-* **Mathematical Typesetting**: Support for LaTeX / KaTeX mathematical expressions.
+* **Mathematical Typesetting**: Common LaTeX delimiters render as local semantic HTML
+  (`<sup>`, `<sub>`, fractions, roots, and Greek/operator symbols) with no KaTeX CDN
+  or runtime dependency.
 
 ### 3. Resilient Repository Navigation Engine
 * **Intra-Document Navigation**: Instant smooth scrolling to internal heading anchors (`#anchor-name`).
@@ -55,12 +63,12 @@ Engineered specifically for developers, technical architects, and engineering te
 * **Hierarchical Outline Sidebar (`TreeView`)**: Real-time document outline automatically extracted from headings (`H1`–`H6`) for instant jumping.
 * **Repository Workspace Explorer**: Sidebar tree view of all documentation files within the opened repository or workspace folder.
 * **In-Page Search (`Ctrl+F`)**: Instant text search with match highlighting, match count indicators, and keyboard navigation (`Enter` / `Shift+Enter`).
-* **Windows Shell Integration**: Native file associations for `.md`, `.markdown`, `.mdown`, and `.mkdn`.
+* **Windows Shell Integration**: Manifest file associations for `.md`, `.markdown`, `.mdown`, and `.mkdn`, with Windows App SDK file-activation handling and command-line fallback.
 
 ### 5. Enterprise-Grade Security & Performance
 * **Sanitized DOM Execution**: Powered by `Ganss.Xss` (`HtmlSanitizer`). Proactively strips `<script>`, `javascript:` URIs, inline DOM event handlers (`onload`, `onerror`, `onclick`), `<object>`, `<embed>`, `<iframe>`, and malicious SVGs.
 * **Protocol Whitelisting**: Strict protocol restriction permitting only `file:`, `http:`, `https:`, and `mailto:`.
-* **Two-Level LRU Caching**: In-memory source cache and rendered HTML document cache keyed by SHA-256 content hashes for instant tab switching.
+* **Bounded Two-Level Caching**: In-memory source and rendered-document caches keyed by file freshness, content hash, document authority, theme, feature policy, and renderer configuration for safe tab switching.
 * **Universal Encoding Detection**: Asynchronous file reader with automatic Byte Order Mark (BOM) sniffing supporting UTF-8, UTF-16 LE/BE, and UTF-32.
 
 ---
@@ -135,7 +143,7 @@ graph TD
 | :--- | :--- | :--- |
 | `Ctrl + O` | Open file via system file picker | Global |
 | `Ctrl + Shift + O` | Open repository / folder workspace | Global |
-| `Ctrl + T` | Open new tab (default home document) | Application Shell |
+| `Ctrl + T` | Open a file picker for a new document tab | Application Shell |
 | `Ctrl + W` | Close current tab | Application Shell |
 | `Ctrl + Tab` | Switch to next tab | Application Shell |
 | `Ctrl + Shift + Tab` | Switch to previous tab | Application Shell |
@@ -146,9 +154,41 @@ graph TD
 | `Alt + Left Arrow` | Navigate back in history | Document Viewer |
 | `Alt + Right Arrow` | Navigate forward in history | Document Viewer |
 | `Ctrl + R` / `F5` | Reload current document | Document Viewer |
-| `Ctrl + K` | Quick file switcher / command palette | Application Shell |
-| `Ctrl + ,` | Open Settings | Application Shell |
-| `F11` | Toggle Fullscreen mode | Application Shell |
+
+The **File**, **View**, **Settings**, and **Help** menus expose open/close, sidebar, reload, keyboard help, About, update-check, and explicit remote-image controls. Remote images remain blocked by default; enabling the Settings toggle persists the choice and reloads the active document.
+
+## Support and Supply-Chain Transparency
+
+Marknexia includes an offline-safe branded About dialog, keyboard-oriented self-help, recent-file recovery, and drag-and-drop support for Markdown files and repository folders. The viewer itself has no runtime CDN dependency; update checks and network-image access are explicit user actions.
+
+Rendering is cancellation-aware and offloads parsing, highlighting, diagram
+transformation, math, and sanitization away from the WinUI thread. To avoid
+unbounded DOM allocation, source documents larger than 50 MiB are rejected with
+an actionable in-app diagnostic; rendered HTML is capped at 128 MiB, while
+Mermaid is capped at 64 diagrams and 1 MiB per diagram source with accessible
+source fallbacks for disabled or over-limit diagrams.
+Repository tree scans are cancellable worker operations and attach their native
+hierarchy only after the filesystem walk completes.
+
+Generate the repository SBOM after restore with:
+
+```powershell
+.\scripts\Generate-Sbom.ps1 -OutputPath artifacts/marknexia-sbom.spdx.json
+```
+
+The generator reads the application's restored `src/Marknexia.App/obj/project.assets.json`, excluding unrelated test projects. It records resolved NuGet packages (including build dependencies across restored target frameworks/RIDs), package URLs, available SHA-512 hashes, transitive dependency relationships, and the bundled Mermaid file's SHA-256. Unknown license and download-origin data stays `NOASSERTION`; this is not a complete inventory of files in the installed Windows runtime.
+
+PowerShell 7 is required. App builds generate `marknexia-sbom.spdx.json` beside the executable, and publish copies it into the publish directory. ZIP/MSIX packaging includes that file. **Help → Software components (SBOM)** displays component versions and can copy the complete SPDX JSON. Use `-ProductVersion` to identify a specific release; standalone generation otherwise uses the restored project version. Set `SOURCE_DATE_EPOCH` to a fixed Unix timestamp for byte-for-byte reproducibility; without it, generation uses the current UTC time. Each distinct document gets a content-derived namespace.
+
+Run the offline regression checks with `./scripts/Test-Sbom.ps1`. To also validate against the [official SPDX 2.3 JSON schema](https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json), supply its local path using `-SchemaPath`. Checks cover relationship integrity, project exclusion, package and bundled-file hashes, dependency edges, deterministic generation, and missing restore inputs.
+
+Self-update is implemented as an explicit stable-release flow for portable x64 and
+ARM64 builds: the menu checks trusted GitHub assets for the running architecture,
+verifies the SHA-256 sidecar, validates the required executable/assembly/PRI/SBOM
+payload, stages the ZIP with traversal/size limits, and starts a rollback-capable
+restart worker. It requires a release containing the exact architecture-specific
+package/checksum assets; signed MSIX and Store-managed update paths remain separate
+release concerns.
 
 ---
 
@@ -157,10 +197,11 @@ graph TD
 ### Prerequisites
 * **Operating System**: Windows 10 version 19041 (20H1) or later, or Windows 11.
 * **Developer SDK**: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (10.0.100 or newer).
-* **IDE / Build Tools**: Visual Studio 2022 / 2025 with the following workloads:
+* **Shell**: PowerShell 7 (`pwsh`) for build and SBOM scripts.
+* **IDE / Build Tools**: Visual Studio / Build Tools with .NET 10 support and the following components:
   * *.NET Desktop Development*
   * *Windows App SDK C# Templates*
-  * (Or Visual Studio Build Tools with MSBuild and Windows 10/11 SDK).
+  * Windows 10/11 SDK and Windows app development packaging/PRI build tasks.
 
 ### Cloning & Building
 
@@ -175,11 +216,12 @@ graph TD
    dotnet restore Marknexia.slnx
    ```
 
-3. **Build the solution**:
+3. **Build the Windows application**:
    ```powershell
-   # Using Visual Studio MSBuild (recommended for WinUI 3 App packaging)
-   & "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe" Marknexia.slnx /p:Configuration=Debug /p:Platform=x64
+   pwsh -NoProfile -File ./scripts/Build-App.ps1 -Configuration Release -Platform x64 -NoRestore
    ```
+
+   The script selects a Visual Studio MSBuild installation with PRI packaging tasks and verifies the executable, generated `Marknexia.App.pri`, and bundled SBOM. `dotnet build` alone may lack these Visual Studio tasks. Do not disable PRI generation to work around a missing toolchain: the result can build but fail at startup. Use `-Rebuild` for a clean rebuild or `-Platform ARM64` for that build target (ARM64 runtime verification requires an ARM64 Windows host).
 
 4. **Run automated unit and integration tests**:
    ```bash
@@ -190,16 +232,21 @@ graph TD
 
 #### Option A: Install via MSIX Package (Recommended)
 Download the signed package from the [Latest Release](https://github.com/ramanacr/marknexia/releases/latest):
-* **`Marknexia-v1.0.0-win-x64.msix`**
-* For developer sideloading, install `Marknexia-Dev.cer` into *Trusted Root Certification Authorities* once, then double-click the `.msix` to install.
+* **`Marknexia-v<version>-win-x64.msix`**
+* **`Marknexia-v<version>-win-arm64.msix`** on ARM64 Windows devices.
+* For developer sideloading, sign the locally generated package with a developer certificate trusted on the target machine; no development certificate is distributed in this repository.
 
 #### Option B: Portable Standalone Distribution
-Download **`Marknexia-v1.0.0-win-x64.zip`**, extract anywhere, and launch `Marknexia.App.exe`.
+Download the architecture-matching **`Marknexia-v<version>-win-x64.zip`** or
+**`Marknexia-v<version>-win-arm64.zip`**, extract anywhere, and launch
+`Marknexia.App.exe`.
+
+The local `scripts/prepare-store-package.ps1` output is unsigned and intended for package-layout verification; it is not a Store-installable release until signed and validated by the release pipeline.
 
 #### Option C: Local Developer Run
 To launch directly from the local build output:
 ```powershell
-.\src\Marknexia.App\bin\Release\net10.0-windows10.0.19041.0\Marknexia.App.exe
+.\src\Marknexia.App\bin\x64\Release\net10.0-windows10.0.19041.0\Marknexia.App.exe .\README.md
 ```
 Or open `Marknexia.slnx` in Visual Studio and press **F5**.
 
@@ -231,24 +278,26 @@ Marknexia treats local markdown files as untrusted input. Documentation from pub
 | **Dangerous Schemes** | Protocols restricted to `file:`, `http:`, `https:`, `mailto:`. Blocks `javascript:`, `data:`. | `NavigationResolver` & `HtmlSanitizer` |
 | **Malicious SVG Payloads** | Script elements inside inline `<svg>` blocks stripped. | `HtmlSanitizerService` |
 | **Path Traversal Escapes** | `PathCanonicalizer.IsWithinRoot()` validates target paths against workspace root. | `PathCanonicalizer` |
-| **Data Exfiltration** | Offline-bundled styles and scripts; zero external runtime network requests. | `MarkdownRenderer` |
+| **Data Exfiltration** | Offline-bundled styles and scripts; remote images stay blocked by default and require an explicit setting. | `MarkdownRenderer` and WebView2 resource broker |
 
 ---
 
 ## Automated Test Suite
 
-Marknexia includes comprehensive unit and integration test coverage across all subsystems:
+Run the .NET regression suite from the repository root:
 
-```text
-Passed!  - Failed: 0, Passed:  3, Skipped: 0 - Marknexia.Core.Tests.dll
-Passed!  - Failed: 0, Passed:  2, Skipped: 0 - Marknexia.Files.Tests.dll
-Passed!  - Failed: 0, Passed: 25, Skipped: 0 - Marknexia.Navigation.Tests.dll
-Passed!  - Failed: 0, Passed:  5, Skipped: 0 - Marknexia.Markdown.Tests.dll
-Passed!  - Failed: 0, Passed:  5, Skipped: 0 - Marknexia.Security.Tests.dll
-Passed!  - Failed: 0, Passed:  2, Skipped: 0 - Marknexia.Rendering.Tests.dll
--------------------------------------------------------------------------
-Total Tests: 42 Passed (100%)
+```powershell
+dotnet test Marknexia.slnx --configuration Release
 ```
+
+The [headless browser suite](tests/Marknexia.Bridge.Tests/README.md) verifies the
+actual document bridge's search, copy, diagram-source, and link behavior under
+Chromium. It runs separately from `dotnet test`; CI and release builds run both.
+
+The 2026-09-09 local checkpoint recorded **131 .NET tests** and **18 headless Chrome
+tests** passing with zero failures/skips. This does not establish complete feature
+coverage, native WebView2/WinUI behavior, signed MSIX installation, or production
+release/update readiness.
 
 ### Test Fixtures
 Located in [`test-fixtures/markdown/`](file:///d:/Practice/marknexia/test-fixtures/markdown):
@@ -261,10 +310,20 @@ Located in [`test-fixtures/markdown/`](file:///d:/Practice/marknexia/test-fixtur
 
 ## Packaging & Microsoft Store Readiness
 
-Marknexia is fully prepared for MSIX packaging and Microsoft Store submission:
-* **Package Manifest**: [`Package.appxmanifest`](file:///d:/Practice/marknexia/src/Marknexia.App/Package.appxmanifest) configured with identity `Marknexia.Marknexia`, capabilities (`runFullTrust`), and file type associations (`.md`, `.markdown`, `.mdown`, `.mkdn`).
+The current developer distribution is a self-contained portable Windows build. An unsigned Store-layout MSIX can be generated from the latest Release output with `scripts/prepare-store-package.ps1`; signing, WACK validation, and Store submission remain release-pipeline responsibilities:
+* **Package Manifest**: [`Package.appxmanifest`](file:///d:/Practice/marknexia/src/Marknexia.App/Package.appxmanifest) configured with identity `RRCLabs.Marknexia`, capabilities (`runFullTrust`), and file type associations (`.md`, `.markdown`, `.mdown`, `.mkdn`).
 * **Visual Assets**: Complete suite of square logos, wide logos, splash screens, and application icons (`16x16` through `512x512`, `.ico`) generated from the official brand assets.
 * **Store Metadata**: Marketing descriptions, feature bullets, and brand alignment documented in [`branding-docs/brand/STORE-COPY.md`](file:///d:/Practice/marknexia/branding-docs/brand/STORE-COPY.md).
+
+For reproducible local package verification, run:
+
+```powershell
+pwsh -NoProfile -File ./scripts/prepare-store-package.ps1
+pwsh -NoProfile -File ./scripts/Test-MsixPackage.ps1
+```
+
+`prepare-store-package.ps1` runs this verifier automatically. The verifier checks the package identity, selected architecture/version, required executable/PRI/SBOM payloads, and MakeAppx unpackability. It does not claim a signing certificate, Windows App Certification Kit (WACK), or Microsoft Store approval; those checks belong to the release pipeline.
+Pass `-Platform ARM64` to package the ARM64 Release output; the script writes a separate `Marknexia-Store-Ready-ARM64.msix` and verifies an `arm64` manifest identity.
 
 ---
 

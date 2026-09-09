@@ -1,0 +1,7 @@
+{
+  "name": "marknexia-bridge-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test bridge.test.mjs" },
+  "devDependencies": { "playwright": "1.63.0" }
+}

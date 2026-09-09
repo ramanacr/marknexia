@@ -9,6 +9,9 @@ public sealed class AppSettings
     public bool EnforceRepositorySandbox { get; set; } = true;
     public bool AllowExternalLinks { get; set; } = true;
     public bool AllowRemoteAssets { get; set; } = false;
+    public bool IsSidebarOpen { get; set; } = true;
+    public int SidebarMode { get; set; }
+    public string? RepositoryRoot { get; set; }
     public List<string> RecentFiles { get; set; } = new();
     public List<string> RecentFolders { get; set; } = new();
 }
@@ -40,7 +43,7 @@ public sealed class SettingsService
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json);
                 if (loaded != null)
                 {
-                    _current = loaded;
+                    _current = Normalize(loaded);
                     return _current;
                 }
             }
@@ -56,15 +59,29 @@ public sealed class SettingsService
 
     public void Save(AppSettings settings)
     {
-        _current = settings ?? new AppSettings();
+        _current = Normalize(settings ?? new AppSettings());
+        string? temporaryPath = null;
         try
         {
             string json = JsonSerializer.Serialize(_current, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_settingsFilePath, json);
+            string? directory = Path.GetDirectoryName(_settingsFilePath);
+            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+            temporaryPath = $"{_settingsFilePath}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(temporaryPath, json);
+            File.Move(temporaryPath, _settingsFilePath, overwrite: true);
         }
         catch
         {
             // Fail-soft on save error
+        }
+        finally
+        {
+            if (temporaryPath != null)
+            {
+                try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+                catch { }
+            }
         }
     }
 
@@ -90,5 +107,26 @@ public sealed class SettingsService
             _current.RecentFolders = _current.RecentFolders.Take(10).ToList();
         }
         Save(_current);
+    }
+
+    private static AppSettings Normalize(AppSettings settings)
+    {
+        if (!Enum.IsDefined(settings.Theme)) settings.Theme = AppTheme.System;
+        settings.RepositoryRoot = string.IsNullOrWhiteSpace(settings.RepositoryRoot)
+            ? null
+            : settings.RepositoryRoot.Trim();
+        settings.RecentFiles = NormalizePaths(settings.RecentFiles, 15);
+        settings.RecentFolders = NormalizePaths(settings.RecentFolders, 10);
+        return settings;
+    }
+
+    private static List<string> NormalizePaths(IEnumerable<string>? paths, int limit)
+    {
+        return (paths ?? Enumerable.Empty<string>())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
     }
 }

@@ -23,10 +23,22 @@ public sealed class FileService : IFileService
             throw new FileNotFoundException($"Document file not found: {canonicalPath}", canonicalPath);
         }
 
-        var fileInfo = new FileInfo(canonicalPath);
-        long size = fileInfo.Length;
+        await using var stream = new FileStream(
+            canonicalPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 64 * 1024,
+            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-        byte[] rawBytes = await File.ReadAllBytesAsync(canonicalPath, cancellationToken).ConfigureAwait(false);
+        long size = stream.Length;
+        if (size > LargeFileThresholdBytes)
+        {
+            throw new DocumentTooLargeException(canonicalPath, size, LargeFileThresholdBytes);
+        }
+
+        byte[] rawBytes = new byte[checked((int)size)];
+        await stream.ReadExactlyAsync(rawBytes, cancellationToken).ConfigureAwait(false);
         var (content, encodingName) = DecodeBytes(rawBytes);
         string hash = ComputeContentHash(content);
 

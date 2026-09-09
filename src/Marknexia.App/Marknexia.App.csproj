@@ -15,8 +15,8 @@
     <AppxPackage>false</AppxPackage>
     <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
-    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
-    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <EnableCoreMrtTooling>true</EnableCoreMrtTooling>
+    <AppxGeneratePriEnabled>true</AppxGeneratePriEnabled>
     <VCInstallPath32>none</VCInstallPath32>
     <VCInstallPath64>none</VCInstallPath64>
     <Authors>Marknexia Team</Authors>
@@ -52,8 +52,11 @@
     <Content Include="Assets\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="Microsoft.UI.Xaml\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
+  <Target Name="GenerateSoftwareBillOfMaterials" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="pwsh -NoProfile -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Generate-Sbom.ps1&quot; -AssetsPath &quot;$(ProjectAssetsFile)&quot; -ProductVersion &quot;$(InformationalVersion)&quot; -OutputPath &quot;$(TargetDir)marknexia-sbom.spdx.json&quot;" />
+  </Target>
+  <Target Name="PublishSoftwareBillOfMaterials" AfterTargets="Publish" DependsOnTargets="GenerateSoftwareBillOfMaterials">
+    <Copy SourceFiles="$(TargetDir)marknexia-sbom.spdx.json" DestinationFolder="$(PublishDir)" />
+  </Target>
 </Project>

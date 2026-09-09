@@ -7,6 +7,28 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="MarknexiaPageBackgroundBrush" Color="#F8FAFC" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceBrush" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceSubtleBrush" Color="#F1F5F9" />
+                    <SolidColorBrush x:Key="MarknexiaTextBrush" Color="#0F172A" />
+                    <SolidColorBrush x:Key="MarknexiaMutedTextBrush" Color="#64748B" />
+                    <SolidColorBrush x:Key="MarknexiaBorderBrush" Color="#CBD5E1" />
+                    <SolidColorBrush x:Key="MarknexiaPrimaryBrush" Color="#2563EB" />
+                    <SolidColorBrush x:Key="MarknexiaAccentBrush" Color="#06B6D4" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="MarknexiaPageBackgroundBrush" Color="#0B1220" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceBrush" Color="#111827" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceSubtleBrush" Color="#172033" />
+                    <SolidColorBrush x:Key="MarknexiaTextBrush" Color="#E2E8F0" />
+                    <SolidColorBrush x:Key="MarknexiaMutedTextBrush" Color="#94A3B8" />
+                    <SolidColorBrush x:Key="MarknexiaBorderBrush" Color="#334155" />
+                    <SolidColorBrush x:Key="MarknexiaPrimaryBrush" Color="#60A5FA" />
+                    <SolidColorBrush x:Key="MarknexiaAccentBrush" Color="#22D3EE" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

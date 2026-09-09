@@ -91,7 +91,8 @@ public sealed class RepositoryService : IRepositoryService
         {
             foreach (FileInfo file in dir.EnumerateFiles())
             {
-                if (!showHidden && (file.Attributes & FileAttributes.Hidden) != 0)
+                if ((file.Attributes & FileAttributes.ReparsePoint) != 0
+                    || (!showHidden && (file.Attributes & FileAttributes.Hidden) != 0))
                 {
                     continue;
                 }
@@ -105,7 +106,8 @@ public sealed class RepositoryService : IRepositoryService
 
             foreach (DirectoryInfo subDir in dir.EnumerateDirectories())
             {
-                if (!showHidden && (subDir.Attributes & FileAttributes.Hidden) != 0)
+                if ((subDir.Attributes & FileAttributes.ReparsePoint) != 0
+                    || (!showHidden && (subDir.Attributes & FileAttributes.Hidden) != 0))
                 {
                     continue;
                 }

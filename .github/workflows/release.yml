@@ -28,6 +28,23 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Setup Node for Browser Regression Tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/Marknexia.Bridge.Tests/package-lock.json
+
+      - name: Test Rendered Document Bridge
+        working-directory: tests/Marknexia.Bridge.Tests
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx --no-install playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+
       - name: Calculate & Sync Version
         shell: pwsh
         run: |
@@ -36,38 +53,53 @@ jobs:
       - name: Restore Dependencies
         run: dotnet restore Marknexia.slnx
 
+      - name: Run .NET Regression Suite
+        run: dotnet test Marknexia.slnx --configuration Release --no-restore --verbosity normal
+
       - name: Build Application (Release)
-        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform=x64 /m
+        shell: pwsh
+        run: |
+          $releaseVersion = "${{ github.ref_name }}".TrimStart('v')
+          if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release ref '$releaseVersion' must be a three-component semantic version such as 1.0.11."
+          }
+          $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
+          ./scripts/Test-Sbom.ps1
+          ./scripts/Build-App.ps1 -Configuration Release -Platform x64 -Version $releaseVersion -NoRestore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/Build-App.ps1 -Configuration Release -Platform ARM64 -Version $releaseVersion -NoRestore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package Distribution Zip and MSIX
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          if (-not $ver) { $ver = "1.0.0" }
-          $zipName = "Marknexia-v$ver-win-x64.zip"
-          $msixName = "Marknexia-v$ver-win-x64.msix"
-          $publishDir = "src/Marknexia.App/bin/x64/Release/net10.0-windows10.0.19041.0"
-          if (-not (Test-Path "$publishDir/Marknexia.App.exe")) {
-            $publishDir = "src/Marknexia.App/bin/Release/net10.0-windows10.0.19041.0"
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release tag '$ver' must be a three-component semantic version such as 1.0.11."
           }
-          
-          # Create Portable ZIP
-          Compress-Archive -Path "$publishDir/*" -DestinationPath "$zipName" -Force
-          Get-FileHash -Path "$zipName" -Algorithm SHA256 | Out-File -FilePath "$zipName.sha256"
+          $packageVersion = "$ver.0"
+          $packages = @(
+            [pscustomobject]@{ Platform = "x64"; AssetToken = "x64" },
+            [pscustomobject]@{ Platform = "ARM64"; AssetToken = "arm64" }
+          )
 
-          # Create MSIX Layout
-          $msixLayout = "msix-staging"
-          New-Item -ItemType Directory -Force -Path $msixLayout
-          Copy-Item "$publishDir/*" -Destination "$msixLayout/" -Recurse
-          Get-ChildItem -Path "$msixLayout" -Recurse -Include "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
-          if (Test-Path "$msixLayout/win-x64") { Remove-Item "$msixLayout/win-x64" -Recurse -Force }
-          if (Test-Path "$msixLayout/publish") { Remove-Item "$msixLayout/publish" -Recurse -Force }
-          Copy-Item "src/Marknexia.App/Package.appxmanifest" -Destination "$msixLayout/AppxManifest.xml"
+          foreach ($package in $packages) {
+            $publishDir = "src/Marknexia.App/bin/$($package.Platform)/Release/net10.0-windows10.0.19041.0"
+            if (-not (Test-Path "$publishDir/Marknexia.App.exe")) {
+              throw "Release output was not found for $($package.Platform): $publishDir"
+            }
 
-          # Run MakeAppx
-          $makeAppx = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "makeappx.exe" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1).FullName
-          & "$makeAppx" pack /d "$msixLayout" /p "$msixName" /o
-          Get-FileHash -Path "$msixName" -Algorithm SHA256 | Out-File -FilePath "$msixName.sha256"
+            $zipName = "Marknexia-v$ver-win-$($package.AssetToken).zip"
+            $msixName = "Marknexia-v$ver-win-$($package.AssetToken).msix"
+            Compress-Archive -Path "$publishDir/*" -DestinationPath $zipName -Force
+            Get-FileHash -Path $zipName -Algorithm SHA256 | Out-File -FilePath "$zipName.sha256"
+
+            ./scripts/prepare-store-package.ps1 -Platform $package.Platform -Version $packageVersion
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $preparedName = if ($package.Platform -eq "x64") { "Marknexia-Store-Ready.msix" } else { "Marknexia-Store-Ready-ARM64.msix" }
+            Copy-Item "store-submission/$preparedName" -Destination $msixName -Force
+            Get-FileHash -Path $msixName -Algorithm SHA256 | Out-File -FilePath "$msixName.sha256"
+          }
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2

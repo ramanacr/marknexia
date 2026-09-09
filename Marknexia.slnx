@@ -18,5 +18,6 @@
     <Project Path="tests/Marknexia.Markdown.Tests/Marknexia.Markdown.Tests.csproj" />
     <Project Path="tests/Marknexia.Security.Tests/Marknexia.Security.Tests.csproj" />
     <Project Path="tests/Marknexia.Rendering.Tests/Marknexia.Rendering.Tests.csproj" />
+    <Project Path="tests/Marknexia.Infrastructure.Tests/Marknexia.Infrastructure.Tests.csproj" />
   </Folder>
 </Solution>

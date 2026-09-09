@@ -68,6 +68,7 @@ public sealed class NavigationResolver : INavigationResolver
     {
         if (context == null) throw new ArgumentNullException(nameof(context));
 
+        destination = destination?.Trim();
         UriClassification classification = Classify(destination);
 
         switch (classification)
@@ -93,7 +94,7 @@ public sealed class NavigationResolver : INavigationResolver
                 return new NavigationIntent(NavigationKind.BlockedOrInvalid, null, null, null, false, "Invalid external URI.");
 
             case UriClassification.FragmentOnly:
-                string fragment = destination!.TrimStart('#');
+                string fragment = Uri.UnescapeDataString(destination![1..]);
                 string currentDocPath = _pathCanonicalizer.CanonicalizePath(context.CurrentFilePath);
                 var currentDocUri = new DocumentUri(currentDocPath, fragment);
                 return new NavigationIntent(NavigationKind.SameDocumentAnchor, currentDocUri, fragment, null, true);
@@ -115,6 +116,7 @@ public sealed class NavigationResolver : INavigationResolver
     private NavigationIntent ResolveRepositoryRootPath(string destination, ResolutionContext context)
     {
         var (pathPart, fragment) = SplitPathAndFragment(destination);
+        if (!TryDecodeLocalPath(pathPart, out pathPart)) return InvalidLocalPath(fragment);
 
         if (string.IsNullOrWhiteSpace(context.RepositoryRoot))
         {
@@ -167,6 +169,7 @@ public sealed class NavigationResolver : INavigationResolver
     private NavigationIntent ResolveRelativePath(string destination, ResolutionContext context)
     {
         var (pathPart, fragment) = SplitPathAndFragment(destination);
+        if (!TryDecodeLocalPath(pathPart, out pathPart)) return InvalidLocalPath(fragment);
 
         string currentFile = _pathCanonicalizer.CanonicalizePath(context.CurrentFilePath);
         string? baseDir = _fileService.FileExists(currentFile) ? Path.GetDirectoryName(currentFile) : currentFile;
@@ -218,6 +221,7 @@ public sealed class NavigationResolver : INavigationResolver
     private NavigationIntent ResolveAbsoluteLocalPath(string destination, ResolutionContext context)
     {
         var (pathPart, fragment) = SplitPathAndFragment(destination);
+        if (!TryDecodeLocalPath(pathPart, out pathPart)) return InvalidLocalPath(fragment);
         string canonicalTarget = _pathCanonicalizer.CanonicalizePath(pathPart);
 
         if (context.Policy.EnforceRepositorySandbox && !string.IsNullOrWhiteSpace(context.RepositoryRoot))
@@ -264,9 +268,35 @@ public sealed class NavigationResolver : INavigationResolver
         }
 
         string pathPart = destination[..hashIndex];
-        string fragment = destination[(hashIndex + 1)..];
+        string fragment = Uri.UnescapeDataString(destination[(hashIndex + 1)..]);
         return (pathPart, string.IsNullOrEmpty(fragment) ? null : fragment);
     }
+
+    private static bool TryDecodeLocalPath(string encodedPath, out string path)
+    {
+        path = encodedPath;
+        if (encodedPath.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Uri.TryCreate(encodedPath, UriKind.Absolute, out var uri) || !uri.IsFile || uri.IsUnc)
+                return false;
+            // LocalPath performs URI decoding. Do not decode it a second time:
+            // literal percent escapes can be part of a valid Windows filename.
+            path = uri.LocalPath;
+        }
+        else
+        {
+            path = Uri.UnescapeDataString(encodedPath);
+        }
+
+        // An untrusted document must not trigger SMB/UNC filesystem probes.
+        // Root containment is checked on the decoded, canonical path afterward.
+        return !path.Replace('/', '\\').StartsWith(@"\\", StringComparison.Ordinal)
+            && !path.Any(char.IsControl);
+    }
+
+    private static NavigationIntent InvalidLocalPath(string? fragment) => new(
+        NavigationKind.BlockedOrInvalid, null, fragment, null, false,
+        "Access blocked: Network file paths and invalid local paths are not supported.");
 
     private static bool HasDriveLetter(string path)
     {

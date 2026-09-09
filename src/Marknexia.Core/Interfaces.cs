@@ -44,6 +44,11 @@ public interface ISyntaxHighlighter
     string HighlightCode(string code, string? language);
 }
 
+public interface IMathRenderer
+{
+    MathRenderResult Render(string expression, MathMode mode);
+}
+
 public interface IDiagramRenderer
 {
     string DiagramType { get; }

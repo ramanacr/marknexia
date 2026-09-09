@@ -12,8 +12,6 @@ namespace Marknexia.Markdown;
 public sealed class MarkdigParserAdapter : IMarkdownParserAdapter
 {
     private readonly MarkdownPipeline _pipeline;
-    private readonly HeadingSlugGenerator _slugGenerator = new();
-
     public MarkdigParserAdapter()
     {
         _pipeline = new MarkdownPipelineBuilder()
@@ -42,7 +40,7 @@ public sealed class MarkdigParserAdapter : IMarkdownParserAdapter
                 Array.Empty<DiagnosticInfo>());
         }
 
-        _slugGenerator.Reset();
+        var slugGenerator = new HeadingSlugGenerator();
 
         MarkdownDocument document = Markdig.Markdown.Parse(markdownSource, _pipeline);
 
@@ -57,7 +55,7 @@ public sealed class MarkdigParserAdapter : IMarkdownParserAdapter
 
         foreach (Block block in document)
         {
-            InspectBlock(block, headings, customAnchors, links, images, diagrams, ref diagramCounter);
+            InspectBlock(block, headings, customAnchors, links, images, diagrams, slugGenerator, ref diagramCounter);
         }
 
         // Render AST to HTML
@@ -83,12 +81,13 @@ public sealed class MarkdigParserAdapter : IMarkdownParserAdapter
         List<string> links,
         List<string> images,
         List<DiagramBlock> diagrams,
+        HeadingSlugGenerator slugGenerator,
         ref int diagramCounter)
     {
         if (block is HeadingBlock heading)
         {
             string headingText = ExtractPlainText(heading.Inline);
-            string slugId = _slugGenerator.GenerateSlug(headingText);
+            string slugId = slugGenerator.GenerateSlug(headingText);
             heading.GetAttributes().Id = slugId;
             headings.Add(new HeadingInfo(headingText, heading.Level, slugId, heading.Line));
         }
@@ -116,7 +115,7 @@ public sealed class MarkdigParserAdapter : IMarkdownParserAdapter
         {
             foreach (Block child in container)
             {
-                InspectBlock(child, headings, customAnchors, links, images, diagrams, ref diagramCounter);
+                InspectBlock(child, headings, customAnchors, links, images, diagrams, slugGenerator, ref diagramCounter);
             }
         }
     }

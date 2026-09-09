@@ -162,4 +162,81 @@ public class NavigationResolverTests
         intent.Kind.Should().Be(NavigationKind.BlockedOrInvalid);
         intent.IsSafe.Should().BeFalse();
     }
+
+    [Theory]
+    [InlineData("docs/encoded%20name.md#caf%C3%A9", "encoded name.md", "café")]
+    [InlineData(" /docs/encoded%20name.md#custom%20anchor ", "encoded name.md", "custom anchor")]
+    [InlineData("docs/literal%2520.md#literal%2520", "literal%20.md", "literal%20")]
+    public void Resolve_EncodedLocalLink_DecodesPathAndFragmentExactlyOnce(string destination, string fileName, string fragment)
+    {
+        var context = new ResolutionContext(Path.Combine(_repoRoot, "README.md"), _repoRoot, null, new NavigationPolicy());
+
+        var intent = _resolver.Resolve(destination, context);
+
+        intent.Kind.Should().Be(NavigationKind.CrossDocumentWithAnchor);
+        intent.TargetDocument!.CanonicalPath.Should().Be(Path.Combine(_repoRoot, "docs", fileName));
+        intent.Fragment.Should().Be(fragment);
+    }
+
+    [Theory]
+    [InlineData(" #caf%C3%A9 ", "café")]
+    [InlineData("##custom", "#custom")]
+    [InlineData("#literal%2520", "literal%20")]
+    public void Resolve_Fragment_DecodesOnceAndRemovesOnlyOneDelimiter(string destination, string expected)
+    {
+        var context = new ResolutionContext(Path.Combine(_repoRoot, "README.md"), _repoRoot, null, new NavigationPolicy());
+
+        _resolver.Resolve(destination, context).Fragment.Should().Be(expected);
+    }
+
+    [Fact]
+    public void Resolve_EncodedTraversal_IsBlockedAfterDecoding()
+    {
+        var context = new ResolutionContext(Path.Combine(_repoRoot, "README.md"), _repoRoot, null, new NavigationPolicy());
+
+        var intent = _resolver.Resolve("%2e%2e/%2e%2e/secret.md", context);
+
+        intent.Kind.Should().Be(NavigationKind.BlockedOrInvalid);
+        intent.IsSafe.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Resolve_FileUri_DoesNotDoubleDecodeLiteralPercentFilename()
+    {
+        var context = new ResolutionContext(Path.Combine(_repoRoot, "README.md"), _repoRoot, null, new NavigationPolicy());
+        string file = Path.Combine(_repoRoot, "docs", "literal%20.md");
+
+        var intent = _resolver.Resolve(new Uri(file).AbsoluteUri + "#caf%C3%A9", context);
+
+        intent.Kind.Should().Be(NavigationKind.CrossDocumentWithAnchor);
+        intent.TargetDocument!.CanonicalPath.Should().Be(file);
+        intent.Fragment.Should().Be("café");
+    }
+
+    [Theory]
+    [InlineData("//server.test/share/document.md")]
+    [InlineData("%2f%2fserver.test/share/document.md")]
+    [InlineData("file://server.test/share/document.md")]
+    public void Resolve_NetworkFileLink_IsBlockedBeforeAnyFilesystemProbe(string destination)
+    {
+        // No real network filesystem access, even against a regressed resolver.
+        var files = new RecordingFileService();
+        var resolver = new NavigationResolver(_canonicalizer, files);
+        var context = new ResolutionContext(Path.Combine(_repoRoot, "README.md"), null, null, new NavigationPolicy());
+
+        var intent = resolver.Resolve(destination, context);
+
+        intent.Kind.Should().Be(NavigationKind.BlockedOrInvalid);
+        intent.IsSafe.Should().BeFalse();
+        files.CheckedPaths.Should().BeEmpty();
+    }
+
+    private sealed class RecordingFileService : IFileService
+    {
+        public List<string> CheckedPaths { get; } = new();
+        public bool FileExists(string path) { CheckedPaths.Add(path); return true; }
+        public bool DirectoryExists(string path) => throw new NotSupportedException();
+        public string ComputeContentHash(string content) => throw new NotSupportedException();
+        public Task<FileReadResult> ReadTextAsync(string path, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
 }

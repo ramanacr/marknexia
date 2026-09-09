@@ -47,6 +47,8 @@ public sealed class HtmlSanitizerService : Marknexia.Core.IHtmlSanitizer
         _sanitizer.AllowedAttributes.Add("id");
         _sanitizer.AllowedAttributes.Add("name");
         _sanitizer.AllowedAttributes.Add("aria-hidden");
+        _sanitizer.AllowedAttributes.Add("aria-label");
+        _sanitizer.AllowedAttributes.Add("role");
         _sanitizer.AllowedAttributes.Add("viewBox");
         _sanitizer.AllowedAttributes.Add("width");
         _sanitizer.AllowedAttributes.Add("height");
@@ -57,6 +59,10 @@ public sealed class HtmlSanitizerService : Marknexia.Core.IHtmlSanitizer
         _sanitizer.AllowedAttributes.Add("type");
         _sanitizer.AllowedAttributes.Add("checked");
         _sanitizer.AllowedAttributes.Add("disabled");
+        // Inert command metadata, consumed by our trusted delegated bridge.
+        // Inline event handlers remain forbidden.
+        _sanitizer.AllowedAttributes.Add("data-marknexia-action");
+        _sanitizer.AllowedAttributes.Add("data-copy-text");
 
         // URL schemes allowed
         _sanitizer.AllowedSchemes.Clear();

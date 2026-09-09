@@ -17,10 +17,10 @@ public sealed class MermaidDiagramRenderer : IDiagramRenderer
   <div class=""marknexia-diagram-toolbar"">
     <span class=""marknexia-diagram-label"">Mermaid Diagram</span>
     <div class=""marknexia-diagram-actions"">
-      <button type=""button"" class=""marknexia-btn marknexia-btn-copy"" onclick=""window.marknexiaBridge.copyText(decodeURIComponent('{uriEscaped}'))"" title=""Copy Diagram Source"">
+      <button type=""button"" class=""marknexia-btn marknexia-btn-copy"" data-marknexia-action=""copy"" data-copy-text=""{uriEscaped}"" title=""Copy Diagram Source"">
         Copy
       </button>
-      <button type=""button"" class=""marknexia-btn marknexia-btn-toggle"" onclick=""window.marknexiaBridge.toggleSource('{diagramId}')"" title=""Toggle Diagram Source"">
+      <button type=""button"" class=""marknexia-btn marknexia-btn-toggle"" data-marknexia-action=""toggle-source"" title=""Toggle Diagram Source"">
         Source
       </button>
     </div>

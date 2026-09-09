@@ -10,7 +10,7 @@
     <!-- Base Semantic Versioning -->
     <VersionMajor Condition="'$(VersionMajor)' == ''">1</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">0</VersionMinor>
-    <VersionPatch Condition="'$(VersionPatch)' == ''">2</VersionPatch>
+    <VersionPatch Condition="'$(VersionPatch)' == ''">11</VersionPatch>
     <BuildNumber Condition="'$(GITHUB_RUN_NUMBER)' != ''">$(GITHUB_RUN_NUMBER)</BuildNumber>
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
     <!-- Package and Assembly Version defaults -->
@@ -21,7 +21,7 @@
     <InformationalVersion>$(Version)</InformationalVersion>
   </PropertyGroup>
   <!-- Auto-increment versioning from git commit count -->
-  <Target Name="DetermineGitVersion" BeforeTargets="BeforeBuild;GetAssemblyVersion;GenerateNuspec" Condition="'$(BuildNumber)' == '0'">
+  <Target Name="DetermineGitVersion" BeforeTargets="BeforeBuild;GetAssemblyVersion;GenerateNuspec" Condition="'$(BuildNumber)' == '0' And '$(VersionOverride)' != 'true'">
     <Exec Command="git rev-list --count HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
     </Exec>

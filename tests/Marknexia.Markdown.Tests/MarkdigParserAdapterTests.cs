@@ -52,6 +52,38 @@ public class MarkdigParserAdapterTests
     }
 
     [Fact]
+    public void Parse_GfmTables_RendersHeaderAndCells()
+    {
+        string markdown = "| Name | Value |\n| --- | --- |\n| Marknexia | Native |";
+
+        string html = _parser.Parse(markdown).RenderedBodyHtml;
+
+        html.Should().Contain("<table>");
+        html.Should().Contain("<th>Name</th>");
+        html.Should().Contain("<td>Native</td>");
+    }
+
+    [Fact]
+    public void Parse_Footnotes_RendersReferenceAndDefinition()
+    {
+        string markdown = "A reference[^1].\n\n[^1]: Supporting detail.";
+
+        string html = _parser.Parse(markdown).RenderedBodyHtml;
+
+        html.Should().Contain("footnote");
+        html.Should().Contain("Supporting detail.");
+    }
+
+    [Fact]
+    public void Parse_FencedCode_PreservesLanguageClass()
+    {
+        string html = _parser.Parse("```csharp\nvar answer = 42;\n```").RenderedBodyHtml;
+
+        html.Should().Contain("language-csharp");
+        html.Should().Contain("var answer = 42;");
+    }
+
+    [Fact]
     public void Parse_CustomAnchors_ExtractsAnchorsFromHtml()
     {
         string markdown = "<a name=\"my-anchor\"></a>\n\nContent";

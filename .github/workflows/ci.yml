@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (x64)
+    name: Build & Test (x64 + ARM64)
     runs-on: windows-latest
 
     steps:
@@ -25,6 +25,23 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Setup Node for Browser Regression Tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/Marknexia.Bridge.Tests/package-lock.json
+
+      - name: Test Rendered Document Bridge
+        working-directory: tests/Marknexia.Bridge.Tests
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx --no-install playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+
       - name: Calculate & Sync Version
         shell: pwsh
         run: |
@@ -33,8 +50,18 @@ jobs:
       - name: Restore Dependencies
         run: dotnet restore Marknexia.slnx
 
+      - name: Verify SBOM Generator
+        shell: pwsh
+        run: ./scripts/Test-Sbom.ps1
+
       - name: Run Test Suite
         run: dotnet test Marknexia.slnx --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
 
       - name: Build Application (Release)
-        run: msbuild Marknexia.slnx /p:Configuration=Release /p:Platform=x64 /m
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
+          ./scripts/Build-App.ps1 -Configuration Release -Platform x64 -NoRestore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/Build-App.ps1 -Configuration Release -Platform ARM64 -NoRestore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
