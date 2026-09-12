@@ -30,6 +30,9 @@
     <Manifest Include="$(ApplicationManifest)" />
     <AppxManifest Include="Package.appxmanifest" Condition="'$(WindowsPackageType)' == 'MSIX'" />
   </ItemGroup>
+  <Target Name="GenerateMarkdownFileIcons" BeforeTargets="PrepareForBuild">
+    <Exec Command="pwsh -NoProfile -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Generate-MarkdownFileIcons.ps1&quot; -OutputDirectory &quot;$(MSBuildProjectDirectory)\Assets&quot;" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />

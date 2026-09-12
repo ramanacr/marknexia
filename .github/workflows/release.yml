@@ -48,7 +48,7 @@ jobs:
       - name: Calculate & Sync Version
         shell: pwsh
         run: |
-          ./scripts/set-version.ps1 -SyncManifestOnly
+          ./scripts/set-version.ps1 -Version "${{ github.ref_name }}" -SyncManifestOnly
 
       - name: Restore Dependencies
         run: dotnet restore Marknexia.slnx

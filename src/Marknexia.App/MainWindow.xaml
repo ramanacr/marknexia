@@ -55,7 +55,7 @@
                 <Button x:Name="ToggleSidebarButton" Click="ToggleSidebar_Click" ToolTipService.ToolTip="Toggle Sidebar" AutomationProperties.Name="Toggle sidebar">
                     <FontIcon Glyph="&#xE8A0;" FontSize="16" />
                 </Button>
-                <Image Source="Assets/marknexia-48.png" Width="28" Height="28" VerticalAlignment="Center" />
+                <Image x:Name="BrandIcon" Source="Assets/marknexia-48.png" Width="28" Height="28" VerticalAlignment="Center" AutomationProperties.Name="Marknexia" />
                 <StackPanel x:Name="BrandDetails" VerticalAlignment="Center" Margin="0,0,16,0">
                     <TextBlock Text="Marknexia" Foreground="{ThemeResource MarknexiaTextBrush}" FontWeight="SemiBold" FontSize="15" />
                     <TextBlock Text="Read. Explore. Understand." Foreground="{ThemeResource MarknexiaMutedTextBrush}" FontSize="10" />
@@ -74,7 +74,7 @@
                     <FontIcon Glyph="&#xE72C;" FontSize="14" />
                 </Button>
                 <AppBarSeparator />
-                <Button x:Name="OpenFileButton" Click="OpenFile_Click" ToolTipService.ToolTip="Open File (Ctrl+O)" AutomationProperties.Name="Open Markdown file">
+                <Button x:Name="OpenFileButton" Click="OpenFile_Click" AutomationProperties.Name="Open Markdown file">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE8E5;" FontSize="14" />
                         <TextBlock x:Name="OpenFileLabel" Text="Open" VerticalAlignment="Center" />
@@ -135,22 +135,20 @@
                 <Grid Background="{ThemeResource MarknexiaSurfaceSubtleBrush}" BorderBrush="{ThemeResource MarknexiaBorderBrush}" BorderThickness="0,0,1,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <RadioButtons x:Name="SidebarModeSelector" SelectionChanged="SidebarMode_SelectionChanged" SelectedIndex="0" Margin="8,8,8,4" AutomationProperties.Name="Sidebar view">
-                        <RadioButton Content="Outline" />
-                        <RadioButton Content="Repository" />
-                    </RadioButtons>
+                    <TabView x:Name="SidebarModeSelector" Grid.Row="0" SelectionChanged="SidebarMode_SelectionChanged" SelectedIndex="0" Margin="8,8,8,4" IsAddTabButtonVisible="False" TabWidthMode="Equal" Background="Transparent" BorderThickness="0" AutomationProperties.Name="Sidebar view">
+                        <TabViewItem Header="Outline" />
+                        <TabViewItem Header="Repository" />
+                    </TabView>
+
+                    <TextBlock x:Name="DocumentMapHeader" Grid.Row="1" Text="Document Map" Foreground="{ThemeResource MarknexiaMutedTextBrush}" FontSize="11" FontWeight="SemiBold" CharacterSpacing="60" Margin="16,8,16,6" />
+                    <TextBlock x:Name="RepositoryHeader" Grid.Row="1" Text="Repository" Foreground="{ThemeResource MarknexiaMutedTextBrush}" FontSize="11" FontWeight="SemiBold" CharacterSpacing="60" Margin="16,8,16,6" Visibility="Collapsed" />
 
                     <!-- Outline List -->
-                    <Grid Grid.Row="1" Margin="8,4,8,12">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="*" />
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="DOCUMENT MAP" Foreground="{ThemeResource MarknexiaMutedTextBrush}" FontSize="11" FontWeight="SemiBold" CharacterSpacing="80" Margin="8,4,8,8" />
-                        <ListView x:Name="OutlineListView" Grid.Row="1" SelectionMode="Single" ItemClick="OutlineItem_Click" IsItemClickEnabled="True" Padding="0" AutomationProperties.Name="Document outline">
+                    <ListView x:Name="OutlineListView" Grid.Row="2" Margin="8,0,8,12" SelectionMode="Single" ItemClick="OutlineItem_Click" IsItemClickEnabled="True" Padding="0" AutomationProperties.Name="Document outline">
                         <ListView.ItemTemplate>
                             <DataTemplate>
                                 <Grid Margin="{Binding Margin}">
@@ -165,11 +163,10 @@
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
-                        </ListView>
-                    </Grid>
+                    </ListView>
 
                     <!-- Hierarchical Repository Explorer -->
-                    <TreeView x:Name="RepositoryTreeView" Grid.Row="1" Visibility="Collapsed" SelectionMode="Single" ItemInvoked="RepositoryTreeView_ItemInvoked" Padding="4" AutomationProperties.Name="Repository files">
+                    <TreeView x:Name="RepositoryTreeView" Grid.Row="2" Visibility="Collapsed" SelectionMode="Single" ItemInvoked="RepositoryTreeView_ItemInvoked" Padding="4" AutomationProperties.Name="Repository files">
                         <TreeView.ItemTemplate>
                             <DataTemplate>
                                 <Grid Margin="{Binding Content.Margin}">
@@ -187,6 +184,9 @@
                             </DataTemplate>
                         </TreeView.ItemTemplate>
                     </TreeView>
+
+                    <Border x:Name="SidebarResizeHandle" Grid.RowSpan="3" Width="6" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize sidebar" AutomationProperties.Name="Resize sidebar"
+                            PointerPressed="SidebarResizeHandle_PointerPressed" PointerMoved="SidebarResizeHandle_PointerMoved" PointerReleased="SidebarResizeHandle_PointerReleased" PointerCaptureLost="SidebarResizeHandle_PointerCaptureLost" />
                 </Grid>
             </SplitView.Pane>
 

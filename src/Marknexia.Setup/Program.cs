@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -15,17 +16,25 @@ internal static class Program
     private const long MaxPayloadBytes = 512L * 1024 * 1024;
     private const string UninstallRegistryRoot = @"Software\Microsoft\Windows\CurrentVersion\Uninstall";
     private const string ClassesRegistryRoot = @"Software\Classes";
+    private const string PreviewHandlerAssociation = "{8895b1c6-b41f-4c1c-a562-0d564250836f}";
+    private const string WindowsTextPreviewHandler = "{1531d583-8375-4d3f-b5fb-d23bbd169f22}";
 
     private static readonly string[] RequiredPayloadFiles =
     [
         "Marknexia.App.exe",
         "Marknexia.App.dll",
         "Marknexia.App.pri",
+        "Assets/markdown-file.ico",
+        "Assets/MarkdownFileLogo.png",
         "marknexia-sbom.spdx.json"
     ];
 
+    [STAThread]
     public static int Main(string[] args)
     {
+        if (args.Length == 0)
+            return RunInteractive();
+
         InstallerOptions? options = null;
         try
         {
@@ -45,6 +54,32 @@ internal static class Program
                 ShowMessage(ex.Message, $"{ProductName} Setup", MessageBoxType.Error);
             return 1;
         }
+    }
+
+    internal static string DefaultInstallDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Programs",
+        ProductName);
+
+    internal static int InstallFromWizard(string directory)
+    {
+        EnsureArchitecture(CurrentArchitectureToken);
+        var options = new InstallerOptions(
+            InstallerMode.Install,
+            Silent: true,
+            Directory: directory,
+            ExpectedArchitecture: CurrentArchitectureToken,
+            Scope: "Production");
+        return Install(options);
+    }
+
+    private static int RunInteractive()
+    {
+        var application = new System.Windows.Application
+        {
+            ShutdownMode = System.Windows.ShutdownMode.OnMainWindowClose
+        };
+        return application.Run(new InstallerWindow());
     }
 
     private static int Verify(InstallerOptions options)
@@ -132,7 +167,10 @@ internal static class Program
             using RegistryKey progId = classes.CreateSubKey(programId);
             progId.SetValue(null, "Marknexia Markdown Document");
             using RegistryKey icon = progId.CreateSubKey("DefaultIcon");
-            icon.SetValue(null, $"{executable},0");
+            string markdownIcon = Path.Combine(installDirectory, "Assets", "markdown-file.ico");
+            icon.SetValue(null, $"{markdownIcon},0");
+            using RegistryKey preview = progId.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}");
+            preview.SetValue(null, WindowsTextPreviewHandler);
             using RegistryKey command = progId.CreateSubKey(@"shell\open\command");
             command.SetValue(null, $"{Quote(executable)} %1");
 
@@ -140,6 +178,7 @@ internal static class Program
             {
                 using RegistryKey extensionKey = classes.CreateSubKey(extension);
                 extensionKey.SetValue(null, programId);
+                extensionKey.SetValue("PerceivedType", "text");
             }
         }
 

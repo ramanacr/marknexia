@@ -20,7 +20,7 @@ window.marknexiaBridge = {
         viewEl.style.display = 'none';
       } else {
         srcEl.style.display = 'none';
-        viewEl.style.display = 'flex';
+        viewEl.style.display = 'block';
       }
     }
   },
@@ -240,6 +240,15 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (action === 'toggle-source') {
         const diagram = button.closest('.marknexia-mermaid');
         if (diagram) window.marknexiaBridge.toggleSource(diagram.id);
+      } else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
+        const diagram = button.closest('.marknexia-mermaid');
+        if (diagram) {
+          if (action === 'zoom-reset') resetDiagramZoom(diagram);
+          else adjustDiagramZoom(diagram, action === 'zoom-in' ? 1 : -1);
+        }
+      } else if (action === 'expand') {
+        const diagram = button.closest('.marknexia-mermaid');
+        if (diagram) toggleDiagramExpanded(diagram);
       }
       return;
     }
@@ -254,6 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Render Mermaid diagrams offline safely
+  document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);
   if (typeof mermaid !== 'undefined') {
     try {
       const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
@@ -284,6 +294,151 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 });
+
+const MIN_DIAGRAM_ZOOM = 0.25;
+const MAX_DIAGRAM_ZOOM = 4;
+const DIAGRAM_ZOOM_STEP = 0.25;
+
+function diagramState(diagram) {
+  if (!diagram._marknexiaZoomState) {
+    diagram._marknexiaZoomState = { zoom: 1, panX: 0, panY: 0, pointerId: null, lastX: 0, lastY: 0 };
+  }
+  return diagram._marknexiaZoomState;
+}
+
+function clampDiagramZoom(value) {
+  return Math.min(MAX_DIAGRAM_ZOOM, Math.max(MIN_DIAGRAM_ZOOM, value));
+}
+
+function updateDiagramZoomUi(diagram) {
+  const state = diagramState(diagram);
+  const canvas = diagram.querySelector('.marknexia-diagram-canvas');
+  const viewport = diagram.querySelector('.marknexia-diagram-viewport');
+  const status = diagram.querySelector('[data-marknexia-zoom-status]');
+  if (canvas) canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+  const percent = `${Math.round(state.zoom * 100)}%`;
+  if (status) status.textContent = percent;
+  const reset = diagram.querySelector('[data-marknexia-action="zoom-reset"]');
+  if (reset) reset.textContent = percent;
+  if (viewport) viewport.classList.toggle('is-zoomed', state.zoom !== 1 || state.panX !== 0 || state.panY !== 0);
+}
+
+function adjustDiagramZoom(diagram, direction) {
+  const state = diagramState(diagram);
+  const next = clampDiagramZoom(state.zoom + direction * DIAGRAM_ZOOM_STEP);
+  if (next === state.zoom) return;
+  state.zoom = next;
+  if (state.zoom === 1) { state.panX = 0; state.panY = 0; }
+  updateDiagramZoomUi(diagram);
+}
+
+function resetDiagramZoom(diagram) {
+  const state = diagramState(diagram);
+  state.zoom = 1;
+  state.panX = 0;
+  state.panY = 0;
+  updateDiagramZoomUi(diagram);
+}
+
+function toggleDiagramExpanded(diagram) {
+  const expanded = !diagram.classList.contains('is-expanded');
+  const viewport = diagram.querySelector('.marknexia-diagram-viewport');
+  const button = diagram.querySelector('[data-marknexia-action="expand"]');
+  const state = diagramState(diagram);
+  if (!viewport || !button) return;
+
+  if (expanded) {
+    document.querySelectorAll('.marknexia-mermaid.is-expanded').forEach(other => {
+      if (other !== diagram) toggleDiagramExpanded(other);
+    });
+    state.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+
+  diagram.classList.toggle('is-expanded', expanded);
+  document.documentElement.classList.toggle('marknexia-diagram-expanded', expanded);
+  if (expanded) {
+    viewport.setAttribute('aria-modal', 'true');
+    viewport.setAttribute('aria-label', 'Expanded Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');
+    button.textContent = '×';
+    button.setAttribute('aria-label', 'Close diagram full window');
+    button.title = 'Close full-window diagram';
+    viewport.focus();
+  } else {
+    viewport.removeAttribute('aria-modal');
+    viewport.setAttribute('aria-label', 'Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');
+    button.textContent = '⛶';
+    button.setAttribute('aria-label', 'Open diagram full window');
+    button.title = 'Open full-window diagram';
+    if (state.previousFocus instanceof HTMLElement) state.previousFocus.focus();
+    state.previousFocus = null;
+  }
+}
+
+function installDiagramInteractions(diagram) {
+  if (diagram.dataset.marknexiaZoomReady === 'true') return;
+  diagram.dataset.marknexiaZoomReady = 'true';
+  const viewport = diagram.querySelector('.marknexia-diagram-viewport');
+  if (!viewport) return;
+  viewport.tabIndex = 0;
+  viewport.setAttribute('role', 'application');
+  viewport.setAttribute('aria-label', 'Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');
+  updateDiagramZoomUi(diagram);
+
+  viewport.addEventListener('wheel', event => {
+    event.preventDefault();
+    const state = diagramState(diagram);
+    const oldZoom = state.zoom;
+    const nextZoom = clampDiagramZoom(oldZoom + (event.deltaY < 0 ? DIAGRAM_ZOOM_STEP : -DIAGRAM_ZOOM_STEP));
+    if (nextZoom === oldZoom) return;
+    const bounds = viewport.getBoundingClientRect();
+    const anchorX = event.clientX - bounds.left - state.panX;
+    const anchorY = event.clientY - bounds.top - state.panY;
+    const ratio = nextZoom / oldZoom;
+    state.panX -= anchorX * (ratio - 1);
+    state.panY -= anchorY * (ratio - 1);
+    state.zoom = nextZoom;
+    updateDiagramZoomUi(diagram);
+  }, { passive: false });
+
+  viewport.addEventListener('pointerdown', event => {
+    const state = diagramState(diagram);
+    if (state.zoom === 1 || (event.button !== 0 && event.button !== 1)) return;
+    state.pointerId = event.pointerId;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add('is-panning');
+  });
+  viewport.addEventListener('pointermove', event => {
+    const state = diagramState(diagram);
+    if (state.pointerId !== event.pointerId) return;
+    state.panX += event.clientX - state.lastX;
+    state.panY += event.clientY - state.lastY;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    updateDiagramZoomUi(diagram);
+  });
+  const stopPanning = event => {
+    const state = diagramState(diagram);
+    if (state.pointerId !== event.pointerId) return;
+    state.pointerId = null;
+    viewport.classList.remove('is-panning');
+    if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+  };
+  viewport.addEventListener('pointerup', stopPanning);
+  viewport.addEventListener('pointercancel', stopPanning);
+  viewport.addEventListener('keydown', event => {
+    if (event.key === '+' || event.key === '=') { event.preventDefault(); adjustDiagramZoom(diagram, 1); }
+    else if (event.key === '-' || event.key === '_') { event.preventDefault(); adjustDiagramZoom(diagram, -1); }
+    else if (event.key === '0') { event.preventDefault(); resetDiagramZoom(diagram); }
+  });
+  diagram.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && diagram.classList.contains('is-expanded')) {
+      event.preventDefault();
+      toggleDiagramExpanded(diagram);
+    }
+  });
+}
 
 function showDiagramError(id, err) {
   const errorEl = document.getElementById(id + '-error');

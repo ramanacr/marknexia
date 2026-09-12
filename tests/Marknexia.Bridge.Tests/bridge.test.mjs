@@ -184,6 +184,47 @@ test('source toggle changes only its enclosing diagram and invalidates search', 
   });
 });
 
+test('Mermaid diagrams expose bounded zoom controls and pointer zoom/pan', async () => {
+  const diagram = `<div class="marknexia-mermaid" id="diagram">
+    <div class="marknexia-diagram-toolbar">
+      <div class="marknexia-diagram-actions">
+        <button data-marknexia-action="zoom-out" aria-label="Zoom out">−</button>
+        <button data-marknexia-action="zoom-reset" aria-label="Reset diagram zoom">100%</button>
+        <button data-marknexia-action="zoom-in" aria-label="Zoom in">+</button>
+        <button data-marknexia-action="expand" aria-label="Open diagram full window">⛶</button>
+      </div>
+      <span data-marknexia-zoom-status aria-live="polite">100%</span>
+    </div>
+    <div id="diagram-viewport" class="marknexia-diagram-viewport">
+      <div class="marknexia-diagram-canvas"><svg id="diagram-svg" width="240" height="120"><rect width="240" height="120"></rect></svg></div>
+    </div>
+  </div>`;
+  await withDocument(`<style>${documentCss}
+    .marknexia-diagram-viewport { width: 360px; height: 200px; }
+    .marknexia-diagram-canvas { width: 240px; height: 120px; }
+  </style>${diagram}`, async page => {
+    const status = page.locator('[data-marknexia-zoom-status]');
+    assert.equal(await status.textContent(), '100%');
+    assert.equal(await page.locator('#diagram-viewport').evaluate(element => getComputedStyle(element).overflow), 'auto');
+    await page.getByRole('button', {name:'Zoom in'}).click();
+    assert.equal(await status.textContent(), '125%');
+    assert.match(await page.locator('.marknexia-diagram-canvas').getAttribute('style'), /scale\(1\.25\)/);
+    await page.locator('#diagram-viewport').dispatchEvent('wheel', {deltaY:-120, clientX:180, clientY:100});
+    assert.equal(await status.textContent(), '150%');
+    await page.getByRole('button', {name:'Reset diagram zoom'}).click();
+    assert.equal(await status.textContent(), '100%');
+    assert.match(await page.locator('#diagram-viewport').getAttribute('aria-label'), /zoom/i);
+    const expand = page.getByRole('button', {name:'Open diagram full window'});
+    await expand.click();
+    assert.equal(await page.locator('#diagram').evaluate(element => element.classList.contains('is-expanded')), true);
+    assert.equal(await page.locator('html').evaluate(element => element.classList.contains('marknexia-diagram-expanded')), true);
+    assert.equal(await page.locator('#diagram-viewport').getAttribute('aria-modal'), 'true');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#diagram').evaluate(element => element.classList.contains('is-expanded')), false);
+    assert.equal(await page.getByRole('button', {name:'Open diagram full window'}).evaluate(element => element === document.activeElement), true);
+  });
+});
+
 test('link click preserves relative destination and delegates navigation to host', async () => {
   await withDocument('<a href="../docs/a%20b.md#heading"><strong>Open document</strong></a>', async page => {
     const url = page.url();

@@ -17,6 +17,7 @@ $nodePatch = $propsXml.SelectSingleNode("//VersionPatch")
 $major = if ($nodeMajor) { [int]$nodeMajor.InnerText } else { 1 }
 $minor = if ($nodeMinor) { [int]$nodeMinor.InnerText } else { 0 }
 $patch = if ($nodePatch) { [int]$nodePatch.InnerText } else { 0 }
+$hasExplicitVersion = -not [string]::IsNullOrWhiteSpace($Version)
 
 if ($BumpMajor) {
     $major++
@@ -48,7 +49,7 @@ if (-not $SyncManifestOnly) {
 # Sync Package.appxmanifest
 if (Test-Path $manifestPath) {
     $manifestContent = Get-Content $manifestPath -Raw
-    $appxVersion = "$major.$minor.$commitCount.0"
+    $appxVersion = if ($hasExplicitVersion) { "$major.$minor.$patch.0" } else { "$major.$minor.$commitCount.0" }
     $manifestContent = [System.Text.RegularExpressions.Regex]::Replace(
         $manifestContent,
         '(<Identity[^>]*Version=")[^"]*(")',

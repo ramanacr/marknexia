@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using System.Reflection;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Windows.Foundation.Collections;
 using Windows.Storage;
 using Windows.Storage.Pickers;
@@ -10,6 +11,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
 using Microsoft.Web.WebView2.Core;
 using Marknexia.Core;
 using Marknexia.Diagrams;
@@ -25,7 +27,9 @@ namespace Marknexia.App;
 
 public sealed partial class MainWindow : Window
 {
-    private const string RendererConfigurationVersion = "2026-09-09-render-v3";
+    private const string RendererConfigurationVersion = "2026-09-12-render-v4";
+    private const double MinimumSidebarWidth = 220;
+    private const double MaximumSidebarWidth = 520;
     private readonly string? _startupFilePath;
     private readonly IPathCanonicalizer _canonicalizer;
     private readonly IFileService _fileService;
@@ -43,6 +47,7 @@ public sealed partial class MainWindow : Window
     private bool _isInitializing = true;
     private bool _hasProcessedStartup;
     private bool _isSynchronizingTabs;
+    private bool _isResizingSidebar;
 
     private static CoreWebView2Environment? _sharedWebViewEnvironment;
     private static readonly SemaphoreSlim _envLock = new(1, 1);
@@ -92,13 +97,17 @@ public sealed partial class MainWindow : Window
 
         InitializeComponent();
 
+        ConfigureWindowIcon();
         ApplySavedTheme();
         MainSplitView.IsPaneOpen = _settingsService.Current.IsSidebarOpen;
+        MainSplitView.OpenPaneLength = Math.Clamp(_settingsService.Current.SidebarWidth, MinimumSidebarWidth, MaximumSidebarWidth);
         SidebarModeSelector.SelectedIndex = Math.Clamp(_settingsService.Current.SidebarMode, 0, 1);
         RegisterKeyboardAccelerators();
         RefreshRecentFiles();
         RemoteAssetsMenuItem.IsChecked = _settingsService.Current.AllowRemoteAssets;
         _isInitializing = false;
+        ApplySidebarModeVisuals();
+        UpdateStartPageAffordance();
 
         Closed += (sender, args) =>
         {
@@ -261,6 +270,33 @@ public sealed partial class MainWindow : Window
         {
             LoadingOverlay.Visibility = Visibility.Collapsed;
         }
+    }
+
+    private void ConfigureWindowIcon()
+    {
+        try
+        {
+            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WindowId windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
+            AppWindow appWindow = AppWindow.GetFromWindowId(windowId);
+            string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico");
+            if (File.Exists(iconPath)) appWindow.SetIcon(iconPath);
+        }
+        catch (Exception ex)
+        {
+            LogNonFatal("WindowIcon", ex);
+        }
+    }
+
+    private static void LogNonFatal(string tag, Exception ex)
+    {
+        try
+        {
+            string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Marknexia");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "diagnostics.log"), $"[{DateTime.Now:O}] [{tag}] {ex}\n");
+        }
+        catch { }
     }
 
     private async Task InitializeAfterLoadAsync()
@@ -999,6 +1035,16 @@ public sealed partial class MainWindow : Window
             WelcomePanel.Visibility = Visibility.Visible;
             UpdateButtonStates();
         }
+
+        UpdateStartPageAffordance();
+    }
+
+    private void UpdateStartPageAffordance()
+    {
+        bool isStartPage = GetActiveTabState() is null;
+        ToolTipService.SetToolTip(
+            OpenFileButton,
+            isStartPage ? "Open File (Ctrl+O)" : null);
     }
 
     private async void OpenFile_Click(object sender, RoutedEventArgs e)
@@ -1194,24 +1240,75 @@ public sealed partial class MainWindow : Window
         _settingsService.Save(_settingsService.Current);
     }
 
+    private void SidebarResizeHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!MainSplitView.IsPaneOpen) return;
+        _isResizingSidebar = true;
+        SidebarResizeHandle.CapturePointer(e.Pointer);
+        UpdateSidebarWidth(e);
+        e.Handled = true;
+    }
+
+    private void SidebarResizeHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isResizingSidebar) return;
+        UpdateSidebarWidth(e);
+        e.Handled = true;
+    }
+
+    private void SidebarResizeHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isResizingSidebar) return;
+        UpdateSidebarWidth(e);
+        StopSidebarResize();
+        e.Handled = true;
+    }
+
+    private void SidebarResizeHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => StopSidebarResize();
+
+    private void UpdateSidebarWidth(PointerRoutedEventArgs e)
+    {
+        Point point = e.GetCurrentPoint(MainSplitView).Position;
+        MainSplitView.OpenPaneLength = Math.Clamp(point.X, MinimumSidebarWidth, MaximumSidebarWidth);
+    }
+
+    private void StopSidebarResize()
+    {
+        if (!_isResizingSidebar) return;
+        _isResizingSidebar = false;
+        SidebarResizeHandle.ReleasePointerCaptures();
+        _settingsService.Current.SidebarWidth = MainSplitView.OpenPaneLength;
+        _settingsService.Save(_settingsService.Current);
+    }
+
     private void SidebarMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_isInitializing) return;
-        if (SidebarModeSelector.SelectedIndex == 0)
-        {
-            OutlineListView.Visibility = Visibility.Visible;
-        RepositoryTreeView.Visibility = Visibility.Collapsed;
-        }
-        else
-        {
-            OutlineListView.Visibility = Visibility.Collapsed;
-            RepositoryTreeView.Visibility = Visibility.Visible;
-        }
+        if (SidebarModeSelector.SelectedIndex < 0) return;
+        ApplySidebarModeVisuals();
 
         if (_settingsService != null)
         {
             _settingsService.Current.SidebarMode = SidebarModeSelector.SelectedIndex;
             _settingsService.Save(_settingsService.Current);
+        }
+    }
+
+    private void ApplySidebarModeVisuals()
+    {
+        if (SidebarModeSelector.SelectedIndex == 0)
+        {
+            OutlineListView.Visibility = Visibility.Visible;
+            RepositoryTreeView.Visibility = Visibility.Collapsed;
+            DocumentMapHeader.Visibility = Visibility.Visible;
+            RepositoryHeader.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            OutlineListView.Visibility = Visibility.Collapsed;
+            RepositoryTreeView.Visibility = Visibility.Visible;
+            DocumentMapHeader.Visibility = Visibility.Collapsed;
+            RepositoryHeader.Visibility = Visibility.Visible;
         }
     }
 

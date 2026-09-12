@@ -38,9 +38,12 @@ if ($StaticOnly) {
 $extensionKeys = @(".md", ".markdown", ".mdown", ".mkdn")
 
 function Invoke-Installer([string[]]$Arguments) {
-    $process = Start-Process -FilePath $installer -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
+    $outputPath = Join-Path $testRoot "installer.stdout.log"
+    $errorPath = Join-Path $testRoot "installer.stderr.log"
+    $process = Start-Process -FilePath $installer -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
     if ($process.ExitCode -ne 0) {
-        throw "Installer command failed with exit code $($process.ExitCode): $($Arguments -join ' ')"
+        $details = @((Get-Content -LiteralPath $outputPath -Raw -ErrorAction SilentlyContinue), (Get-Content -LiteralPath $errorPath -Raw -ErrorAction SilentlyContinue)) -join "`n"
+        throw "Installer command failed with exit code $($process.ExitCode): $($Arguments -join ' ')`n$details"
     }
 }
 
@@ -57,7 +60,7 @@ try {
     Invoke-Installer @("--verify", "--architecture", $ExpectedArchitecture)
 
     Invoke-Installer @("--install", "--silent", "--scope", $scope, "--dir", $installDirectory)
-    foreach ($requiredFile in @("Marknexia.App.exe", "marknexia-sbom.spdx.json", "MarknexiaSetup.exe")) {
+    foreach ($requiredFile in @("Marknexia.App.exe", "marknexia-sbom.spdx.json", "MarknexiaSetup.exe", "Assets\markdown-file.ico", "Assets\MarkdownFileLogo.png")) {
         if (-not (Test-Path (Join-Path $installDirectory $requiredFile) -PathType Leaf)) {
             throw "Installer did not deploy required file: $requiredFile"
         }
@@ -73,6 +76,19 @@ try {
         if (-not (Test-Path $extensionPath) -or (Get-ItemProperty -LiteralPath $extensionPath).'(default)' -ne $programId) {
             throw "Installer did not register the $extension file association."
         }
+    }
+    if (Get-ChildItem -LiteralPath $installDirectory -Filter "*.pdb" -File -Recurse -ErrorAction SilentlyContinue) {
+        throw "Installer payload contains debug symbols (*.pdb)."
+    }
+    $programKey = "Registry::HKEY_CURRENT_USER\Software\Classes\$programId"
+    $registeredIcon = (Get-ItemProperty -LiteralPath "$programKey\DefaultIcon").'(default)'
+    $expectedIcon = "$(Join-Path $installDirectory 'Assets\markdown-file.ico'),0"
+    if ($registeredIcon -ne $expectedIcon) {
+        throw "Installer did not register the distinct Markdown file icon. Expected '$expectedIcon', got '$registeredIcon'."
+    }
+    $previewHandler = (Get-ItemProperty -LiteralPath "$programKey\ShellEx\{8895b1c6-b41f-4c1c-a562-0d564250836f}").'(default)'
+    if ($previewHandler -ne '{1531d583-8375-4d3f-b5fb-d23bbd169f22}') {
+        throw "Installer did not register the Windows text preview handler for Markdown files."
     }
 
     Invoke-Installer @("--uninstall", "--silent", "--scope", $scope, "--dir", $installDirectory)

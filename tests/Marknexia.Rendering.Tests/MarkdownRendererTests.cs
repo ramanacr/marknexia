@@ -42,6 +42,11 @@ public class MarkdownRendererTests
             copy.Should().NotBeNull();
             Uri.UnescapeDataString(copy!.GetAttribute("data-copy-text") ?? "").Should().Be(diagram.QuerySelector(".mermaid")!.TextContent);
             diagram.QuerySelector("button[data-marknexia-action='toggle-source']").Should().NotBeNull();
+            diagram.QuerySelector("button[data-marknexia-action='zoom-out']").Should().NotBeNull();
+            diagram.QuerySelector("button[data-marknexia-action='zoom-reset']").Should().NotBeNull();
+            diagram.QuerySelector("button[data-marknexia-action='zoom-in']").Should().NotBeNull();
+            diagram.QuerySelector("button[data-marknexia-action='expand']").Should().NotBeNull();
+            diagram.QuerySelector("[data-marknexia-zoom-status]").Should().NotBeNull();
             diagram.QuerySelectorAll("[onclick]").Should().BeEmpty();
         }
     }

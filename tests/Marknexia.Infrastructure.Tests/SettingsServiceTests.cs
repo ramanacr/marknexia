@@ -17,6 +17,8 @@ public sealed class SettingsServiceTests : IDisposable
         var service = new SettingsService(path);
         service.Current.Theme = AppTheme.Dark;
         service.Current.IsSidebarOpen = false;
+        service.Current.SidebarWidth = 360;
+        service.Current.SidebarWidth = 360;
         service.Current.SidebarMode = 1;
         service.Current.AllowRemoteAssets = true;
         service.Current.RepositoryRoot = "C:\\workspace";
@@ -27,6 +29,8 @@ public sealed class SettingsServiceTests : IDisposable
 
         reloaded.Current.Theme.Should().Be(AppTheme.Dark);
         reloaded.Current.IsSidebarOpen.Should().BeFalse();
+        reloaded.Current.SidebarWidth.Should().Be(360);
+        reloaded.Current.SidebarWidth.Should().Be(360);
         reloaded.Current.SidebarMode.Should().Be(1);
         reloaded.Current.AllowRemoteAssets.Should().BeTrue();
         reloaded.Current.RepositoryRoot.Should().Be("C:\\workspace");

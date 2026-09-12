@@ -9,6 +9,12 @@ namespace Marknexia.App;
 
 public sealed partial class MainWindow
 {
+    private static readonly HttpClient RemoteImageHttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(15)
+    };
+    private static readonly RemoteImageReader RemoteImageReader = new(RemoteImageHttpClient);
+
     private static void AddResourceFilters(CoreWebView2 core)
     {
         // One brokered policy covers document images, navigation, and any
@@ -89,12 +95,19 @@ public sealed partial class MainWindow
         }
 
         if (args.ResourceContext == CoreWebView2WebResourceContext.Image
-            && (requestUri.Scheme.Equals("data", StringComparison.OrdinalIgnoreCase)
-                || (IsRemoteHttp(requestUri) && _settingsService.Current.AllowRemoteAssets)))
+            && requestUri.Scheme.Equals("data", StringComparison.OrdinalIgnoreCase))
         {
-            // CSP and sanitization constrain data images; explicit settings are
-            // required for network images. Leaving Response unset continues the
-            // browser request under those policies.
+            // CSP and sanitization constrain data images.
+            return;
+        }
+
+        if (args.ResourceContext == CoreWebView2WebResourceContext.Image
+            && IsRemoteHttp(requestUri)
+            && _settingsService.Current.AllowRemoteAssets)
+        {
+            // Broker network images explicitly so the setting also works for
+            // mixed-content documents and WebView2 request interception.
+            args.Response = CreateResponse(core, await RemoteImageReader.ReadAsync(requestUri));
             return;
         }
 

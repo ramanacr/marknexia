@@ -11,6 +11,7 @@ public sealed class AppSettings
     public bool AllowRemoteAssets { get; set; } = false;
     public bool IsSidebarOpen { get; set; } = true;
     public int SidebarMode { get; set; }
+    public double SidebarWidth { get; set; } = 280;
     public string? RepositoryRoot { get; set; }
     public List<string> RecentFiles { get; set; } = new();
     public List<string> RecentFolders { get; set; } = new();
@@ -115,6 +116,7 @@ public sealed class SettingsService
         settings.RepositoryRoot = string.IsNullOrWhiteSpace(settings.RepositoryRoot)
             ? null
             : settings.RepositoryRoot.Trim();
+        settings.SidebarWidth = Math.Clamp(settings.SidebarWidth, 220, 520);
         settings.RecentFiles = NormalizePaths(settings.RecentFiles, 15);
         settings.RecentFolders = NormalizePaths(settings.RecentFolders, 10);
         return settings;

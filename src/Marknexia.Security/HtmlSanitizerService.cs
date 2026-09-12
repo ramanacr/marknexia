@@ -63,6 +63,8 @@ public sealed class HtmlSanitizerService : Marknexia.Core.IHtmlSanitizer
         // Inline event handlers remain forbidden.
         _sanitizer.AllowedAttributes.Add("data-marknexia-action");
         _sanitizer.AllowedAttributes.Add("data-copy-text");
+        _sanitizer.AllowedAttributes.Add("data-marknexia-zoom-status");
+        _sanitizer.AllowedAttributes.Add("aria-live");
 
         // URL schemes allowed
         _sanitizer.AllowedSchemes.Clear();

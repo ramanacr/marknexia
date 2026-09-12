@@ -40,12 +40,20 @@ foreach ($requiredFile in @("Marknexia.App.dll", "Marknexia.App.pri", "marknexia
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "marknexia-setup-$([Guid]::NewGuid().ToString('N'))"
 $payloadPath = Join-Path $temporaryRoot "payload.zip"
+$payloadSource = Join-Path $temporaryRoot "payload-source"
 $publishDirectory = Join-Path $temporaryRoot "publish"
 $installerPath = Join-Path $outputRoot "Marknexia-v$Version-win-$assetToken-setup.exe"
 try {
     New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
-    Compress-Archive -Path (Join-Path $appOutput "*") -DestinationPath $payloadPath -CompressionLevel Optimal
+    New-Item -ItemType Directory -Path $payloadSource -Force | Out-Null
+    Get-ChildItem -LiteralPath $appOutput -File -Recurse | Where-Object Extension -ne ".pdb" | ForEach-Object {
+        $relativePath = $_.FullName.Substring($appOutput.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $destination = Join-Path $payloadSource $relativePath
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+    }
+    Compress-Archive -Path (Join-Path $payloadSource "*") -DestinationPath $payloadPath -CompressionLevel Optimal
 
     $versionParts = $Version.Split('.')
     $publishArgs = @(
