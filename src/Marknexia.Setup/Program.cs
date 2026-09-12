@@ -268,20 +268,23 @@ internal static class Program
             {
                 foreach (string extension in markdownExtensions)
                 {
-                    using RegistryKey? extensionKey = classes.OpenSubKey(extension, writable: true);
-                    if (extensionKey != null)
+                    using (RegistryKey? extensionKey = classes.OpenSubKey(extension, writable: true))
                     {
-                        if (string.Equals(extensionKey.GetValue(null) as string, programId, StringComparison.Ordinal))
+                        if (extensionKey != null)
                         {
-                            extensionKey.DeleteValue(string.Empty, throwOnMissingValue: false);
-                        }
-                        using (RegistryKey? openWith = extensionKey.OpenSubKey("OpenWithProgids", writable: true))
-                        {
-                            openWith?.DeleteValue(programId, throwOnMissingValue: false);
-                        }
-                        using (RegistryKey? openWithList = extensionKey.OpenSubKey("OpenWithList", writable: true))
-                        {
-                            openWithList?.DeleteSubKey("Marknexia.App.exe", throwOnMissingSubKey: false);
+                            if (string.Equals(extensionKey.GetValue(null) as string, programId, StringComparison.Ordinal))
+                            {
+                                classes.DeleteSubKeyTree(extension, throwOnMissingSubKey: false);
+                                continue;
+                            }
+                            using (RegistryKey? openWith = extensionKey.OpenSubKey("OpenWithProgids", writable: true))
+                            {
+                                openWith?.DeleteValue(programId, throwOnMissingValue: false);
+                            }
+                            using (RegistryKey? openWithList = extensionKey.OpenSubKey("OpenWithList", writable: true))
+                            {
+                                openWithList?.DeleteSubKey("Marknexia.App.exe", throwOnMissingSubKey: false);
+                            }
                         }
                     }
                 }
