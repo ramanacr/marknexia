@@ -162,26 +162,71 @@ internal static class Program
     {
         string executable = Path.Combine(installDirectory, "Marknexia.App.exe");
         string programId = GetProgramId(options);
+        string fileArgument = Quote("%1");
+        string markdownIcon = Path.Combine(installDirectory, "Assets", "markdown-file.ico");
+        string[] markdownExtensions = [".md", ".markdown", ".mdown", ".mkdn"];
+
         using (RegistryKey classes = Registry.CurrentUser.CreateSubKey(ClassesRegistryRoot) ?? throw new InvalidOperationException("Could not open per-user shell registration."))
         {
-            using RegistryKey progId = classes.CreateSubKey(programId);
-            progId.SetValue(null, "Marknexia Markdown Document");
-            using RegistryKey icon = progId.CreateSubKey("DefaultIcon");
-            string markdownIcon = Path.Combine(installDirectory, "Assets", "markdown-file.ico");
-            icon.SetValue(null, $"{markdownIcon},0");
-            using RegistryKey preview = progId.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}");
-            preview.SetValue(null, WindowsTextPreviewHandler);
-            using RegistryKey command = progId.CreateSubKey(@"shell\open\command");
-            string fileArgument = Quote("%1");
-            command.SetValue(null, $"{Quote(executable)} {fileArgument}");
+            using (RegistryKey progId = classes.CreateSubKey(programId))
+            {
+                progId.SetValue(null, "Marknexia Markdown Document");
+                progId.SetValue("FriendlyTypeName", "Marknexia Markdown Document");
+                using (RegistryKey progShell = progId.CreateSubKey("shell"))
+                {
+                    progShell.SetValue(null, "open");
+                }
+                using (RegistryKey icon = progId.CreateSubKey("DefaultIcon"))
+                {
+                    icon.SetValue(null, $"{markdownIcon},0");
+                }
+                using (RegistryKey preview = progId.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}"))
+                {
+                    preview.SetValue(null, WindowsTextPreviewHandler);
+                }
+                using (RegistryKey command = progId.CreateSubKey(@"shell\open\command"))
+                {
+                    command.SetValue(null, $"{Quote(executable)} {fileArgument}");
+                }
+            }
 
-            foreach (string extension in new[] { ".md", ".markdown", ".mdown", ".mkdn" })
+            // Register executable application capabilities for Open With and Default Programs
+            using (RegistryKey appKey = classes.CreateSubKey(@"Applications\Marknexia.App.exe"))
+            {
+                appKey.SetValue("FriendlyAppName", ProductName);
+                using (RegistryKey appIcon = appKey.CreateSubKey("DefaultIcon"))
+                {
+                    appIcon.SetValue(null, $"{markdownIcon},0");
+                }
+                using (RegistryKey appCommand = appKey.CreateSubKey(@"shell\open\command"))
+                {
+                    appCommand.SetValue(null, $"{Quote(executable)} {fileArgument}");
+                }
+                using (RegistryKey supportedTypes = appKey.CreateSubKey("SupportedTypes"))
+                {
+                    foreach (string extension in markdownExtensions)
+                    {
+                        supportedTypes.SetValue(extension, string.Empty);
+                    }
+                }
+            }
+
+            foreach (string extension in markdownExtensions)
             {
                 using RegistryKey extensionKey = classes.CreateSubKey(extension);
                 extensionKey.SetValue(null, programId);
                 extensionKey.SetValue("PerceivedType", "text");
-                using RegistryKey extensionPreview = extensionKey.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}");
-                extensionPreview.SetValue(null, WindowsTextPreviewHandler);
+                using (RegistryKey extensionPreview = extensionKey.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}"))
+                {
+                    extensionPreview.SetValue(null, WindowsTextPreviewHandler);
+                }
+                using (RegistryKey openWithProgids = extensionKey.CreateSubKey("OpenWithProgids"))
+                {
+                    openWithProgids.SetValue(programId, Array.Empty<byte>(), RegistryValueKind.None);
+                }
+                using (RegistryKey openWithList = extensionKey.CreateSubKey(@"OpenWithList\Marknexia.App.exe"))
+                {
+                }
             }
         }
 
@@ -194,35 +239,54 @@ internal static class Program
             "Marknexia Markdown viewer");
 
         string uninstallKeyName = GetProductKey(options);
-        using RegistryKey uninstall = Registry.CurrentUser.CreateSubKey($"{UninstallRegistryRoot}\\{uninstallKeyName}")
-            ?? throw new InvalidOperationException("Could not register the per-user uninstaller.");
-        string installedSetup = Path.Combine(installDirectory, InstallerFileName);
-        string scopeArgument = options.IsProduction ? string.Empty : $" --scope {Quote(options.Scope)}";
-        uninstall.SetValue("DisplayName", ProductName);
-        uninstall.SetValue("DisplayVersion", CurrentProductVersion);
-        uninstall.SetValue("Publisher", "Marknexia");
-        uninstall.SetValue("InstallLocation", installDirectory);
-        uninstall.SetValue("DisplayIcon", executable);
-        uninstall.SetValue("UninstallString", $"{Quote(installedSetup)} --uninstall --dir {Quote(installDirectory)}{scopeArgument}");
-        uninstall.SetValue("QuietUninstallString", $"{Quote(installedSetup)} --uninstall --silent --dir {Quote(installDirectory)}{scopeArgument}");
-        uninstall.SetValue("NoModify", 1, RegistryValueKind.DWord);
-        uninstall.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+        using (RegistryKey uninstall = Registry.CurrentUser.CreateSubKey($"{UninstallRegistryRoot}\\{uninstallKeyName}")
+            ?? throw new InvalidOperationException("Could not register the per-user uninstaller."))
+        {
+            string installedSetup = Path.Combine(installDirectory, InstallerFileName);
+            string scopeArgument = options.IsProduction ? string.Empty : $" --scope {Quote(options.Scope)}";
+            uninstall.SetValue("DisplayName", ProductName);
+            uninstall.SetValue("DisplayVersion", CurrentProductVersion);
+            uninstall.SetValue("Publisher", "Marknexia");
+            uninstall.SetValue("InstallLocation", installDirectory);
+            uninstall.SetValue("DisplayIcon", executable);
+            uninstall.SetValue("UninstallString", $"{Quote(installedSetup)} --uninstall --dir {Quote(installDirectory)}{scopeArgument}");
+            uninstall.SetValue("QuietUninstallString", $"{Quote(installedSetup)} --uninstall --silent --dir {Quote(installDirectory)}{scopeArgument}");
+            uninstall.SetValue("NoModify", 1, RegistryValueKind.DWord);
+            uninstall.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+        }
+
+        RefreshShellAssociations();
     }
 
     private static void UnregisterShellIntegration(InstallerOptions options, string installDirectory)
     {
         string programId = GetProgramId(options);
+        string[] markdownExtensions = [".md", ".markdown", ".mdown", ".mkdn"];
         using (RegistryKey? classes = Registry.CurrentUser.OpenSubKey(ClassesRegistryRoot, writable: true))
         {
             if (classes != null)
             {
-                foreach (string extension in new[] { ".md", ".markdown", ".mdown", ".mkdn" })
+                foreach (string extension in markdownExtensions)
                 {
-                    using RegistryKey? extensionKey = classes.OpenSubKey(extension);
-                    if (string.Equals(extensionKey?.GetValue(null) as string, programId, StringComparison.Ordinal))
-                        classes.DeleteSubKeyTree(extension, throwOnMissingSubKey: false);
+                    using RegistryKey? extensionKey = classes.OpenSubKey(extension, writable: true);
+                    if (extensionKey != null)
+                    {
+                        if (string.Equals(extensionKey.GetValue(null) as string, programId, StringComparison.Ordinal))
+                        {
+                            extensionKey.DeleteValue(string.Empty, throwOnMissingValue: false);
+                        }
+                        using (RegistryKey? openWith = extensionKey.OpenSubKey("OpenWithProgids", writable: true))
+                        {
+                            openWith?.DeleteValue(programId, throwOnMissingValue: false);
+                        }
+                        using (RegistryKey? openWithList = extensionKey.OpenSubKey("OpenWithList", writable: true))
+                        {
+                            openWithList?.DeleteSubKey("Marknexia.App.exe", throwOnMissingSubKey: false);
+                        }
+                    }
                 }
                 classes.DeleteSubKeyTree(programId, throwOnMissingSubKey: false);
+                classes.DeleteSubKeyTree(@"Applications\Marknexia.App.exe", throwOnMissingSubKey: false);
             }
         }
 
@@ -232,6 +296,7 @@ internal static class Program
             uninstallRoot?.DeleteSubKeyTree(GetProductKey(options), throwOnMissingSubKey: false);
 
         _ = installDirectory;
+        RefreshShellAssociations();
     }
 
     private static string? GetInstallDirectoryFromRegistry(InstallerOptions options)
@@ -466,6 +531,21 @@ internal static class Program
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
+
+    [DllImport("shell32.dll")]
+    private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+    private const int ShcneAssocChanged = 0x08000000;
+    private const uint ShcnfIdList = 0x0000;
+
+    private static void RefreshShellAssociations()
+    {
+        try
+        {
+            SHChangeNotify(ShcneAssocChanged, ShcnfIdList, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch { }
+    }
 
     [ComImport]
     [Guid("000214F9-0000-0000-C000-000000000046")]

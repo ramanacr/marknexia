@@ -127,10 +127,17 @@ public sealed partial class MainWindow : Window
         // is ready to attach to the native tree control.
         if (Content is FrameworkElement rootElement)
         {
-            rootElement.Loaded += (s, e) =>
+            if (rootElement.IsLoaded)
             {
                 _ = InitializeAfterLoadAsync();
-            };
+            }
+            else
+            {
+                rootElement.Loaded += (s, e) =>
+                {
+                    _ = InitializeAfterLoadAsync();
+                };
+            }
         }
     }
 
@@ -306,12 +313,15 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            await RestoreSavedRepositoryRootAsync();
             string? startupPath = StartupFileResolver.FindFirstExisting(
                 [_startupFilePath, .. Environment.GetCommandLineArgs().Skip(1)]);
             if (startupPath != null)
             {
                 await OpenDocumentInTabAsync(startupPath);
+            }
+            else
+            {
+                await RestoreSavedRepositoryRootAsync();
             }
         }
         catch (Exception ex)
