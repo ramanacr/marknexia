@@ -97,6 +97,8 @@ internal static class Program
         string installDirectory = GetInstallDirectory(options);
         EnsureInstallDirectoryIsSafe(installDirectory);
         EnsureApplicationIsNotRunning(options.Silent);
+        CleanOrphanedStagingDirectories(installDirectory);
+
         using (ZipArchive archive = OpenPayload())
         {
             ValidateArchive(archive);
@@ -111,21 +113,23 @@ internal static class Program
                 if (Directory.Exists(installDirectory))
                 {
                     backupDirectory = installDirectory + ".backup-" + Guid.NewGuid().ToString("N");
-                    Directory.Move(installDirectory, backupDirectory);
+                    MoveDirectoryWithRetry(installDirectory, backupDirectory);
                 }
 
-                Directory.Move(stagingDirectory, installDirectory);
+                MoveDirectoryWithRetry(stagingDirectory, installDirectory);
                 RegisterShellIntegration(options, installDirectory);
-                if (backupDirectory != null) TryDeleteDirectory(backupDirectory);
+                if (backupDirectory != null) TryDeleteDirectoryWithRetry(backupDirectory);
                 ShowMessageIfInteractive(options, $"{ProductName} was installed successfully. It is available from the Start menu.", MessageBoxType.Information);
                 return 0;
             }
             catch
             {
-                TryDeleteDirectory(stagingDirectory);
-                if (Directory.Exists(installDirectory)) TryDeleteDirectory(installDirectory);
+                TryDeleteDirectoryWithRetry(stagingDirectory);
                 if (backupDirectory != null && Directory.Exists(backupDirectory))
-                    Directory.Move(backupDirectory, installDirectory);
+                {
+                    if (Directory.Exists(installDirectory)) TryDeleteDirectoryWithRetry(installDirectory);
+                    try { MoveDirectoryWithRetry(backupDirectory, installDirectory); } catch { }
+                }
                 throw;
             }
         }
@@ -453,7 +457,87 @@ internal static class Program
 
     private static void TryDeleteDirectory(string path)
     {
-        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        TryDeleteDirectoryWithRetry(path);
+    }
+
+    private static void TryDeleteDirectoryWithRetry(string path, int maxRetries = 5, int delayMs = 300)
+    {
+        for (int i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch when (i < maxRetries - 1)
+            {
+                Thread.Sleep(delayMs);
+            }
+            catch
+            {
+                // Suppress on final retry for non-critical deletion
+            }
+        }
+    }
+
+    private static void MoveDirectoryWithRetry(string source, string destination, int maxRetries = 8, int delayMs = 350)
+    {
+        for (int i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                Directory.Move(source, destination);
+                return;
+            }
+            catch (IOException) when (i < maxRetries - 1)
+            {
+                Thread.Sleep(delayMs);
+            }
+            catch (UnauthorizedAccessException) when (i < maxRetries - 1)
+            {
+                Thread.Sleep(delayMs);
+            }
+        }
+
+        // If Directory.Move still fails (e.g. across volumes or persistent handles), perform robust copy + delete
+        CopyDirectoryRecursive(source, destination);
+        TryDeleteDirectoryWithRetry(source);
+    }
+
+    private static void CopyDirectoryRecursive(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(source, dir);
+            Directory.CreateDirectory(Path.Combine(destination, rel));
+        }
+        foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(source, file);
+            string destFile = Path.Combine(destination, rel);
+            File.Copy(file, destFile, overwrite: true);
+        }
+    }
+
+    private static void CleanOrphanedStagingDirectories(string installDirectory)
+    {
+        try
+        {
+            string? parent = Path.GetDirectoryName(installDirectory);
+            if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return;
+
+            string baseName = Path.GetFileName(installDirectory);
+            foreach (string dir in Directory.GetDirectories(parent, $"{baseName}.staging-*"))
+            {
+                TryDeleteDirectoryWithRetry(dir);
+            }
+            foreach (string dir in Directory.GetDirectories(parent, $"{baseName}.backup-*"))
+            {
+                TryDeleteDirectoryWithRetry(dir);
+            }
+        }
+        catch { }
     }
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";

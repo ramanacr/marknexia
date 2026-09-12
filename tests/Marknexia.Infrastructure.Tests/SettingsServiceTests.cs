@@ -403,6 +403,40 @@ public sealed class UpdateServiceTests
         }
     }
 
+    [Fact]
+    public void BuildUpdateScript_ContainsRetryLogicAndProcessTermination()
+    {
+        string scriptPath = @"C:\Temp\marknexia-update-test.ps1";
+        string target = @"C:\Program Files\Marknexia";
+        string stage = @"C:\Temp\staging\payload";
+        int ownerPid = 12345;
+
+        string script = UpdateService.BuildUpdateScript(scriptPath, target, stage, ownerPid);
+
+        script.Should().Contain("$ownerPid = 12345");
+        script.Should().Contain("Stop-TargetProcesses");
+        script.Should().Contain("Copy-WithRetry");
+        script.Should().Contain("Write-UpdateLog");
+        script.Should().Contain("marknexia-update.log");
+        script.Should().Contain("Start-Process -FilePath $targetExe");
+        script.Should().Contain("Rollback");
+    }
+
+    [Fact]
+    public void BuildUpdateScript_ProperlyEscapesPathsWithSingleQuotes()
+    {
+        string scriptPath = @"C:\Temp\mark's update.ps1";
+        string target = @"C:\Program Files\Mark's 'App'";
+        string stage = @"C:\Temp\staging's\payload";
+        int ownerPid = 999;
+
+        string script = UpdateService.BuildUpdateScript(scriptPath, target, stage, ownerPid);
+
+        script.Should().Contain("Mark''s ''App''");
+        script.Should().Contain("staging''s");
+        script.Should().Contain("mark''s update.ps1");
+    }
+
     private sealed class MappingHandler(IReadOnlyDictionary<string, Func<HttpResponseMessage>> responses) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -413,3 +447,4 @@ public sealed class UpdateServiceTests
         }
     }
 }
+

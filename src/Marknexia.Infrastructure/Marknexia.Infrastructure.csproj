@@ -6,4 +6,7 @@
     <ProjectReference Include="..\Marknexia.Core\Marknexia.Core.csproj" />
     <ProjectReference Include="..\Marknexia.Files\Marknexia.Files.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Marknexia.Infrastructure.Tests" />
+  </ItemGroup>
 </Project>

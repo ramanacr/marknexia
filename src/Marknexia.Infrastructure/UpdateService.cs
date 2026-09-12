@@ -292,7 +292,7 @@ public sealed class UpdateService
         return normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string BuildUpdateScript(string scriptPath, string target, string stage, int ownerProcessId)
+    internal static string BuildUpdateScript(string scriptPath, string target, string stage, int ownerProcessId)
     {
         string targetLiteral = EscapePowerShellLiteral(target);
         string stageLiteral = EscapePowerShellLiteral(stage);
@@ -305,23 +305,107 @@ public sealed class UpdateService
             $stage = '__STAGE__'
             $scriptPath = '__SCRIPT_PATH__'
             $backup = Join-Path ([IO.Path]::GetDirectoryName($target)) '__ROLLBACK__'
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) 'marknexia-update.log'
+
+            function Write-UpdateLog([string]$message) {
+                $line = "[{0:yyyy-MM-dd HH:mm:ss.fff}] {1}" -f (Get-Date), $message
+                Add-Content -LiteralPath $logPath -Value $line -ErrorAction SilentlyContinue
+            }
+
+            function Stop-TargetProcesses {
+                try {
+                    $targetNormalized = [IO.Path]::GetFullPath($target).TrimEnd('\')
+                    Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $procPath = $_.Path
+                            if ($procPath -and [IO.Path]::GetFullPath($procPath).StartsWith($targetNormalized + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                                Write-UpdateLog "Terminating lingering process in target: $($_.ProcessName) (PID $($_.Id))"
+                                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                            }
+                        } catch {}
+                    }
+                } catch {}
+            }
+
+            function Copy-WithRetry([string]$sourceDir, [string]$destinationDir, [int]$maxRetries = 10, [int]$delayMs = 400) {
+                Get-ChildItem -LiteralPath $sourceDir -Recurse | ForEach-Object {
+                    $relPath = $_.FullName.Substring($sourceDir.Length).TrimStart('\', '/')
+                    $destPath = Join-Path $destinationDir $relPath
+                    if ($_.PSIsContainer) {
+                        if (-not (Test-Path -LiteralPath $destPath)) {
+                            New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                        }
+                    } else {
+                        $parent = [IO.Path]::GetDirectoryName($destPath)
+                        if (-not (Test-Path -LiteralPath $parent)) {
+                            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                        }
+                        $copied = $false
+                        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+                            try {
+                                Copy-Item -LiteralPath $_.FullName -Destination $destPath -Force
+                                $copied = $true
+                                break
+                            } catch {
+                                if ($attempt -eq $maxRetries) {
+                                    Write-UpdateLog "Failed copying '$($_.FullName)' to '$destPath' after $attempt attempts: $($_.Exception.Message)"
+                                    throw
+                                }
+                                Stop-TargetProcesses
+                                Start-Sleep -Milliseconds $delayMs
+                            }
+                        }
+                    }
+                }
+            }
+
+            Write-UpdateLog "Starting update worker for PID $ownerPid. Target: $target, Stage: $stage"
             try {
                 for ($i = 0; $i -lt 150; $i++) {
                     if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { break }
                     Start-Sleep -Milliseconds 200
                 }
-                if (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) { throw 'Marknexia did not exit in time.' }
+                if (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) {
+                    Write-UpdateLog "Owner process $ownerPid did not exit in time. Forcing termination."
+                    Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+                }
+
+                # Terminate any remaining WebView2 or child processes from the target
+                Stop-TargetProcesses
+                Start-Sleep -Milliseconds 500
+
+                # Create backup of existing installation
                 New-Item -ItemType Directory -Path $backup -Force | Out-Null
-                Get-ChildItem -LiteralPath $target -Force | Move-Item -Destination $backup -Force
-                Get-ChildItem -LiteralPath $stage -Force | Copy-Item -Destination $target -Recurse -Force
-                if (-not (Test-Path -LiteralPath (Join-Path $target 'Marknexia.App.exe'))) { throw 'The update executable is missing after installation.' }
-                Start-Process -FilePath (Join-Path $target 'Marknexia.App.exe')
-                Remove-Item -LiteralPath $backup -Recurse -Force
-                Remove-Item -LiteralPath $stage -Recurse -Force
+                Write-UpdateLog "Backing up current installation to $backup"
+                Copy-WithRetry -sourceDir $target -destinationDir $backup -maxRetries 5 -delayMs 200
+
+                # Copy staged update files over target with retry
+                Write-UpdateLog "Applying update from $stage to $target"
+                Copy-WithRetry -sourceDir $stage -destinationDir $target -maxRetries 10 -delayMs 400
+
+                $targetExe = Join-Path $target 'Marknexia.App.exe'
+                if (-not (Test-Path -LiteralPath $targetExe)) {
+                    throw "The update executable is missing after installation: $targetExe"
+                }
+
+                Write-UpdateLog "Update successfully applied. Restarting $targetExe"
+                Start-Process -FilePath $targetExe
+                Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
             } catch {
-                Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-                Get-ChildItem -LiteralPath $backup -Force -ErrorAction SilentlyContinue | Move-Item -Destination $target -Force -ErrorAction SilentlyContinue
-                if (Test-Path -LiteralPath (Join-Path $target 'Marknexia.App.exe')) { Start-Process -FilePath (Join-Path $target 'Marknexia.App.exe') }
+                Write-UpdateLog "Update failed with error: $($_.Exception.Message). Rolling back from backup."
+                try {
+                    if (Test-Path -LiteralPath $backup) {
+                        Copy-WithRetry -sourceDir $backup -destinationDir $target -maxRetries 5 -delayMs 200
+                    }
+                } catch {
+                    Write-UpdateLog "Rollback encountered error: $($_.Exception.Message)"
+                }
+                $targetExe = Join-Path $target 'Marknexia.App.exe'
+                if (Test-Path -LiteralPath $targetExe) {
+                    Write-UpdateLog "Restarting original application after failure/rollback: $targetExe"
+                    Start-Process -FilePath $targetExe
+                }
             } finally {
                 Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
             }
