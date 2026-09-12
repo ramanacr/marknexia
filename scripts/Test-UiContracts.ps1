@@ -16,9 +16,11 @@ $checks = @(
     @{ Name = "sidebar tabs"; Pass = $xaml.Contains('<TabView x:Name="SidebarModeSelector"') -and -not $xaml.Contains('<RadioButtons x:Name="SidebarModeSelector"') },
     @{ Name = "document map header row"; Pass = $xaml.Contains('x:Name="DocumentMapHeader"') -and $xaml.Contains('Grid.Row="2"') },
     @{ Name = "distinct markdown shell icon"; Pass = $manifest.Contains('MarkdownFileLogo') -and $setup.Contains('MarkdownFileLogo') },
+    @{ Name = "preview handler on each extension"; Pass = $setup.Contains('extensionKey.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}")') },
     @{ Name = "Mermaid zoom and expand bridge"; Pass = $bridge.Contains('zoom-in') -and $bridge.Contains('pointerdown') -and $bridge.Contains('toggleDiagramExpanded') -and (Get-Content -Raw (Join-Path $Root 'src/Marknexia.Rendering/Assets/github-markdown.css')).Contains('overflow: auto') },
     @{ Name = "remote image setting is brokered"; Pass = $windowCode.Contains('AllowRemoteAssets') -and (Get-Content -Raw (Join-Path $Root 'src/Marknexia.App/MainWindow.Resources.cs')).Contains('AllowRemoteAssets') },
-    @{ Name = "open shortcut tooltip is start-page scoped"; Pass = $windowCode.Contains('ToolTipService.SetToolTip(') -and $windowCode.Contains('OpenFileButton') -and -not $xaml.Contains('ToolTipService.ToolTip="Open File (Ctrl+O)"') },
+    @{ Name = "open shortcut tooltip is start-page scoped"; Pass = $windowCode.Contains('ToolTipService.SetToolTip(') -and $windowCode.Contains('OpenFileButton') -and $xaml.Contains('KeyboardAcceleratorPlacementMode="Hidden"') -and -not $xaml.Contains('ToolTipService.ToolTip="Open File (Ctrl+O)"') },
+    @{ Name = "shell open command quotes file argument"; Pass = $setup.Contains('string fileArgument = Quote("%1")') -and $setup.Contains('command.SetValue(null, $"{Quote(executable)} {fileArgument}")') },
     @{ Name = "branded installer wizard"; Pass = $setupXaml.Contains('Text="Marknexia Setup"') -and $setupXaml.Contains('ConfigStepPanel') -and $setupXaml.Contains('ProgressStepPanel') -and $setupXaml.Contains('CompleteStepPanel') -and $setupXaml.Contains('assets/app.ico') }
 )
 

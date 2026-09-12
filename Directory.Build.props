@@ -10,7 +10,7 @@
     <!-- Base Semantic Versioning -->
     <VersionMajor Condition="'$(VersionMajor)' == ''">1</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">0</VersionMinor>
-    <VersionPatch Condition="'$(VersionPatch)' == ''">13</VersionPatch>
+    <VersionPatch Condition="'$(VersionPatch)' == ''">15</VersionPatch>
     <BuildNumber Condition="'$(GITHUB_RUN_NUMBER)' != ''">$(GITHUB_RUN_NUMBER)</BuildNumber>
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
     <!-- Package and Assembly Version defaults -->

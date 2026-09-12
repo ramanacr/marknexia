@@ -172,13 +172,16 @@ internal static class Program
             using RegistryKey preview = progId.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}");
             preview.SetValue(null, WindowsTextPreviewHandler);
             using RegistryKey command = progId.CreateSubKey(@"shell\open\command");
-            command.SetValue(null, $"{Quote(executable)} %1");
+            string fileArgument = Quote("%1");
+            command.SetValue(null, $"{Quote(executable)} {fileArgument}");
 
             foreach (string extension in new[] { ".md", ".markdown", ".mdown", ".mkdn" })
             {
                 using RegistryKey extensionKey = classes.CreateSubKey(extension);
                 extensionKey.SetValue(null, programId);
                 extensionKey.SetValue("PerceivedType", "text");
+                using RegistryKey extensionPreview = extensionKey.CreateSubKey($"ShellEx\\{PreviewHandlerAssociation}");
+                extensionPreview.SetValue(null, WindowsTextPreviewHandler);
             }
         }
 

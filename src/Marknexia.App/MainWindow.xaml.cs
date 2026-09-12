@@ -529,6 +529,7 @@ public sealed partial class MainWindow : Window
         bool initializeMessages = webView.CoreWebView2 == null;
         await webView.EnsureCoreWebView2Async(env);
         CoreWebView2 core = webView.CoreWebView2 ?? throw new InvalidOperationException("WebView2 did not initialize.");
+        _assetContextsByOrigin[rendered.AssetContext.Origin] = rendered.AssetContext;
         if (initializeMessages)
         {
             core.WebMessageReceived += CoreWebView2_WebMessageReceived;

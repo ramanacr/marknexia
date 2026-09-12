@@ -6,6 +6,33 @@ namespace Marknexia.Core.Tests;
 
 public sealed class StartupFileResolverTests
 {
+    [Theory]
+    [InlineData("--open \"{0}\"")]
+    [InlineData("\"C:\\Program Files\\Marknexia\\Marknexia.App.exe\" \"{0}\"")]
+    [InlineData("\"{0}\" \"missing second file.md\"")]
+    public void FindFirstExisting_Extracts_document_from_activation_command_line(string commandLine)
+    {
+        string existing = Path.Combine(Path.GetTempPath(), $"marknexia activation {Guid.NewGuid():N}.md");
+        File.WriteAllText(existing, "# Activation");
+        try
+        {
+            StartupFileResolver.FindFirstExisting([string.Format(commandLine, existing)]).Should().Be(existing);
+        }
+        finally { File.Delete(existing); }
+    }
+
+    [Fact]
+    public void FindFirstExisting_Accepts_file_uri_and_skips_existing_executable()
+    {
+        string existing = Path.Combine(Path.GetTempPath(), $"marknexia #activation {Guid.NewGuid():N}.md");
+        File.WriteAllText(existing, "# Activation");
+        try
+        {
+            StartupFileResolver.FindFirstExisting([Environment.ProcessPath, new Uri(existing).AbsoluteUri]).Should().Be(existing);
+        }
+        finally { File.Delete(existing); }
+    }
+
     [Fact]
     public void FindFirstExisting_ReturnsTheFirstValidCandidateInActivationOrder()
     {

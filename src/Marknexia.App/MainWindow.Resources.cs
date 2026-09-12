@@ -9,11 +9,7 @@ namespace Marknexia.App;
 
 public sealed partial class MainWindow
 {
-    private static readonly HttpClient RemoteImageHttpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(15)
-    };
-    private static readonly RemoteImageReader RemoteImageReader = new(RemoteImageHttpClient);
+    private readonly Dictionary<string, DocumentAssetContext> _assetContextsByOrigin = new(StringComparer.OrdinalIgnoreCase);
 
     private static void AddResourceFilters(CoreWebView2 core)
     {
@@ -72,15 +68,15 @@ public sealed partial class MainWindow
         DocumentTabState? state = _tabStates.FirstOrDefault(tab =>
             ReferenceEquals(tab.WebView.CoreWebView2, core));
         DocumentAssetContext? assetContext = state?.Document?.AssetContext;
+        if (assetContext is null)
+        {
+            _assetContextsByOrigin.TryGetValue(
+                requestUri.GetLeftPart(UriPartial.Authority),
+                out assetContext);
+        }
 
         if (assetContext != null && IsSameOrigin(requestUri, assetContext.BaseUri))
         {
-            if (args.ResourceContext != CoreWebView2WebResourceContext.Image)
-            {
-                args.Response = CreateResponse(core, new LocalAssetResponse(403, "text/plain", [], "Forbidden"));
-                return;
-            }
-
             LocalAssetResponse asset = await new LocalAssetReader(assetContext)
                 .ReadAsync(requestUri);
             args.Response = CreateResponse(core, asset);
@@ -105,9 +101,11 @@ public sealed partial class MainWindow
             && IsRemoteHttp(requestUri)
             && _settingsService.Current.AllowRemoteAssets)
         {
-            // Broker network images explicitly so the setting also works for
-            // mixed-content documents and WebView2 request interception.
-            args.Response = CreateResponse(core, await RemoteImageReader.ReadAsync(requestUri));
+            // CSP is the network policy. Let WebView2 perform the request so
+            // Chromium handles redirects, certificates, proxies, and image
+            // decoding using the same network stack as the rendered document.
+            // The application still intercepts and denies remote images when
+            // the setting is off.
             return;
         }
 

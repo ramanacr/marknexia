@@ -76,6 +76,10 @@ try {
         if (-not (Test-Path $extensionPath) -or (Get-ItemProperty -LiteralPath $extensionPath).'(default)' -ne $programId) {
             throw "Installer did not register the $extension file association."
         }
+        $extensionPreviewPath = "$extensionPath\ShellEx\{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+        if (-not (Test-Path $extensionPreviewPath) -or (Get-ItemProperty -LiteralPath $extensionPreviewPath).'(default)' -ne '{1531d583-8375-4d3f-b5fb-d23bbd169f22}') {
+            throw "Installer did not register the Windows text preview handler directly for $extension."
+        }
     }
     if (Get-ChildItem -LiteralPath $installDirectory -Filter "*.pdb" -File -Recurse -ErrorAction SilentlyContinue) {
         throw "Installer payload contains debug symbols (*.pdb)."
@@ -89,6 +93,11 @@ try {
     $previewHandler = (Get-ItemProperty -LiteralPath "$programKey\ShellEx\{8895b1c6-b41f-4c1c-a562-0d564250836f}").'(default)'
     if ($previewHandler -ne '{1531d583-8375-4d3f-b5fb-d23bbd169f22}') {
         throw "Installer did not register the Windows text preview handler for Markdown files."
+    }
+    $registeredCommand = (Get-ItemProperty -LiteralPath "$programKey\shell\open\command").'(default)'
+    $expectedCommand = '"' + (Join-Path $installDirectory 'Marknexia.App.exe') + '" "%1"'
+    if ($registeredCommand -ne $expectedCommand) {
+        throw "Installer did not quote the shell file argument. Expected '$expectedCommand', got '$registeredCommand'."
     }
 
     Invoke-Installer @("--uninstall", "--silent", "--scope", $scope, "--dir", $installDirectory)

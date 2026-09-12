@@ -8,7 +8,7 @@
     mc:Ignorable="d"
     Title="Marknexia">
 
-    <Grid Background="{ThemeResource MarknexiaPageBackgroundBrush}" AllowDrop="True" DragOver="Root_DragOver" Drop="Root_Drop">
+    <Grid Background="{ThemeResource MarknexiaPageBackgroundBrush}" AllowDrop="True" DragOver="Root_DragOver" Drop="Root_Drop" KeyboardAcceleratorPlacementMode="Hidden">
         <VisualStateManager.VisualStateGroups>
             <VisualStateGroup x:Name="WindowWidthStates">
                 <VisualState x:Name="WideWindow">
