@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Marknexia</title>
+  <meta name="description" content="Privacy Policy for Marknexia — Offline-first Windows Markdown and repository documentation viewer.">
+  
+  <!-- OpenGraph / Social -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ramanacr.github.io/marknexia/privacy.html">
+  <meta property="og:title" content="Privacy Policy — Marknexia">
+  <meta property="og:description" content="Marknexia privacy policy: 100% offline-first, zero telemetry, zero personal data collection, zero network tracking.">
+  <meta property="og:image" content="assets/marknexia-social-preview.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="assets/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/marknexia-128.png">
+
+  <style>
+    :root {
+      --primary: #2563EB;
+      --primary-dark: #1E40AF;
+      --primary-light: #60A5FA;
+      --accent: #06B6D4;
+      --bg: #0B1220;
+      --surface: #111827;
+      --surface-elevated: #1F2937;
+      --border: #374151;
+      --text: #F8FAFC;
+      --text-muted: #94A3B8;
+      --code-bg: #0D1117;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --font-sans: 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      --font-mono: 'Cascadia Code', Consolas, 'SF Mono', monospace;
+    }
+
+    [data-theme="light"] {
+      --bg: #F8FAFC;
+      --surface: #FFFFFF;
+      --surface-elevated: #F1F5F9;
+      --border: #E2E8F0;
+      --text: #0F172A;
+      --text-muted: #64748B;
+      --code-bg: #F6F8FA;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      transition: background-color 0.25s ease, color 0.25s ease;
+      overflow-x: hidden;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    header {
+      background-color: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 18px 0;
+    }
+
+    .header-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand-link {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.25rem;
+    }
+
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .nav-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.95rem;
+      transition: color 0.2s;
+    }
+
+    .nav-link:hover {
+      color: var(--text);
+    }
+
+    .theme-toggle {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    main {
+      padding: 60px 0 80px;
+    }
+
+    .policy-card {
+      background-color: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 48px;
+    }
+
+    h1 {
+      font-size: 2.25rem;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+
+    .effective-date {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 32px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h2 {
+      font-size: 1.35rem;
+      margin: 32px 0 12px;
+      color: var(--text);
+    }
+
+    p {
+      margin-bottom: 16px;
+      color: var(--text);
+    }
+
+    ul {
+      margin-bottom: 18px;
+      padding-left: 24px;
+    }
+
+    li {
+      margin-bottom: 8px;
+    }
+
+    .highlight-box {
+      background-color: var(--surface-elevated);
+      border-left: 4px solid var(--primary);
+      padding: 16px 20px;
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      margin: 24px 0;
+    }
+
+    footer {
+      background-color: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 36px 0;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      text-align: center;
+    }
+
+    footer a {
+      color: var(--primary-light);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <div class="header-inner">
+        <a href="index.html" class="brand-link">
+          <img src="assets/marknexia-128.png" alt="Marknexia Logo" class="brand-logo">
+          <span>Marknexia</span>
+        </a>
+        <div class="nav-links">
+          <a href="index.html" class="nav-link">Home</a>
+          <a href="https://github.com/ramanacr/marknexia" class="nav-link" target="_blank">GitHub</a>
+          <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark theme">Toggle Theme</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <div class="policy-card">
+        <h1>Privacy Policy</h1>
+        <div class="effective-date">Last Updated: September 13, 2026</div>
+
+        <div class="highlight-box">
+          <strong>Summary:</strong> Marknexia is an offline-first desktop application designed with complete privacy as a foundational principle. We do not collect, store, transmit, or monetize any personal information, telemetry, usage statistics, or user document data.
+        </div>
+
+        <h2>1. Who We Are</h2>
+        <p>Marknexia ("we", "our", or "the application") is developed and maintained by RRC Labs as an open-source native Windows Markdown viewer and documentation repository browser.</p>
+
+        <h2>2. Information We Do Not Collect</h2>
+        <p>Marknexia does not access, collect, transmit, or share any personal information. Specifically:</p>
+        <ul>
+          <li><strong>No Personal Identifiable Information (PII):</strong> We do not ask for, collect, or store names, email addresses, phone numbers, usernames, or contact details.</li>
+          <li><strong>No Analytics or Telemetry:</strong> Marknexia contains zero telemetry SDKs, analytics tracking pixels, diagnostic reporters, or third-party advertising libraries.</li>
+          <li><strong>No Document Data Collection:</strong> All Markdown files, repository assets, diagrams, and local text rendered by Marknexia remain exclusively on your local storage device. No document text or file contents are ever uploaded or transmitted across the internet.</li>
+          <li><strong>No Account or Registration:</strong> You do not need to create an account, log in, or authenticate with any service to use Marknexia.</li>
+        </ul>
+
+        <h2>3. Local File System & Application Data</h2>
+        <p>Marknexia requires access to files you explicitly choose to open (such as <code>.md</code>, <code>.markdown</code>, or folder workspaces) to render documentation and provide repository navigation:</p>
+        <ul>
+          <li>File operations are confined strictly to read access within the selected document directory and subdirectories.</li>
+          <li>User application preferences (such as window layout, theme selection, and recent document lists) are stored locally on your device in Windows AppData and are never shared or synchronized externally.</li>
+        </ul>
+
+        <h2>4. Network Communications & External Links</h2>
+        <p>Marknexia operates completely offline with bundled rendering libraries (including Markdig, ColorCode, and Mermaid 11.4). Marknexia does not establish outbound network connections, except when:</p>
+        <ul>
+          <li>You explicitly click on an external hyperlink (e.g. <code>https://</code>) inside a rendered Markdown document, which opens the URL in your default system web browser.</li>
+          <li>You explicitly check for software updates via the built-in GitHub Releases updater, which retrieves release metadata solely from the official GitHub API. No personal identifiers are transmitted during update checks.</li>
+        </ul>
+
+        <h2>5. Children's Privacy</h2>
+        <p>Because Marknexia does not collect any personal information whatsoever, it does not knowingly collect or solicit personal data from children under the age of 13.</p>
+
+        <h2>6. Microsoft Store Compliance</h2>
+        <p>This privacy policy is provided in accordance with Microsoft Store App Developer Agreement (ADA) Policy 10.5.1. By installing Marknexia from the Microsoft Store, your installation is subject to Microsoft's standard Store terms and privacy policies.</p>
+
+        <h2>7. Changes to This Privacy Policy</h2>
+        <p>Any updates to this policy will be posted on this page and reflected in the "Last Updated" date. Because we do not collect contact information, we encourage users to review this page periodically.</p>
+
+        <h2>8. Contact Information</h2>
+        <p>If you have any questions or concerns regarding this Privacy Policy or Marknexia's privacy practices, please contact us:</p>
+        <ul>
+          <li><strong>GitHub Repository:</strong> <a href="https://github.com/ramanacr/marknexia/issues" target="_blank" style="color:var(--primary-light);">https://github.com/ramanacr/marknexia/issues</a></li>
+          <li><strong>Email:</strong> <a href="mailto:ramana1015@gmail.com" style="color:var(--primary-light);">ramana1015@gmail.com</a></li>
+        </ul>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>© 2026 Marknexia. Released under the MIT License.</p>
+      <p style="margin-top:8px;"><a href="index.html">Home</a> · <a href="https://github.com/ramanacr/marknexia" target="_blank">GitHub</a> · <a href="privacy.html">Privacy Policy</a></p>
+    </div>
+  </footer>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+    }
+  </script>
+</body>
+</html>
