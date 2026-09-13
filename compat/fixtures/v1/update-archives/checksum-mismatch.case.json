@@ -4,22 +4,42 @@
     "exception": "InvalidDataException",
     "message": "The downloaded update checksum does not match.",
     "outcome": "rejected",
-    "pendingStageDirectories": 0
+    "pendingStageDirectories": 0,
+    "preExistingStageStillExists": false
   },
   "input": {
+    "archiveBytesBase64": "UEsDBBQAAAAAAAAAIVAb3wWlAQAAAAEAAAARAAAATWFya25leGlhLkFwcC5leGUBUEsDBBQAAAAAAAAAIVChjgw8AQAAAAEAAAARAAAATWFya25leGlhLkFwcC5kbGwCUEsDBBQAAAAAAAAAIVA3vgtLAQAAAAEAAAARAAAATWFya25leGlhLkFwcC5wcmkDUEsDBBQAAAAAAAAAIVCUK2/VAQAAAAEAAAAYAAAAbWFya25leGlhLXNib20uc3BkeC5qc29uBFBLAQIUABQAAAAAAAAAIVAb3wWlAQAAAAEAAAARAAAAAAAAAAAAAAAAAAAAAABNYXJrbmV4aWEuQXBwLmV4ZVBLAQIUABQAAAAAAAAAIVChjgw8AQAAAAEAAAARAAAAAAAAAAAAAAAAADAAAABNYXJrbmV4aWEuQXBwLmRsbFBLAQIUABQAAAAAAAAAIVA3vgtLAQAAAAEAAAARAAAAAAAAAAAAAAAAAGAAAABNYXJrbmV4aWEuQXBwLnByaVBLAQIUABQAAAAAAAAAIVCUK2/VAQAAAAEAAAAYAAAAAAAAAAAAAAAAAJAAAABtYXJrbmV4aWEtc2JvbS5zcGR4Lmpzb25QSwUGAAAAAAQABAADAQAAxwAAAAAA",
     "checksumMatches": false,
+    "checksumText": "0000000000000000000000000000000000000000000000000000000000000000  package.zip\\n",
     "maximumExpandedBytes": 1000000000,
     "packageBytes": 480,
     "packageEntries": [
-      "Marknexia.App.exe",
-      "Marknexia.App.dll",
-      "Marknexia.App.pri",
-      "marknexia-sbom.spdx.json"
-    ]
+      {
+        "contentBase64": "AQ==",
+        "declaredUncompressedBytes": 1,
+        "path": "Marknexia.App.exe"
+      },
+      {
+        "contentBase64": "Ag==",
+        "declaredUncompressedBytes": 1,
+        "path": "Marknexia.App.dll"
+      },
+      {
+        "contentBase64": "Aw==",
+        "declaredUncompressedBytes": 1,
+        "path": "Marknexia.App.pri"
+      },
+      {
+        "contentBase64": "BA==",
+        "declaredUncompressedBytes": 1,
+        "path": "marknexia-sbom.spdx.json"
+      }
+    ],
+    "preExistingStage": null
   },
   "name": "checksum-mismatch",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
+  "sourceRevision": "5ff161b0a18d8cbc4625311b707f24daf5a6bffa",
   "virtualFileSystem": {
     "files": [],
     "root": "updates"

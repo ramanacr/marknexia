@@ -10,7 +10,7 @@ public static class ParityBaselineVerifier
     {
         string fullBaseline = Path.GetFullPath(baselineRoot);
         ParityFixtureValidator.Validate(fullBaseline, repositoryRoot);
-        string revision = ReadFrozenRevision(fullBaseline);
+        string revision = GetFrozenRevision(fullBaseline);
         string temporary = Path.Combine(Path.GetTempPath(), "marknexia-parity-verify-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -26,7 +26,7 @@ public static class ParityBaselineVerifier
         }
     }
 
-    private static string ReadFrozenRevision(string fixtureRoot)
+    public static string GetFrozenRevision(string fixtureRoot)
     {
         string[] revisions = Directory.EnumerateFiles(fixtureRoot, "*.case.json", SearchOption.AllDirectories)
             .Select(path => JsonDocument.Parse(File.ReadAllText(path)))

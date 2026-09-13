@@ -147,7 +147,7 @@ public sealed class ParityExporter
         {
             string result = svg ? sanitizer.SanitizeSvg(html) : sanitizer.SanitizeHtml(html);
             cases.Add(Case("sanitizer", name, new JsonObject { ["html"] = html, ["mode"] = svg ? "svg" : "html" }, null,
-                new JsonObject { ["sanitizedHtml"] = ParityNormalizer.NormalizeHtml(result) }, sourceRevision));
+                new JsonObject { ["sanitizedHtml"] = result }, sourceRevision));
         }
 
         var renderer = new MarkdownRenderer();
@@ -162,7 +162,7 @@ public sealed class ParityExporter
         })
         {
             var boundedRenderer = new MarkdownRenderer(renderedHtmlLimitBytes: htmlLimit, maxDiagramCount: maxDiagrams, maxDiagramSourceBytes: maxSource);
-            JsonObject input = new() { ["markdown"] = markdown, ["allowRemoteAssets"] = remote, ["maxDiagramCount"] = maxDiagrams, ["maxDiagramSourceBytes"] = maxSource, ["maxRenderedHtmlBytes"] = htmlLimit };
+            JsonObject input = new() { ["markdown"] = markdown, ["allowRemoteAssets"] = remote, ["theme"] = AppTheme.System.ToString(), ["sourcePath"] = "compat/virtual.md", ["repositoryRoot"] = ".", ["enableDiagrams"] = true, ["enableMath"] = true, ["maxDiagramCount"] = maxDiagrams, ["maxDiagramSourceBytes"] = maxSource, ["maxRenderedHtmlBytes"] = htmlLimit };
             try
             {
                 RenderedDocument document = await boundedRenderer.RenderAsync(markdown,
@@ -195,12 +195,19 @@ public sealed class ParityExporter
             Directory.CreateDirectory(directory);
             if (malformedJson is not null) File.WriteAllText(path, malformedJson);
             var service = new SettingsService(path);
+            JsonArray operations = new();
             if (malformedJson is null)
             {
-                for (int index = 0; index < 20; index++) service.AddRecentFile($"C:\\docs\\{index}.md");
+                for (int index = 0; index < 20; index++)
+                {
+                    string recent = $"C:\\docs\\{index}.md";
+                    operations.Add(new JsonObject { ["operation"] = "addRecentFile", ["path"] = recent });
+                    service.AddRecentFile(recent);
+                }
+                operations.Add(new JsonObject { ["operation"] = "addRecentFile", ["path"] = "C:\\docs\\19.md" });
                 service.AddRecentFile("C:\\docs\\19.md");
             }
-            return Case("settings", name, new JsonObject { ["settingsJson"] = malformedJson }, null, new JsonObject
+            return Case("settings", name, new JsonObject { ["settingsJson"] = malformedJson, ["operations"] = operations }, null, new JsonObject
             {
                 ["theme"] = service.Current.Theme.ToString(),
                 ["allowRemoteAssets"] = service.Current.AllowRemoteAssets,
@@ -269,14 +276,16 @@ public sealed class ParityExporter
         cases.Add(await StageArchiveCaseAsync("archive-traversal", CreateZip(new Dictionary<string, byte[]> { ["../escaped.txt"] = [1] }), null, sourceRevision, cancellationToken));
         cases.Add(await StageArchiveCaseAsync("missing-payload-files", CreateZip(new Dictionary<string, byte[]> { ["Marknexia.App.exe"] = [1] }), null, sourceRevision, cancellationToken));
         cases.Add(await StageArchiveCaseAsync("expansion-limits", CreateZipWithDeclaredLength(UpdateService.MaxDownloadBytes + 1), null, sourceRevision, cancellationToken));
-        cases.Add(await StageArchiveCaseAsync("stale-stage-cleanup", CreateZip(new Dictionary<string, byte[]> { ["../stale.txt"] = [1] }), null, sourceRevision, cancellationToken));
+        cases.Add(await StageArchiveCaseAsync("stale-stage-cleanup", CreateZip(new Dictionary<string, byte[]> { ["Marknexia.App.exe"] = [1] }), null, sourceRevision, cancellationToken, preExistingStaleStage: true));
         return cases;
     }
 
-    private static async Task<ParityCase> StageArchiveCaseAsync(string name, byte[] archive, string? checksumOverride, string sourceRevision, CancellationToken cancellationToken)
+    private static async Task<ParityCase> StageArchiveCaseAsync(string name, byte[] archive, string? checksumOverride, string sourceRevision, CancellationToken cancellationToken, bool preExistingStaleStage = false)
     {
         string root = Path.Combine(Path.GetTempPath(), "marknexia-parity-update-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        string staleStage = Path.Combine(root, "pending-stale-fixture");
+        if (preExistingStaleStage) Directory.CreateDirectory(staleStage);
         Uri packageUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip");
         Uri checksumUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip.sha256");
         string checksum = checksumOverride ?? Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant();
@@ -291,22 +300,26 @@ public sealed class ParityExporter
             try
             {
                 await new UpdateService(client).DownloadAndStageAsync(update, root, cancellationToken);
-                throw new InvalidOperationException($"The '{name}' update archive fixture unexpectedly staged.");
+                throw new UnexpectedStageSuccessException(name);
             }
             catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException)
             {
                 return Case("update-archives", name, new JsonObject
                 {
-                    ["packageEntries"] = ArchiveEntryNames(archive),
+                    ["archiveBytesBase64"] = Convert.ToBase64String(archive),
+                    ["packageEntries"] = DescribeArchiveEntries(archive),
                     ["checksumMatches"] = checksumOverride is null,
+                    ["checksumText"] = checksum + "  package.zip\\n",
                     ["packageBytes"] = archive.LongLength,
                     ["maximumExpandedBytes"] = UpdateService.MaxDownloadBytes
+                    , ["preExistingStage"] = preExistingStaleStage ? "pending-stale-fixture" : null
                 }, new JsonObject { ["root"] = "updates", ["files"] = new JsonArray() }, new JsonObject
                 {
                     ["outcome"] = "rejected",
                     ["exception"] = exception.GetType().Name,
                     ["message"] = exception.Message,
                     ["pendingStageDirectories"] = Directory.EnumerateDirectories(root, "pending-*", SearchOption.TopDirectoryOnly).Count()
+                    , ["preExistingStageStillExists"] = preExistingStaleStage && Directory.Exists(staleStage)
                 }, sourceRevision);
             }
         }
@@ -320,6 +333,7 @@ public sealed class ParityExporter
             foreach ((string name, byte[] contents) in files)
             {
                 ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.NoCompression);
+                entry.LastWriteTime = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
                 using Stream target = entry.Open();
                 target.Write(contents);
             }
@@ -342,15 +356,28 @@ public sealed class ParityExporter
         return stream.ToArray();
     }
 
-    private static JsonArray ArchiveEntryNames(byte[] archive)
+    private static JsonArray DescribeArchiveEntries(byte[] archive)
     {
         try
         {
             using var stream = new MemoryStream(archive);
             using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
-            return new JsonArray(zip.Entries.Select(entry => JsonValue.Create(entry.FullName)).ToArray());
+            return new JsonArray(zip.Entries.Select(entry => (JsonNode)new JsonObject
+            {
+                ["path"] = entry.FullName,
+                ["declaredUncompressedBytes"] = entry.Length,
+                ["contentBase64"] = entry.Length <= 1024 ? Convert.ToBase64String(ReadEntry(entry)) : null
+            }).ToArray());
         }
-        catch (InvalidDataException) { return new JsonArray("oversized.bin"); }
+        catch (InvalidDataException) { return new JsonArray(new JsonObject { ["path"] = "oversized.bin", ["declaredUncompressedBytes"] = UpdateService.MaxDownloadBytes + 1, ["contentBase64"] = null }); }
+    }
+
+    private static byte[] ReadEntry(ZipArchiveEntry entry)
+    {
+        using Stream source = entry.Open();
+        using var buffer = new MemoryStream();
+        source.CopyTo(buffer);
+        return buffer.ToArray();
     }
 
     private sealed class FixtureHttpHandler(IReadOnlyDictionary<Uri, byte[]> responses) : HttpMessageHandler
@@ -362,6 +389,8 @@ public sealed class ParityExporter
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(content) });
         }
     }
+
+    public sealed class UnexpectedStageSuccessException(string name) : Exception($"The '{name}' update archive fixture unexpectedly staged.");
 
     private sealed class RecordingFileService : IFileService
     {
@@ -377,7 +406,7 @@ public sealed class ParityExporter
 
     private static JsonObject ParsedExpected(ParsedMarkdown parsed) => new()
     {
-        ["renderedBodyHtml"] = ParityNormalizer.NormalizeHtml(parsed.RenderedBodyHtml),
+        ["renderedBodyHtml"] = parsed.RenderedBodyHtml,
         ["headings"] = ToNode(parsed.Headings),
         ["customAnchors"] = ToNode(parsed.CustomAnchors),
         ["links"] = ToNode(parsed.ExtractedLinks),
@@ -477,11 +506,11 @@ public sealed class ParityExporter
         {
             // A v1 replay is valid only while the files that define the oracle still
             // match its declared revision. Exporter/test changes do not affect this check.
-            RunGitExpectSuccess(repositoryRoot, $"diff --quiet {revision} -- src test-fixtures");
+            RunGitExpectSuccess(repositoryRoot, $"diff --quiet {revision} -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json");
         }
-        else if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain -- src test-fixtures")))
+        else if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain --untracked-files=all -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json")))
         {
-            throw new InvalidOperationException("Refusing to stamp a parity baseline from a dirty behavioral oracle. Commit or revert src/test-fixtures changes first.");
+            throw new InvalidOperationException("Refusing to stamp a parity baseline from dirty oracle/build inputs. Commit or revert the documented allowlist first.");
         }
 
         return revision;

@@ -7,13 +7,18 @@
   },
   "input": {
     "allowRemoteAssets": false,
+    "enableDiagrams": true,
+    "enableMath": true,
     "markdown": "\u0060\u0060\u0060mermaid\ngraph TD\nA--\u003EB\n\u0060\u0060\u0060",
     "maxDiagramCount": 8,
     "maxDiagramSourceBytes": 1,
-    "maxRenderedHtmlBytes": 134217728
+    "maxRenderedHtmlBytes": 134217728,
+    "repositoryRoot": ".",
+    "sourcePath": "compat/virtual.md",
+    "theme": "System"
   },
   "name": "diagram-source-limit",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
+  "sourceRevision": "5ff161b0a18d8cbc4625311b707f24daf5a6bffa",
   "virtualFileSystem": null
 }

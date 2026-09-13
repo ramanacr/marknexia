@@ -22,10 +22,96 @@
     "theme": "System"
   },
   "input": {
+    "operations": [
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\0.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\1.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\2.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\3.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\4.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\5.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\6.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\7.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\8.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\9.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\10.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\11.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\12.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\13.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\14.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\15.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\16.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\17.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\18.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\19.md"
+      },
+      {
+        "operation": "addRecentFile",
+        "path": "C:\\docs\\19.md"
+      }
+    ],
     "settingsJson": null
   },
   "name": "recent-item-bounds",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
+  "sourceRevision": "5ff161b0a18d8cbc4625311b707f24daf5a6bffa",
   "virtualFileSystem": null
 }
