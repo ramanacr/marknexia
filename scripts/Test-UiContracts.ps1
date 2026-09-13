@@ -12,6 +12,7 @@ $setupXaml = Get-Content -Raw (Join-Path $Root "src/Marknexia.Setup/InstallerWin
 $bridge = Get-Content -Raw (Join-Path $Root "src/Marknexia.Rendering/Assets/bridge.js")
 $documentCss = Get-Content -Raw (Join-Path $Root "src/Marknexia.Rendering/Assets/github-markdown.css")
 $welcomePrimary = [regex]::Match($xaml, '(?s)<Button x:Name="WelcomePrimaryAction".*?</Button>').Value
+$welcomePrimaryLight = [regex]::Match($welcomePrimary, '(?s)<ResourceDictionary x:Key="Light">(.*?)</ResourceDictionary>').Value
 
 $checks = @(
     @{ Name = "window title bar icon"; Pass = $windowCode.Contains('SetIcon(') },
@@ -30,6 +31,8 @@ $checks = @(
     @{ Name = "Light semantic palette remains unchanged"; Pass = $appXaml.Contains('x:Key="MarknexiaHoverBrush" Color="#E2E8F0"') -and $appXaml.Contains('x:Key="MarknexiaDisabledTextBrush" Color="#94A3B8"') -and $appXaml.Contains('x:Key="MarknexiaSuccessBrush" Color="#1A7F37"') -and $appXaml.Contains('x:Key="MarknexiaInfoBrush" Color="#2563EB"') -and $appXaml.Contains('x:Key="MarknexiaWarningBrush" Color="#9A6700"') -and $appXaml.Contains('x:Key="MarknexiaErrorBrush" Color="#CF222E"') }
     # Would fail if radium green escaped the welcome primary action into neutral buttons.
     @{ Name = "Dark neutral buttons and scoped welcome primary action"; Pass = $appXaml.Contains('x:Key="ButtonBackground" Color="#303639"') -and $appXaml.Contains('x:Key="ButtonBackgroundPointerOver" Color="#383F42"') -and $appXaml.Contains('x:Key="ButtonBackgroundPressed" Color="#24292C"') -and $appXaml.Contains('x:Key="ButtonForeground" Color="#F1F4EF"') -and $appXaml.Contains('x:Key="ButtonBorderBrush" Color="#485054"') -and $welcomePrimary.Contains('x:Key="ButtonBackground" Color="#B7FF3C"') -and $welcomePrimary.Contains('x:Key="ButtonBackgroundPointerOver" Color="#C9FF70"') -and $welcomePrimary.Contains('x:Key="ButtonBackgroundPressed" Color="#8FD622"') -and $welcomePrimary.Contains('x:Key="ButtonForeground" Color="#172000"') }
+    # Would fail if local Light interaction resources replaced the baseline WinUI button states.
+    @{ Name = "Welcome primary preserves Light interaction defaults"; Pass = $welcomePrimaryLight.Contains('x:Key="ButtonBackground" Color="#2563EB"') -and $welcomePrimaryLight.Contains('x:Key="ButtonForeground" Color="#FFFFFF"') -and ([regex]::Matches($welcomePrimaryLight, '<SolidColorBrush').Count -eq 2) }
 )
 
 $failed = @($checks | Where-Object { -not $_.Pass })

@@ -243,14 +243,7 @@
                                             <ResourceDictionary.ThemeDictionaries>
                                                 <ResourceDictionary x:Key="Light">
                                                     <SolidColorBrush x:Key="ButtonBackground" Color="#2563EB" />
-                                                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#1D4ED8" />
-                                                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#1E40AF" />
                                                     <SolidColorBrush x:Key="ButtonForeground" Color="#FFFFFF" />
-                                                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#FFFFFF" />
-                                                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#FFFFFF" />
-                                                    <SolidColorBrush x:Key="ButtonBorderBrush" Color="#2563EB" />
-                                                    <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#1D4ED8" />
-                                                    <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#1E40AF" />
                                                 </ResourceDictionary>
                                                 <ResourceDictionary x:Key="Dark">
                                                     <SolidColorBrush x:Key="ButtonBackground" Color="#B7FF3C" />
