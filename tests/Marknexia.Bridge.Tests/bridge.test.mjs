@@ -62,6 +62,29 @@ test('light documents preserve existing control hover and important alert colors
   }, { htmlAttributes: 'data-theme="light"', colorScheme: 'light' });
 });
 
+test('search-current keeps the original Light and System-light colors while dark uses Radium', async () => {
+  const currentHighlight = async (htmlAttributes, colorScheme) => {
+    let colors;
+    await withDocument(`<style>${documentCss}</style><p>Search result</p>`, async page => {
+      colors = await page.locator('body').evaluate(element => {
+        const style = getComputedStyle(element, '::highlight(marknexia-search-current)');
+        return { background: style.backgroundColor, foreground: style.color };
+      });
+    }, { htmlAttributes, colorScheme });
+    return colors;
+  };
+
+  assert.deepEqual(await currentHighlight('data-theme="light"', 'light'), {
+    background: 'rgb(96, 165, 250)', foreground: 'rgb(15, 23, 42)'
+  });
+  assert.deepEqual(await currentHighlight('data-theme="system"', 'light'), {
+    background: 'rgb(96, 165, 250)', foreground: 'rgb(15, 23, 42)'
+  });
+  assert.deepEqual(await currentHighlight('data-theme="dark"', 'light'), {
+    background: 'rgb(183, 255, 60)', foreground: 'rgb(23, 32, 0)'
+  });
+});
+
 test('system Mermaid diagrams rerender the real bundled SVG across color-scheme changes without losing source', async () => {
   const source = 'graph TD; A[Radium]-->B[Theme];';
   await withDocument(`<style>${documentCss}</style><div class="marknexia-mermaid" id="radium-diagram"><pre class="mermaid">${source}</pre></div>`, async page => {

@@ -41,15 +41,18 @@
                     <SolidColorBrush x:Key="MarknexiaInfoBrush" Color="#62C3FF" />
                     <SolidColorBrush x:Key="MarknexiaWarningBrush" Color="#FFC857" />
                     <SolidColorBrush x:Key="MarknexiaErrorBrush" Color="#FF6577" />
-                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#C9FF70" />
-                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#8FD622" />
-                    <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#C9FF70" />
-                    <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#8FD622" />
-                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#172000" />
-                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#172000" />
+                    <SolidColorBrush x:Key="ButtonBackground" Color="#303639" />
+                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#383F42" />
+                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#24292C" />
+                    <SolidColorBrush x:Key="ButtonForeground" Color="#F1F4EF" />
+                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#F1F4EF" />
+                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#F1F4EF" />
+                    <SolidColorBrush x:Key="ButtonBorderBrush" Color="#485054" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#485054" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#485054" />
                     <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#707876" />
-                    <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#303639" />
-                    <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="#485054" />
+                    <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#24292C" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="#353B3E" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>

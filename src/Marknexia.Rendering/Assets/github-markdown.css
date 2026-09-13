@@ -17,6 +17,8 @@
   --marknexia-focus: #06b6d4;
   --marknexia-on-primary: #ffffff;
   --marknexia-important: #8250df;
+  --marknexia-search-current-background: #60a5fa;
+  --marknexia-search-current-foreground: #0f172a;
   --font-body: "Segoe UI Variable", "Segoe UI", sans-serif;
   --font-mono: "Cascadia Code", Consolas, monospace;
 }
@@ -41,6 +43,8 @@
     --marknexia-focus: #b7ff3c;
     --marknexia-on-primary: #172000;
     --marknexia-important: #62c3ff;
+    --marknexia-search-current-background: #b7ff3c;
+    --marknexia-search-current-foreground: #172000;
   }
 }
 
@@ -63,6 +67,8 @@
   --marknexia-focus: #b7ff3c;
   --marknexia-on-primary: #172000;
   --marknexia-important: #62c3ff;
+  --marknexia-search-current-background: #b7ff3c;
+  --marknexia-search-current-foreground: #172000;
 }
 
 body {
@@ -441,8 +447,8 @@ html.marknexia-diagram-expanded body {
   overflow: auto;
 }
 ::highlight(marknexia-search-current) {
-  background-color: var(--color-accent-fg);
-  color: var(--marknexia-on-primary);
+  background-color: var(--marknexia-search-current-background);
+  color: var(--marknexia-search-current-foreground);
 }
 
 /* ColorCode emits token spans inside code blocks. Keep Radium contrast scoped
