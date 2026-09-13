@@ -41,6 +41,15 @@
                     <SolidColorBrush x:Key="MarknexiaInfoBrush" Color="#62C3FF" />
                     <SolidColorBrush x:Key="MarknexiaWarningBrush" Color="#FFC857" />
                     <SolidColorBrush x:Key="MarknexiaErrorBrush" Color="#FF6577" />
+                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#C9FF70" />
+                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#8FD622" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#C9FF70" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#8FD622" />
+                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#172000" />
+                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#172000" />
+                    <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#707876" />
+                    <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#303639" />
+                    <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="#485054" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>

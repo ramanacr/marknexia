@@ -13,11 +13,10 @@
   --color-attention-fg: #9a6700;
   --color-severe-fg: #bc4c00;
   --color-scale-gray-1: #eaeef2;
-  --marknexia-surface-raised: #f8fafc;
-  --marknexia-hover: #e2e8f0;
-  --marknexia-primary-hover: #1d4ed8;
+  --marknexia-control-hover: #eaeef2;
+  --marknexia-focus: #06b6d4;
   --marknexia-on-primary: #ffffff;
-  --marknexia-info: #2563eb;
+  --marknexia-important: #8250df;
   --font-body: "Segoe UI Variable", "Segoe UI", sans-serif;
   --font-mono: "Cascadia Code", Consolas, monospace;
 }
@@ -38,11 +37,10 @@
     --color-attention-fg: #ffc857;
     --color-severe-fg: #ffc857;
     --color-scale-gray-1: #303639;
-    --marknexia-surface-raised: #303639;
-    --marknexia-hover: #383f42;
-    --marknexia-primary-hover: #c9ff70;
+    --marknexia-control-hover: #383f42;
+    --marknexia-focus: #b7ff3c;
     --marknexia-on-primary: #172000;
-    --marknexia-info: #62c3ff;
+    --marknexia-important: #62c3ff;
   }
 }
 
@@ -61,11 +59,10 @@
   --color-attention-fg: #ffc857;
   --color-severe-fg: #ffc857;
   --color-scale-gray-1: #303639;
-  --marknexia-surface-raised: #303639;
-  --marknexia-hover: #383f42;
-  --marknexia-primary-hover: #c9ff70;
+  --marknexia-control-hover: #383f42;
+  --marknexia-focus: #b7ff3c;
   --marknexia-on-primary: #172000;
-  --marknexia-info: #62c3ff;
+  --marknexia-important: #62c3ff;
 }
 
 body {
@@ -226,7 +223,7 @@ pre code {
 .copy-btn:focus-visible,
 .marknexia-btn:focus-visible,
 a:focus-visible {
-  outline: 2px solid var(--color-accent-fg);
+  outline: 2px solid var(--marknexia-focus);
   outline-offset: 2px;
 }
 
@@ -235,7 +232,7 @@ a:focus-visible {
 }
 
 .copy-btn:hover {
-  background: var(--marknexia-hover);
+  background: var(--marknexia-control-hover);
   color: var(--color-fg-default);
 }
 
@@ -276,10 +273,10 @@ a:focus-visible {
 }
 
 .markdown-alert.markdown-alert-important {
-  border-left-color: var(--marknexia-info);
+  border-left-color: var(--marknexia-important);
 }
 .markdown-alert.markdown-alert-important .markdown-alert-title {
-  color: var(--marknexia-info);
+  color: var(--marknexia-important);
 }
 
 .markdown-alert.markdown-alert-warning {
@@ -380,7 +377,7 @@ html.marknexia-diagram-expanded body {
 }
 
 .marknexia-btn:hover {
-  background-color: var(--marknexia-hover);
+  background-color: var(--marknexia-control-hover);
 }
 
 .marknexia-diagram-zoom-status {
@@ -448,13 +445,21 @@ html.marknexia-diagram-expanded body {
   color: var(--marknexia-on-primary);
 }
 
-/* ColorCode emits token spans inside code blocks. Keep them readable on both
-   canvas variants while preserving semantic contrast in Metallic Radium. */
-pre .kwrd, pre .keyword, pre .preproc { color: var(--color-accent-fg); }
-pre .str, pre .char { color: var(--color-success-fg); }
-pre .num, pre .lit { color: var(--marknexia-info); }
-pre .type, pre .attr { color: var(--color-attention-fg); }
-pre .rem, pre .comment { color: var(--color-fg-muted); }
+/* ColorCode emits token spans inside code blocks. Keep Radium contrast scoped
+   to dark render paths so the established light palette remains untouched. */
+[data-theme="dark"] pre .kwrd, [data-theme="dark"] pre .keyword, [data-theme="dark"] pre .preproc { color: var(--color-accent-fg); }
+[data-theme="dark"] pre .str, [data-theme="dark"] pre .string, [data-theme="dark"] pre .char { color: var(--color-success-fg); }
+[data-theme="dark"] pre .num, [data-theme="dark"] pre .number, [data-theme="dark"] pre .lit { color: #62c3ff; }
+[data-theme="dark"] pre .type, [data-theme="dark"] pre .attr { color: var(--color-attention-fg); }
+[data-theme="dark"] pre .rem, [data-theme="dark"] pre .comment { color: var(--color-fg-muted); }
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] pre .kwrd, [data-theme="system"] pre .keyword, [data-theme="system"] pre .preproc { color: var(--color-accent-fg); }
+  [data-theme="system"] pre .str, [data-theme="system"] pre .string, [data-theme="system"] pre .char { color: var(--color-success-fg); }
+  [data-theme="system"] pre .num, [data-theme="system"] pre .number, [data-theme="system"] pre .lit { color: #62c3ff; }
+  [data-theme="system"] pre .type, [data-theme="system"] pre .attr { color: var(--color-attention-fg); }
+  [data-theme="system"] pre .rem, [data-theme="system"] pre .comment { color: var(--color-fg-muted); }
+}
 
 .markdown-body .marknexia-image-fallback {
   display: inline-flex;

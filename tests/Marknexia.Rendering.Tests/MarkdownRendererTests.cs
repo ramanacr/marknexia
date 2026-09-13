@@ -80,6 +80,19 @@ public class MarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderAsync_ColorCodeStringAndNumberTokens_HaveDarkThemeStyles()
+    {
+        var doc = await _renderer.RenderAsync(
+            "```csharp\nvar label = \"radium\";\nvar count = 42;\n```",
+            new RenderContext("README.md", null, AppTheme.Dark));
+
+        doc.HtmlContent.Should().Contain("class=\"string\"");
+        doc.HtmlContent.Should().Contain("class=\"number\"");
+        doc.HtmlContent.Should().Contain("[data-theme=\"dark\"] pre .string");
+        doc.HtmlContent.Should().Contain("[data-theme=\"dark\"] pre .number");
+    }
+
+    [Fact]
     public async Task RenderAsync_MermaidDiagram_InjectsDiagramContainer()
     {
         string markdown = "```mermaid\nsequenceDiagram\nAlice->>Bob: Hi\n```";
