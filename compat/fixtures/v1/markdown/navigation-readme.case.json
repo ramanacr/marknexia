@@ -1,0 +1,77 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [
+      {
+        "Id": "custom-anchor",
+        "IsHeadingAnchor": false,
+        "LineNumber": 21,
+        "Name": "custom-anchor"
+      }
+    ],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "marknexia-sample-documentation",
+        "Text": "Marknexia Sample Documentation"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 4,
+        "SlugId": "overview",
+        "Text": "Overview"
+      },
+      {
+        "Level": 3,
+        "LineNumber": 22,
+        "SlugId": "custom-anchor-target-section",
+        "Text": "Custom Anchor Target Section"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 25,
+        "SlugId": "section",
+        "Text": "Section"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 28,
+        "SlugId": "section-1",
+        "Text": "Section"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 31,
+        "SlugId": "features-section",
+        "Text": "Features Section"
+      }
+    ],
+    "images": [],
+    "links": [
+      "#features-section",
+      "#section",
+      "#section-1",
+      "#custom-anchor",
+      "docs/api.md",
+      "docs/api.md#authentication",
+      "docs/nested/details.md",
+      "/docs/api.md",
+      "docs/encoded%20name.md#caf%C3%A9",
+      "/docs/encoded%20name.md#custom%20anchor",
+      "docs/literal%2520.md",
+      "https://github.com",
+      "javascript:alert(\u0027xss\u0027)"
+    ],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022marknexia-sample-documentation\u0022\u003EMarknexia Sample Documentation\u003C/h1\u003E\n\u003Cp\u003EWelcome to Marknexia, the native GitHub-style Markdown viewer for Windows.\u003C/p\u003E\n\u003Ch2 id=\u0022overview\u0022\u003EOverview\u003C/h2\u003E\n\u003Cp\u003EThis document tests various navigation links.\u003C/p\u003E\n\u003Cul\u003E\n\u003Cli\u003E\u003Ca href=\u0022#features-section\u0022\u003EJump to Features\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022#section\u0022\u003EDuplicate Heading 1\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022#section-1\u0022\u003EDuplicate Heading 2\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022#custom-anchor\u0022\u003ECustom Anchor Target\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022docs/api.md\u0022\u003ERelative Document\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022docs/api.md#authentication\u0022\u003ERelative Document with Anchor\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022docs/nested/details.md\u0022\u003ENested Document\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022/docs/api.md\u0022\u003ERepository Root Link\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022docs/encoded%20name.md#caf%C3%A9\u0022\u003EEncoded filename and Unicode fragment\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022/docs/encoded%20name.md#custom%20anchor\u0022\u003EEncoded custom anchor\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022docs/literal%2520.md\u0022\u003ELiteral percent filename\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022https://github.com\u0022\u003EExternal GitHub Link\u003C/a\u003E\u003C/li\u003E\n\u003Cli\u003E\u003Ca href=\u0022javascript:alert(%27xss%27)\u0022\u003EBlocked JavaScript Link\u003C/a\u003E\u003C/li\u003E\n\u003C/ul\u003E\n\u003Cp\u003E\u003Ca name=\u0022custom-anchor\u0022\u003E\u003C/a\u003E\u003C/p\u003E\n\u003Ch3 id=\u0022custom-anchor-target-section\u0022\u003ECustom Anchor Target Section\u003C/h3\u003E\n\u003Cp\u003EHere is the custom anchor section content.\u003C/p\u003E\n\u003Ch2 id=\u0022section\u0022\u003ESection\u003C/h2\u003E\n\u003Cp\u003EFirst section with duplicate heading.\u003C/p\u003E\n\u003Ch2 id=\u0022section-1\u0022\u003ESection\u003C/h2\u003E\n\u003Cp\u003ESecond section with duplicate heading.\u003C/p\u003E\n\u003Ch2 id=\u0022features-section\u0022\u003EFeatures Section\u003C/h2\u003E\n\u003Cp\u003EHere are the features of Marknexia.\u003C/p\u003E\n"
+  },
+  "input": {
+    "markdown": "# Marknexia Sample Documentation\r\n\r\nWelcome to Marknexia, the native GitHub-style Markdown viewer for Windows.\r\n\r\n## Overview\r\nThis document tests various navigation links.\r\n\r\n- [Jump to Features](#features-section)\r\n- [Duplicate Heading 1](#section)\r\n- [Duplicate Heading 2](#section-1)\r\n- [Custom Anchor Target](#custom-anchor)\r\n- [Relative Document](docs/api.md)\r\n- [Relative Document with Anchor](docs/api.md#authentication)\r\n- [Nested Document](docs/nested/details.md)\r\n- [Repository Root Link](/docs/api.md)\r\n- [Encoded filename and Unicode fragment](docs/encoded%20name.md#caf%C3%A9)\r\n- [Encoded custom anchor](/docs/encoded%20name.md#custom%20anchor)\r\n- [Literal percent filename](docs/literal%2520.md)\r\n- [External GitHub Link](https://github.com)\r\n- [Blocked JavaScript Link](javascript:alert(\u0027xss\u0027))\r\n\r\n\u003Ca name=\u0022custom-anchor\u0022\u003E\u003C/a\u003E\r\n### Custom Anchor Target Section\r\nHere is the custom anchor section content.\r\n\r\n## Section\r\nFirst section with duplicate heading.\r\n\r\n## Section\r\nSecond section with duplicate heading.\r\n\r\n## Features Section\r\nHere are the features of Marknexia.\r\n",
+    "sourceFile": "navigation/README.md"
+  },
+  "name": "navigation-readme",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

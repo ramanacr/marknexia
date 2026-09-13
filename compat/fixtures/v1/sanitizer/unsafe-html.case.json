@@ -1,0 +1,14 @@
+{
+  "area": "sanitizer",
+  "expected": {
+    "sanitizedHtml": "\u003Ca href=\u0022#\u0022\u003Ebad\u003C/a\u003E"
+  },
+  "input": {
+    "html": "\u003Cscript\u003Ealert(1)\u003C/script\u003E\u003Ca href=\u0022javascript:alert(1)\u0022\u003Ebad\u003C/a\u003E",
+    "mode": "html"
+  },
+  "name": "unsafe-html",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

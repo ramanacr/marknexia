@@ -1,0 +1,33 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [
+      {
+        "Id": "custom anchor",
+        "IsHeadingAnchor": false,
+        "LineNumber": 4,
+        "Name": "custom anchor"
+      }
+    ],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "caf\u00E9",
+        "Text": "Caf\u00E9"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022caf\u00E9\u0022\u003ECaf\u00E9\u003C/h1\u003E\n\u003Cp\u003EThis fixture verifies percent-encoded document names and Unicode fragments.\u003C/p\u003E\n\u003Cp\u003E\u003Ca name=\u0022custom anchor\u0022\u003E\u003C/a\u003E\u003C/p\u003E\n\u003Cp\u003ECustom anchor target.\u003C/p\u003E\n"
+  },
+  "input": {
+    "markdown": "# Caf\u00E9\r\n\r\nThis fixture verifies percent-encoded document names and Unicode fragments.\r\n\r\n\u003Ca name=\u0022custom anchor\u0022\u003E\u003C/a\u003E\r\n\r\nCustom anchor target.\r\n",
+    "sourceFile": "navigation/docs/encoded name.md"
+  },
+  "name": "navigation-docs-encoded-name",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

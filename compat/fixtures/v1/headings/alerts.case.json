@@ -1,0 +1,18 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Cdiv class=\u0022markdown-alert markdown-alert-warning\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-alert\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003EWARNING\u003C/span\u003E\u003C/div\u003E\u003Cp\u003EBe careful.\u003C/p\u003E\u003C/div\u003E\n"
+  },
+  "input": {
+    "markdown": "\u003E [!WARNING]\n\u003E Be careful.\n"
+  },
+  "name": "alerts",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

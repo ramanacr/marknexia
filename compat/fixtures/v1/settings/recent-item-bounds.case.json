@@ -1,0 +1,31 @@
+{
+  "area": "settings",
+  "expected": {
+    "allowRemoteAssets": false,
+    "recentFiles": [
+      "C:\\docs\\19.md",
+      "C:\\docs\\18.md",
+      "C:\\docs\\17.md",
+      "C:\\docs\\16.md",
+      "C:\\docs\\15.md",
+      "C:\\docs\\14.md",
+      "C:\\docs\\13.md",
+      "C:\\docs\\12.md",
+      "C:\\docs\\11.md",
+      "C:\\docs\\10.md",
+      "C:\\docs\\9.md",
+      "C:\\docs\\8.md",
+      "C:\\docs\\7.md",
+      "C:\\docs\\6.md",
+      "C:\\docs\\5.md"
+    ],
+    "theme": "System"
+  },
+  "input": {
+    "settingsJson": null
+  },
+  "name": "recent-item-bounds",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

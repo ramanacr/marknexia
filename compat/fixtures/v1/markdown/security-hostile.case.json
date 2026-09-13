@@ -1,0 +1,26 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "hostile-markdown-test",
+        "Text": "Hostile Markdown Test"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022hostile-markdown-test\u0022\u003EHostile Markdown Test\u003C/h1\u003E\n\u003Cscript\u003Ealert(\u0022pwned\u0022);\u003C/script\u003E\n\u003Cimg src=\u0022x\u0022 onerror=\u0022alert(\u0027xss\u0027)\u0022 /\u003E\n\u003Ca href=\u0022javascript:alert(1)\u0022\u003EClick Me\u003C/a\u003E\n\u003Ca href=\u0022vbscript:msgbox(1)\u0022\u003EClick VB\u003C/a\u003E\n\u003Ciframe src=\u0022https://evil.com\u0022\u003E\u003C/iframe\u003E\n\u003Csvg width=\u0022100\u0022 height=\u0022100\u0022\u003E\n  \u003Ccircle cx=\u002250\u0022 cy=\u002250\u0022 r=\u002240\u0022 stroke=\u0022green\u0022 stroke-width=\u00224\u0022 fill=\u0022yellow\u0022 /\u003E\n  \u003Cscript\u003Ealert(\u0022svg xss\u0022);\u003C/script\u003E\n\u003C/svg\u003E\n"
+  },
+  "input": {
+    "markdown": "# Hostile Markdown Test\r\n\r\n\u003Cscript\u003Ealert(\u0022pwned\u0022);\u003C/script\u003E\r\n\u003Cimg src=\u0022x\u0022 onerror=\u0022alert(\u0027xss\u0027)\u0022 /\u003E\r\n\u003Ca href=\u0022javascript:alert(1)\u0022\u003EClick Me\u003C/a\u003E\r\n\u003Ca href=\u0022vbscript:msgbox(1)\u0022\u003EClick VB\u003C/a\u003E\r\n\u003Ciframe src=\u0022https://evil.com\u0022\u003E\u003C/iframe\u003E\r\n\r\n\u003Csvg width=\u0022100\u0022 height=\u0022100\u0022\u003E\r\n  \u003Ccircle cx=\u002250\u0022 cy=\u002250\u0022 r=\u002240\u0022 stroke=\u0022green\u0022 stroke-width=\u00224\u0022 fill=\u0022yellow\u0022 /\u003E\r\n  \u003Cscript\u003Ealert(\u0022svg xss\u0022);\u003C/script\u003E\r\n\u003C/svg\u003E\r\n",
+    "sourceFile": "security/hostile.md"
+  },
+  "name": "security-hostile",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

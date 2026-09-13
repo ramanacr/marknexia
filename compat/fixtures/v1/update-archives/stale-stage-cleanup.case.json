@@ -1,0 +1,16 @@
+{
+  "area": "update-archives",
+  "expected": {
+    "assetCount": 0,
+    "error": "No stable release is available.",
+    "isUpdateAvailable": false,
+    "latestVersion": null
+  },
+  "input": {
+    "releaseJson": "{\u0022tag_name\u0022:\u0022v1.4.0\u0022,\u0022html_url\u0022:\u0022https://github.com/ramanacr/marknexia/releases/tag/v1.4.0\u0022,\u0022draft\u0022:true,\u0022prerelease\u0022:false}"
+  },
+  "name": "stale-stage-cleanup",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

@@ -1,0 +1,35 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "api-documentation",
+        "Text": "API Documentation"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 4,
+        "SlugId": "authentication",
+        "Text": "Authentication"
+      }
+    ],
+    "images": [],
+    "links": [
+      "../../README.md",
+      "nested/details.md#deep-dive"
+    ],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022api-documentation\u0022\u003EAPI Documentation\u003C/h1\u003E\n\u003Cp\u003EHere is the API documentation.\u003C/p\u003E\n\u003Ch2 id=\u0022authentication\u0022\u003EAuthentication\u003C/h2\u003E\n\u003Cp\u003EUse Bearer token to authenticate requests.\u003C/p\u003E\n\u003Cp\u003E\u003Ca href=\u0022../../README.md\u0022\u003EBack to Main README\u003C/a\u003E\n\u003Ca href=\u0022nested/details.md#deep-dive\u0022\u003EJump to Nested Details\u003C/a\u003E\u003C/p\u003E\n"
+  },
+  "input": {
+    "markdown": "# API Documentation\r\n\r\nHere is the API documentation.\r\n\r\n## Authentication\r\nUse Bearer token to authenticate requests.\r\n\r\n[Back to Main README](../../README.md)\r\n[Jump to Nested Details](nested/details.md#deep-dive)\r\n",
+    "sourceFile": "navigation/docs/api.md"
+  },
+  "name": "navigation-docs-api",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

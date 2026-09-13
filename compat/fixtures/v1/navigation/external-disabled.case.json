@@ -1,0 +1,27 @@
+{
+  "area": "navigation",
+  "expected": {
+    "diagnostic": "External links are disabled by policy.",
+    "externalUri": null,
+    "fragment": null,
+    "isSafe": false,
+    "kind": "BlockedOrInvalid",
+    "targetDocument": null
+  },
+  "input": {
+    "destination": "https://github.com"
+  },
+  "name": "external-disabled",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": {
+    "files": [
+      "README.md",
+      "docs/api.md",
+      "docs/encoded name.md",
+      "docs/literal%20.md",
+      "docs/nested/details.md"
+    ],
+    "root": "navigation"
+  }
+}

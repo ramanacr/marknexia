@@ -1,0 +1,27 @@
+{
+  "area": "navigation",
+  "expected": {
+    "diagnostic": null,
+    "externalUri": "https://github.com/",
+    "fragment": null,
+    "isSafe": true,
+    "kind": "ExternalBrowser",
+    "targetDocument": null
+  },
+  "input": {
+    "destination": "https://github.com"
+  },
+  "name": "remote-link",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": {
+    "files": [
+      "README.md",
+      "docs/api.md",
+      "docs/encoded name.md",
+      "docs/literal%20.md",
+      "docs/nested/details.md"
+    ],
+    "root": "navigation"
+  }
+}

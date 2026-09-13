@@ -1,0 +1,14 @@
+{
+  "area": "sanitizer",
+  "expected": {
+    "sanitizedHtml": "\u003Cdiv style=\u0022background-position: initial; background-size: initial; background-repeat: initial; background-attachment: initial; background-origin: initial; background-clip: initial; background-color: initial\u0022\u003Etext\u003C/div\u003E"
+  },
+  "input": {
+    "html": "\u003Cdiv style=\u0022background:url(javascript:alert(1))\u0022\u003Etext\u003C/div\u003E",
+    "mode": "html"
+  },
+  "name": "unsafe-css",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

@@ -1,0 +1,31 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "hello-world",
+        "Text": "Hello World"
+      },
+      {
+        "Level": 1,
+        "LineNumber": 1,
+        "SlugId": "hello-world-1",
+        "Text": "Hello World"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022hello-world\u0022\u003EHello \u003Cem\u003EWorld\u003C/em\u003E\u003C/h1\u003E\n\u003Ch1 id=\u0022hello-world-1\u0022\u003EHello World\u003C/h1\u003E\n"
+  },
+  "input": {
+    "markdown": "# Hello *World*\n# Hello World\n"
+  },
+  "name": "duplicate-formatted-headings",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

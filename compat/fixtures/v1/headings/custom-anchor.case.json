@@ -1,0 +1,32 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [
+      {
+        "Id": "legacy-anchor",
+        "IsHeadingAnchor": false,
+        "LineNumber": 0,
+        "Name": "legacy-anchor"
+      }
+    ],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 1,
+        "SlugId": "heading",
+        "Text": "Heading"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Cp\u003E\u003Ca id=\u0022legacy-anchor\u0022\u003E\u003C/a\u003E\u003C/p\u003E\n\u003Ch1 id=\u0022heading\u0022\u003EHeading\u003C/h1\u003E\n"
+  },
+  "input": {
+    "markdown": "\u003Ca id=\u0022legacy-anchor\u0022\u003E\u003C/a\u003E\n# Heading\n"
+  },
+  "name": "custom-anchor",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

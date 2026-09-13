@@ -1,0 +1,45 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [
+      {
+        "DiagramType": "mermaid",
+        "Id": "mermaid-1",
+        "LineNumber": 4,
+        "SourceCode": "sequenceDiagram\r\n    autonumber\r\n    Alice-\u003E\u003EBob: Hello Bob, how are you?\r\n    Bob--\u003E\u003EAlice: I am good thanks!"
+      },
+      {
+        "DiagramType": "mermaid",
+        "Id": "mermaid-2",
+        "LineNumber": 13,
+        "SourceCode": "graph TD\r\n    A[Start] --\u003E B{Is it offline?}\r\n    B -- Yes --\u003E C[Render locally]\r\n    B -- No --\u003E D[Network error]"
+      },
+      {
+        "DiagramType": "mermaid",
+        "Id": "mermaid-3",
+        "LineNumber": 22,
+        "SourceCode": "invalid mermaid syntax here"
+      }
+    ],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "mermaid-diagrams-test",
+        "Text": "Mermaid Diagrams Test"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022mermaid-diagrams-test\u0022\u003EMermaid Diagrams Test\u003C/h1\u003E\n\u003Cp\u003EHere is a valid sequence diagram:\u003C/p\u003E\n\u003Cpre\u003E\u003Ccode class=\u0022language-mermaid\u0022\u003EsequenceDiagram\n    autonumber\n    Alice-\u0026gt;\u0026gt;Bob: Hello Bob, how are you?\n    Bob--\u0026gt;\u0026gt;Alice: I am good thanks!\n\u003C/code\u003E\u003C/pre\u003E\n\u003Cp\u003EHere is a flowchart:\u003C/p\u003E\n\u003Cpre\u003E\u003Ccode class=\u0022language-mermaid\u0022\u003Egraph TD\n    A[Start] --\u0026gt; B{Is it offline?}\n    B -- Yes --\u0026gt; C[Render locally]\n    B -- No --\u0026gt; D[Network error]\n\u003C/code\u003E\u003C/pre\u003E\n\u003Cp\u003EHere is a diagram with intentional syntax error:\u003C/p\u003E\n\u003Cpre\u003E\u003Ccode class=\u0022language-mermaid\u0022\u003Einvalid mermaid syntax here\n\u003C/code\u003E\u003C/pre\u003E\n"
+  },
+  "input": {
+    "markdown": "# Mermaid Diagrams Test\r\n\r\nHere is a valid sequence diagram:\r\n\r\n\u0060\u0060\u0060mermaid\r\nsequenceDiagram\r\n    autonumber\r\n    Alice-\u003E\u003EBob: Hello Bob, how are you?\r\n    Bob--\u003E\u003EAlice: I am good thanks!\r\n\u0060\u0060\u0060\r\n\r\nHere is a flowchart:\r\n\r\n\u0060\u0060\u0060mermaid\r\ngraph TD\r\n    A[Start] --\u003E B{Is it offline?}\r\n    B -- Yes --\u003E C[Render locally]\r\n    B -- No --\u003E D[Network error]\r\n\u0060\u0060\u0060\r\n\r\nHere is a diagram with intentional syntax error:\r\n\r\n\u0060\u0060\u0060mermaid\r\ninvalid mermaid syntax here\r\n\u0060\u0060\u0060\r\n",
+    "sourceFile": "diagrams/mermaid.md"
+  },
+  "name": "diagrams-mermaid",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

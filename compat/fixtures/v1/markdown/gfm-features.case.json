@@ -1,0 +1,56 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "gfm-full-features-test",
+        "Text": "GFM Full Features Test"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 2,
+        "SlugId": "tables",
+        "Text": "Tables"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 10,
+        "SlugId": "task-lists",
+        "Text": "Task Lists"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 16,
+        "SlugId": "alerts",
+        "Text": "Alerts"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 33,
+        "SlugId": "footnotes",
+        "Text": "Footnotes"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 39,
+        "SlugId": "code-blocks",
+        "Text": "Code Blocks"
+      }
+    ],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022gfm-full-features-test\u0022\u003EGFM Full Features Test\u003C/h1\u003E\n\u003Ch2 id=\u0022tables\u0022\u003ETables\u003C/h2\u003E\n\u003Ctable\u003E\n\u003Cthead\u003E\n\u003Ctr\u003E\n\u003Cth style=\u0022text-align: left;\u0022\u003EFeature\u003C/th\u003E\n\u003Cth style=\u0022text-align: center;\u0022\u003EStatus\u003C/th\u003E\n\u003Cth style=\u0022text-align: right;\u0022\u003EPriority\u003C/th\u003E\n\u003C/tr\u003E\n\u003C/thead\u003E\n\u003Ctbody\u003E\n\u003Ctr\u003E\n\u003Ctd style=\u0022text-align: left;\u0022\u003EGFM Rendering\u003C/td\u003E\n\u003Ctd style=\u0022text-align: center;\u0022\u003ESupported\u003C/td\u003E\n\u003Ctd style=\u0022text-align: right;\u0022\u003EHigh\u003C/td\u003E\n\u003C/tr\u003E\n\u003Ctr\u003E\n\u003Ctd style=\u0022text-align: left;\u0022\u003EMermaid\u003C/td\u003E\n\u003Ctd style=\u0022text-align: center;\u0022\u003ESupported\u003C/td\u003E\n\u003Ctd style=\u0022text-align: right;\u0022\u003EHigh\u003C/td\u003E\n\u003C/tr\u003E\n\u003Ctr\u003E\n\u003Ctd style=\u0022text-align: left;\u0022\u003ENavigation\u003C/td\u003E\n\u003Ctd style=\u0022text-align: center;\u0022\u003ESupported\u003C/td\u003E\n\u003Ctd style=\u0022text-align: right;\u0022\u003ECritical\u003C/td\u003E\n\u003C/tr\u003E\n\u003C/tbody\u003E\n\u003C/table\u003E\n\u003Ch2 id=\u0022task-lists\u0022\u003ETask Lists\u003C/h2\u003E\n\u003Cul class=\u0022contains-task-list\u0022\u003E\n\u003Cli class=\u0022task-list-item\u0022\u003E\u003Cinput disabled=\u0022disabled\u0022 type=\u0022checkbox\u0022 checked=\u0022checked\u0022 /\u003E Solution created\u003C/li\u003E\n\u003Cli class=\u0022task-list-item\u0022\u003E\u003Cinput disabled=\u0022disabled\u0022 type=\u0022checkbox\u0022 checked=\u0022checked\u0022 /\u003E Navigation resolver\u003C/li\u003E\n\u003Cli class=\u0022task-list-item\u0022\u003E\u003Cinput disabled=\u0022disabled\u0022 type=\u0022checkbox\u0022 /\u003E Packaging validation\u003C/li\u003E\n\u003C/ul\u003E\n\u003Ch2 id=\u0022alerts\u0022\u003EAlerts\u003C/h2\u003E\n\u003Cdiv class=\u0022markdown-alert markdown-alert-note\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-info\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003ENOTE\u003C/span\u003E\u003C/div\u003E\u003Cp\u003EHighlights information that users should take into account, even when skimming.\u003C/p\u003E\u003C/div\u003E\n\u003Cdiv class=\u0022markdown-alert markdown-alert-tip\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-light-bulb\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M8 1.5c-2.363 0-4 1.69-4 3.75 0 .76.24 1.487.653 2.083.47.677.847 1.549.847 2.417h5c0-.868.377-1.74.847-2.417.413-.596.653-1.323.653-2.083 0-2.06-1.637-3.75-4-3.75Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003ETIP\u003C/span\u003E\u003C/div\u003E\u003Cp\u003EOptional information to help a user be more successful.\u003C/p\u003E\u003C/div\u003E\n\u003Cdiv class=\u0022markdown-alert markdown-alert-important\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-report\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003EIMPORTANT\u003C/span\u003E\u003C/div\u003E\u003Cp\u003ECrucial information necessary for users to succeed.\u003C/p\u003E\u003C/div\u003E\n\u003Cdiv class=\u0022markdown-alert markdown-alert-warning\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-alert\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003EWARNING\u003C/span\u003E\u003C/div\u003E\u003Cp\u003ECritical content demanding immediate user attention due to potential risks.\u003C/p\u003E\u003C/div\u003E\n\u003Cdiv class=\u0022markdown-alert markdown-alert-caution\u0022\u003E\u003Cdiv class=\u0022markdown-alert-title\u0022\u003E\u003Csvg class=\u0022octicon octicon-stop\u0022 viewBox=\u00220 0 16 16\u0022 width=\u002216\u0022 height=\u002216\u0022 aria-hidden=\u0022true\u0022\u003E\u003Cpath d=\u0022M4.47.047A1.75 1.75 0 0 1 5.71 0h4.58c.464 0 .909.184 1.237.513l4.96 4.96c.329.328.513.773.513 1.237v4.58c0 .464-.184.909-.513 1.237l-4.96 4.96a1.75 1.75 0 0 1-1.237.513H5.71a1.75 1.75 0 0 1-1.237-.513l-4.96-4.96A1.75 1.75 0 0 1 0 11.29V6.71c0-.464.184-.909.513-1.237l4.96-4.96Z\u0022\u003E\u003C/path\u003E\u003C/svg\u003E\u003Cspan\u003ECAUTION\u003C/span\u003E\u003C/div\u003E\u003Cp\u003ENegative potential consequences of an action.\u003C/p\u003E\u003C/div\u003E\n\u003Ch2 id=\u0022footnotes\u0022\u003EFootnotes\u003C/h2\u003E\n\u003Cp\u003EHere is a simple footnote\u003Ca id=\u0022fnref:1\u0022 href=\u0022#fn:1\u0022 class=\u0022footnote-ref\u0022\u003E\u003Csup\u003E1\u003C/sup\u003E\u003C/a\u003E.\u003C/p\u003E\n\u003Ch2 id=\u0022code-blocks\u0022\u003ECode Blocks\u003C/h2\u003E\n\u003Cpre\u003E\u003Ccode class=\u0022language-csharp\u0022\u003Epublic static void Main(string[] args)\n{\n    Console.WriteLine(\u0026quot;Hello Marknexia!\u0026quot;);\n}\n\u003C/code\u003E\u003C/pre\u003E\n\u003Cdiv class=\u0022footnotes\u0022\u003E\n\u003Chr /\u003E\n\u003Col\u003E\n\u003Cli id=\u0022fn:1\u0022\u003E\n\u003Cp\u003EThis is the footnote text.\u003Ca href=\u0022#fnref:1\u0022 class=\u0022footnote-back-ref\u0022\u003E\u0026#8617;\u003C/a\u003E\u003C/p\u003E\n\u003C/li\u003E\n\u003C/ol\u003E\n\u003C/div\u003E\n"
+  },
+  "input": {
+    "markdown": "# GFM Full Features Test\r\n\r\n## Tables\r\n\r\n| Feature | Status | Priority |\r\n| :--- | :---: | ---: |\r\n| GFM Rendering | Supported | High |\r\n| Mermaid | Supported | High |\r\n| Navigation | Supported | Critical |\r\n\r\n## Task Lists\r\n\r\n- [x] Solution created\r\n- [x] Navigation resolver\r\n- [ ] Packaging validation\r\n\r\n## Alerts\r\n\r\n\u003E [!NOTE]\r\n\u003E Highlights information that users should take into account, even when skimming.\r\n\r\n\u003E [!TIP]\r\n\u003E Optional information to help a user be more successful.\r\n\r\n\u003E [!IMPORTANT]\r\n\u003E Crucial information necessary for users to succeed.\r\n\r\n\u003E [!WARNING]\r\n\u003E Critical content demanding immediate user attention due to potential risks.\r\n\r\n\u003E [!CAUTION]\r\n\u003E Negative potential consequences of an action.\r\n\r\n## Footnotes\r\n\r\nHere is a simple footnote[^1].\r\n\r\n[^1]: This is the footnote text.\r\n\r\n## Code Blocks\r\n\r\n\u0060\u0060\u0060csharp\r\npublic static void Main(string[] args)\r\n{\r\n    Console.WriteLine(\u0022Hello Marknexia!\u0022);\r\n}\r\n\u0060\u0060\u0060\r\n",
+    "sourceFile": "gfm/features.md"
+  },
+  "name": "gfm-features",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

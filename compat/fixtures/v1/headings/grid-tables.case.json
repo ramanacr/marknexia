@@ -1,0 +1,18 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Ctable\u003E\n\u003Ccol style=\u0022width:50%\u0022 /\u003E\n\u003Ccol style=\u0022width:50%\u0022 /\u003E\n\u003Cthead\u003E\n\u003Ctr\u003E\n\u003Cth\u003EA\u003C/th\u003E\n\u003Cth\u003EB\u003C/th\u003E\n\u003C/tr\u003E\n\u003C/thead\u003E\n\u003Ctbody\u003E\n\u003Ctr\u003E\n\u003Ctd\u003E1\u003C/td\u003E\n\u003Ctd\u003E2\u003C/td\u003E\n\u003C/tr\u003E\n\u003C/tbody\u003E\n\u003C/table\u003E\n"
+  },
+  "input": {
+    "markdown": "\u002B---\u002B---\u002B\n| A | B |\n\u002B===\u002B===\u002B\n| 1 | 2 |\n\u002B---\u002B---\u002B\n"
+  },
+  "name": "grid-tables",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

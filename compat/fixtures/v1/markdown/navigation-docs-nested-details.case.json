@@ -1,0 +1,34 @@
+{
+  "area": "markdown",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [
+      {
+        "Level": 1,
+        "LineNumber": 0,
+        "SlugId": "nested-details",
+        "Text": "Nested Details"
+      },
+      {
+        "Level": 2,
+        "LineNumber": 4,
+        "SlugId": "deep-dive",
+        "Text": "Deep Dive"
+      }
+    ],
+    "images": [],
+    "links": [
+      "../api.md#authentication"
+    ],
+    "renderedBodyHtml": "\u003Ch1 id=\u0022nested-details\u0022\u003ENested Details\u003C/h1\u003E\n\u003Cp\u003EDetailed technical information.\u003C/p\u003E\n\u003Ch2 id=\u0022deep-dive\u0022\u003EDeep Dive\u003C/h2\u003E\n\u003Cp\u003EThis is a deep dive into architecture.\u003C/p\u003E\n\u003Cp\u003E\u003Ca href=\u0022../api.md#authentication\u0022\u003EBack to API\u003C/a\u003E\u003C/p\u003E\n"
+  },
+  "input": {
+    "markdown": "# Nested Details\r\n\r\nDetailed technical information.\r\n\r\n## Deep Dive\r\nThis is a deep dive into architecture.\r\n\r\n[Back to API](../api.md#authentication)\r\n",
+    "sourceFile": "navigation/docs/nested/details.md"
+  },
+  "name": "navigation-docs-nested-details",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "virtualFileSystem": null
+}

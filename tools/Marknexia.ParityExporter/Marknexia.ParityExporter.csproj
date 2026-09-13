@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Marknexia.Core\Marknexia.Core.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Files\Marknexia.Files.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Navigation\Marknexia.Navigation.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Markdown\Marknexia.Markdown.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Security\Marknexia.Security.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Rendering\Marknexia.Rendering.csproj" />
+    <ProjectReference Include="..\..\src\Marknexia.Infrastructure\Marknexia.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>
