@@ -11,24 +11,68 @@ before(async () => {
 });
 after(async () => { await browser?.close(); });
 
-async function withDocument(html, check) {
+async function withDocument(html, check, options = {}) {
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
+    if (options.colorScheme) await page.emulateMedia({ colorScheme: options.colorScheme });
     // Stub only the native-host boundary. Run the production bridge before a
     // real document load so its DOMContentLoaded handlers are exercised too.
     await page.addInitScript({ content: `
       window.hostMessages = [];
       window.chrome ||= {};
       window.chrome.webview = { postMessage: message => window.hostMessages.push(message) };
+      ${options.beforeBridge ?? ''}
       ${bridge}` });
     await page.goto('data:text/html;charset=utf-8,' + encodeURIComponent(
-      `<body><aside>read outside document</aside><main class="markdown-body">${html}</main></body>`));
+      `<html ${options.htmlAttributes ?? ''}><body><aside>read outside document</aside><main class="markdown-body">${html}</main></body></html>`));
     await check(page);
     assert.deepEqual(errors, [], 'bridge must not raise uncaught browser errors');
   } finally { await page.close(); }
 }
+
+test('explicit dark documents use the Metallic Radium palette', async () => {
+  await withDocument(`<style>${documentCss}</style><p>Radium document</p>`, async page => {
+    const colors = await page.locator('body').evaluate(element => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, foreground: style.color };
+    });
+
+    assert.deepEqual(colors, { background: 'rgb(23, 26, 28)', foreground: 'rgb(241, 244, 239)' });
+  }, { htmlAttributes: 'data-theme="dark"', colorScheme: 'light' });
+});
+
+test('system-dark Mermaid diagrams use Metallic Radium variables', async () => {
+  await withDocument('<div class="marknexia-mermaid" id="radium-diagram"><pre class="mermaid">graph TD; A-->B;</pre></div>', async page => {
+    const options = await page.evaluate(() => window.mermaidOptions);
+
+    assert.equal(options.theme, 'base');
+    assert.deepEqual(options.themeVariables, {
+      background: '#171A1C',
+      primaryColor: '#303639',
+      primaryTextColor: '#F1F4EF',
+      primaryBorderColor: '#485054',
+      lineColor: '#AAB2B0',
+      secondaryColor: '#24292C',
+      tertiaryColor: '#171A1C',
+      mainBkg: '#303639',
+      nodeBorder: '#485054',
+      clusterBkg: '#24292C',
+      clusterBorder: '#485054',
+      titleColor: '#F1F4EF',
+      edgeLabelBackground: '#24292C',
+      textColor: '#F1F4EF'
+    });
+  }, {
+    htmlAttributes: 'data-theme="system"',
+    colorScheme: 'dark',
+    beforeBridge: `window.mermaid = {
+      initialize: options => { window.mermaidOptions = options; },
+      render: async () => ({ svg: '<svg></svg>' })
+    };`
+  });
+});
 
 async function find(page, query, backwards = false) {
   return page.evaluate(({query, backwards}) => window.marknexiaBridge.findText(query, backwards), {query, backwards});

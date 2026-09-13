@@ -70,6 +70,16 @@ public class MarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderAsync_DarkTheme_EmbedsMetallicRadiumTokens()
+    {
+        var doc = await _renderer.RenderAsync("# Radium", new RenderContext("README.md", null, AppTheme.Dark));
+
+        doc.HtmlContent.Should().Contain("--color-canvas-default: #171a1c");
+        doc.HtmlContent.Should().Contain("--color-accent-fg: #b7ff3c");
+        doc.HtmlContent.Should().Contain("--color-danger-fg: #ff6577");
+    }
+
+    [Fact]
     public async Task RenderAsync_MermaidDiagram_InjectsDiagramContainer()
     {
         string markdown = "```mermaid\nsequenceDiagram\nAlice->>Bob: Hi\n```";

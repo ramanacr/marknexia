@@ -237,7 +237,7 @@
                             <TextBlock Text="Read. Explore. Understand." Foreground="{ThemeResource MarknexiaAccentBrush}" FontSize="16" HorizontalAlignment="Center" />
                             <TextBlock Text="GitHub-style Markdown. Native on Windows." Foreground="{ThemeResource MarknexiaMutedTextBrush}" FontSize="14" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,4,0,8" />
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
-                                <Button Click="OpenFile_Click" Background="{ThemeResource MarknexiaPrimaryBrush}" Foreground="White" AutomationProperties.Name="Open Markdown file">
+                                <Button Click="OpenFile_Click" Background="{ThemeResource MarknexiaPrimaryBrush}" Foreground="{ThemeResource MarknexiaOnPrimaryBrush}" AutomationProperties.Name="Open Markdown file">
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <FontIcon Glyph="&#xE8E5;" FontSize="14" />
                                         <TextBlock Text="Open Markdown file" VerticalAlignment="Center" />

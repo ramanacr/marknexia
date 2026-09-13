@@ -13,39 +13,59 @@
   --color-attention-fg: #9a6700;
   --color-severe-fg: #bc4c00;
   --color-scale-gray-1: #eaeef2;
+  --marknexia-surface-raised: #f8fafc;
+  --marknexia-hover: #e2e8f0;
+  --marknexia-primary-hover: #1d4ed8;
+  --marknexia-on-primary: #ffffff;
+  --marknexia-info: #2563eb;
   --font-body: "Segoe UI Variable", "Segoe UI", sans-serif;
   --font-mono: "Cascadia Code", Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   [data-theme="system"] {
-    --color-canvas-default: #0b1220;
-    --color-canvas-subtle: #111827;
-    --color-border-default: #334155;
-    --color-border-muted: #1e293b;
-    --color-fg-default: #e2e8f0;
-    --color-fg-muted: #94a3b8;
-    --color-fg-subtle: #64748b;
-    --color-accent-fg: #60a5fa;
-    --color-accent-emphasis: #2563eb;
+    --color-canvas-default: #171a1c;
+    --color-canvas-subtle: #24292c;
+    --color-border-default: #485054;
+    --color-border-muted: #353b3e;
+    --color-fg-default: #f1f4ef;
+    --color-fg-muted: #aab2b0;
+    --color-fg-subtle: #707876;
+    --color-accent-fg: #b7ff3c;
+    --color-accent-emphasis: #8fd622;
+    --color-danger-fg: #ff6577;
+    --color-success-fg: #68e875;
+    --color-attention-fg: #ffc857;
+    --color-severe-fg: #ffc857;
+    --color-scale-gray-1: #303639;
+    --marknexia-surface-raised: #303639;
+    --marknexia-hover: #383f42;
+    --marknexia-primary-hover: #c9ff70;
+    --marknexia-on-primary: #172000;
+    --marknexia-info: #62c3ff;
   }
 }
 
 [data-theme="dark"] {
-  --color-canvas-default: #0d1117;
-  --color-canvas-subtle: #161b22;
-  --color-border-default: #30363d;
-  --color-border-muted: #21262d;
-  --color-fg-default: #e6edf3;
-  --color-fg-muted: #848d97;
-  --color-fg-subtle: #7d8590;
-  --color-accent-fg: #2f81f7;
-  --color-accent-emphasis: #1f6feb;
-  --color-danger-fg: #f85149;
-  --color-success-fg: #3fb950;
-  --color-attention-fg: #d29922;
-  --color-severe-fg: #db6d28;
-  --color-scale-gray-1: #21262d;
+  --color-canvas-default: #171a1c;
+  --color-canvas-subtle: #24292c;
+  --color-border-default: #485054;
+  --color-border-muted: #353b3e;
+  --color-fg-default: #f1f4ef;
+  --color-fg-muted: #aab2b0;
+  --color-fg-subtle: #707876;
+  --color-accent-fg: #b7ff3c;
+  --color-accent-emphasis: #8fd622;
+  --color-danger-fg: #ff6577;
+  --color-success-fg: #68e875;
+  --color-attention-fg: #ffc857;
+  --color-severe-fg: #ffc857;
+  --color-scale-gray-1: #303639;
+  --marknexia-surface-raised: #303639;
+  --marknexia-hover: #383f42;
+  --marknexia-primary-hover: #c9ff70;
+  --marknexia-on-primary: #172000;
+  --marknexia-info: #62c3ff;
 }
 
 body {
@@ -60,8 +80,8 @@ body {
 }
 
 ::selection {
-  color: #ffffff;
-  background: #2563eb;
+  color: var(--marknexia-on-primary);
+  background: var(--color-accent-fg);
 }
 
 .markdown-body {
@@ -206,7 +226,7 @@ pre code {
 .copy-btn:focus-visible,
 .marknexia-btn:focus-visible,
 a:focus-visible {
-  outline: 2px solid #06b6d4;
+  outline: 2px solid var(--color-accent-fg);
   outline-offset: 2px;
 }
 
@@ -215,7 +235,7 @@ a:focus-visible {
 }
 
 .copy-btn:hover {
-  background: var(--color-scale-gray-1);
+  background: var(--marknexia-hover);
   color: var(--color-fg-default);
 }
 
@@ -256,10 +276,10 @@ a:focus-visible {
 }
 
 .markdown-alert.markdown-alert-important {
-  border-left-color: #8250df;
+  border-left-color: var(--marknexia-info);
 }
 .markdown-alert.markdown-alert-important .markdown-alert-title {
-  color: #8250df;
+  color: var(--marknexia-info);
 }
 
 .markdown-alert.markdown-alert-warning {
@@ -360,7 +380,7 @@ html.marknexia-diagram-expanded body {
 }
 
 .marknexia-btn:hover {
-  background-color: var(--color-scale-gray-1);
+  background-color: var(--marknexia-hover);
 }
 
 .marknexia-diagram-zoom-status {
@@ -424,9 +444,17 @@ html.marknexia-diagram-expanded body {
   overflow: auto;
 }
 ::highlight(marknexia-search-current) {
-  background-color: #60A5FA;
-  color: #0F172A;
+  background-color: var(--color-accent-fg);
+  color: var(--marknexia-on-primary);
 }
+
+/* ColorCode emits token spans inside code blocks. Keep them readable on both
+   canvas variants while preserving semantic contrast in Metallic Radium. */
+pre .kwrd, pre .keyword, pre .preproc { color: var(--color-accent-fg); }
+pre .str, pre .char { color: var(--color-success-fg); }
+pre .num, pre .lit { color: var(--marknexia-info); }
+pre .type, pre .attr { color: var(--color-attention-fg); }
+pre .rem, pre .comment { color: var(--color-fg-muted); }
 
 .markdown-body .marknexia-image-fallback {
   display: inline-flex;

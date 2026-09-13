@@ -17,16 +17,30 @@
                     <SolidColorBrush x:Key="MarknexiaBorderBrush" Color="#CBD5E1" />
                     <SolidColorBrush x:Key="MarknexiaPrimaryBrush" Color="#2563EB" />
                     <SolidColorBrush x:Key="MarknexiaAccentBrush" Color="#06B6D4" />
+                    <SolidColorBrush x:Key="MarknexiaHoverBrush" Color="#E2E8F0" />
+                    <SolidColorBrush x:Key="MarknexiaDisabledTextBrush" Color="#94A3B8" />
+                    <SolidColorBrush x:Key="MarknexiaOnPrimaryBrush" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="MarknexiaSuccessBrush" Color="#1A7F37" />
+                    <SolidColorBrush x:Key="MarknexiaInfoBrush" Color="#2563EB" />
+                    <SolidColorBrush x:Key="MarknexiaWarningBrush" Color="#9A6700" />
+                    <SolidColorBrush x:Key="MarknexiaErrorBrush" Color="#CF222E" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Dark">
-                    <SolidColorBrush x:Key="MarknexiaPageBackgroundBrush" Color="#0B1220" />
-                    <SolidColorBrush x:Key="MarknexiaSurfaceBrush" Color="#111827" />
-                    <SolidColorBrush x:Key="MarknexiaSurfaceSubtleBrush" Color="#172033" />
-                    <SolidColorBrush x:Key="MarknexiaTextBrush" Color="#E2E8F0" />
-                    <SolidColorBrush x:Key="MarknexiaMutedTextBrush" Color="#94A3B8" />
-                    <SolidColorBrush x:Key="MarknexiaBorderBrush" Color="#334155" />
-                    <SolidColorBrush x:Key="MarknexiaPrimaryBrush" Color="#60A5FA" />
-                    <SolidColorBrush x:Key="MarknexiaAccentBrush" Color="#22D3EE" />
+                    <SolidColorBrush x:Key="MarknexiaPageBackgroundBrush" Color="#171A1C" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceBrush" Color="#24292C" />
+                    <SolidColorBrush x:Key="MarknexiaSurfaceSubtleBrush" Color="#303639" />
+                    <SolidColorBrush x:Key="MarknexiaTextBrush" Color="#F1F4EF" />
+                    <SolidColorBrush x:Key="MarknexiaMutedTextBrush" Color="#AAB2B0" />
+                    <SolidColorBrush x:Key="MarknexiaBorderBrush" Color="#485054" />
+                    <SolidColorBrush x:Key="MarknexiaPrimaryBrush" Color="#B7FF3C" />
+                    <SolidColorBrush x:Key="MarknexiaAccentBrush" Color="#B7FF3C" />
+                    <SolidColorBrush x:Key="MarknexiaHoverBrush" Color="#383F42" />
+                    <SolidColorBrush x:Key="MarknexiaDisabledTextBrush" Color="#707876" />
+                    <SolidColorBrush x:Key="MarknexiaOnPrimaryBrush" Color="#172000" />
+                    <SolidColorBrush x:Key="MarknexiaSuccessBrush" Color="#68E875" />
+                    <SolidColorBrush x:Key="MarknexiaInfoBrush" Color="#62C3FF" />
+                    <SolidColorBrush x:Key="MarknexiaWarningBrush" Color="#FFC857" />
+                    <SolidColorBrush x:Key="MarknexiaErrorBrush" Color="#FF6577" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>

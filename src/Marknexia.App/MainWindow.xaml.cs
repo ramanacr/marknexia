@@ -427,9 +427,9 @@ public sealed partial class MainWindow : Window
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
-            DefaultBackgroundColor = currentTheme == AppTheme.Dark
-                ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
-                : Windows.UI.Color.FromArgb(255, 255, 255, 255)
+            DefaultBackgroundColor = currentTheme == AppTheme.Light
+                ? Windows.UI.Color.FromArgb(255, 255, 255, 255)
+                : Windows.UI.Color.FromArgb(255, 23, 26, 28)
         };
 
         var tabState = new DocumentTabState(canonicalPath, readResult.Content, rendered, webView, repositoryRoot)
@@ -1173,9 +1173,9 @@ public sealed partial class MainWindow : Window
                 active.SourceText = readResult.Content;
                 active.PendingScroll = true;
                 AppTheme currentTheme = GetCurrentTheme();
-                active.WebView.DefaultBackgroundColor = currentTheme == AppTheme.Dark
-                    ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
-                    : Windows.UI.Color.FromArgb(255, 255, 255, 255);
+                active.WebView.DefaultBackgroundColor = currentTheme == AppTheme.Light
+                    ? Windows.UI.Color.FromArgb(255, 255, 255, 255)
+                    : Windows.UI.Color.FromArgb(255, 23, 26, 28);
 
                 await PrepareWebViewAsync(active.WebView, active.FilePath, rendered);
                 UpdateOutlineList(rendered.Headings);

@@ -266,10 +266,28 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);
   if (typeof mermaid !== 'undefined') {
     try {
-      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      const requestedTheme = document.documentElement.getAttribute('data-theme');
+      const isDark = requestedTheme === 'dark'
+        || (requestedTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       mermaid.initialize({
         startOnLoad: false,
-        theme: isDark ? 'dark' : 'default',
+        theme: isDark ? 'base' : 'default',
+        themeVariables: isDark ? {
+          background: '#171A1C',
+          primaryColor: '#303639',
+          primaryTextColor: '#F1F4EF',
+          primaryBorderColor: '#485054',
+          lineColor: '#AAB2B0',
+          secondaryColor: '#24292C',
+          tertiaryColor: '#171A1C',
+          mainBkg: '#303639',
+          nodeBorder: '#485054',
+          clusterBkg: '#24292C',
+          clusterBorder: '#485054',
+          titleColor: '#F1F4EF',
+          edgeLabelBackground: '#24292C',
+          textColor: '#F1F4EF'
+        } : undefined,
         securityLevel: 'strict'
       });
       
