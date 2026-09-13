@@ -1,4 +1,8 @@
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -12,31 +16,50 @@ using Marknexia.Security;
 
 namespace Marknexia.ParityExporter;
 
-public sealed class ParityExporter(string repositoryRoot)
+public sealed class ParityExporter
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
+    private readonly string _repositoryRoot;
+    private readonly string? _frozenSourceRevision;
 
-    public Task ExportAsync(string outputRoot, CancellationToken cancellationToken) =>
-        ExportAsync(_repositoryRoot, outputRoot, cancellationToken);
-
-    public async Task ExportAsync(string repositoryRoot, string outputRoot, CancellationToken cancellationToken)
+    public ParityExporter(string repositoryRoot, string? frozenSourceRevision = null)
     {
-        string sourceRevision = GetSourceRevision(repositoryRoot);
-        string fullOutputRoot = Path.GetFullPath(outputRoot);
-        if (Directory.Exists(fullOutputRoot)) Directory.Delete(fullOutputRoot, recursive: true);
-        Directory.CreateDirectory(fullOutputRoot);
+        _repositoryRoot = ValidateRepositoryRoot(repositoryRoot);
+        _frozenSourceRevision = frozenSourceRevision;
+    }
 
+    public async Task ExportAsync(string outputRoot, CancellationToken cancellationToken)
+    {
+        string sourceRevision = ResolveSourceRevision(_repositoryRoot, _frozenSourceRevision);
+        string fullOutputRoot = Path.GetFullPath(outputRoot);
+        ValidateOutputRoot(_repositoryRoot, fullOutputRoot);
+
+        string temporaryRoot = fullOutputRoot + ".building-" + Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(temporaryRoot);
+        try
+        {
+            await ExportToDirectoryAsync(temporaryRoot, sourceRevision, cancellationToken);
+            ReplaceOwnedFixtureDirectory(fullOutputRoot, temporaryRoot);
+        }
+        catch
+        {
+            TryDeleteDirectory(temporaryRoot);
+            throw;
+        }
+    }
+
+    private async Task ExportToDirectoryAsync(string outputRoot, string sourceRevision, CancellationToken cancellationToken)
+    {
         List<ParityCase> cases = await BuildCasesAsync(sourceRevision, cancellationToken);
         foreach (ParityCase parityCase in cases.OrderBy(item => item.Area, StringComparer.Ordinal).ThenBy(item => item.Name, StringComparer.Ordinal))
         {
-            string directory = Path.Combine(fullOutputRoot, parityCase.Area);
+            string directory = Path.Combine(outputRoot, parityCase.Area);
             Directory.CreateDirectory(directory);
             string path = Path.Combine(directory, parityCase.Name + ".case.json");
             WriteCanonicalJson(path, ToEnvelope(parityCase));
         }
 
-        WriteCanonicalJson(Path.Combine(fullOutputRoot, "manifest.json"), new JsonObject
+        WriteCanonicalJson(Path.Combine(outputRoot, "manifest.json"), new JsonObject
         {
             ["schemaVersion"] = ParityCase.SchemaVersion,
             ["caseCount"] = cases.Count,
@@ -98,7 +121,20 @@ public sealed class ParityExporter(string repositoryRoot)
                 ? new ResolutionContext(context.CurrentFilePath, context.RepositoryRoot, null, new NavigationPolicy(AllowExternalLinks: false))
                 : context;
             NavigationIntent intent = resolver.Resolve(destination, caseContext);
-            cases.Add(Case("navigation", name, new JsonObject { ["destination"] = destination }, VirtualFileSystem(navigationRoot), IntentExpected(intent), sourceRevision));
+            cases.Add(Case("navigation", name, NavigationInput(destination, caseContext, navigationRoot), VirtualFileSystem(navigationRoot), IntentExpected(intent, navigationRoot), sourceRevision));
+        }
+
+        foreach ((string name, string destination) in new[] { ("unc", "//server.test/share/document.md"), ("encoded-unc", "%2f%2fserver.test/share/document.md"), ("file-uri", "file://server.test/share/document.md") })
+        {
+            var recordingFiles = new RecordingFileService();
+            var recordingResolver = new NavigationResolver(canonicalizer, recordingFiles);
+            var probeContext = new ResolutionContext(Path.Combine(navigationRoot, "README.md"), null, null, new NavigationPolicy());
+            NavigationIntent intent = recordingResolver.Resolve(destination, probeContext);
+            cases.Add(Case("navigation", "rejected-before-probe-" + name, NavigationInput(destination, probeContext, navigationRoot), VirtualFileSystem(navigationRoot), new JsonObject
+            {
+                ["intent"] = IntentExpected(intent, navigationRoot),
+                ["fileSystemProbeCount"] = recordingFiles.CheckedPaths.Count
+            }, sourceRevision));
         }
 
         foreach ((string name, string html, bool svg) in new[]
@@ -115,38 +151,37 @@ public sealed class ParityExporter(string repositoryRoot)
         }
 
         var renderer = new MarkdownRenderer();
-        foreach ((string name, string markdown, bool remote, int maxDiagrams, long maxSource) in new[]
+        foreach ((string name, string markdown, bool remote, int maxDiagrams, long maxSource, long htmlLimit) in new[]
         {
-            ("remote-images-off", "![remote](https://example.test/image.png)", false, 8, 1_000L),
-            ("remote-images-on", "![remote](https://example.test/image.png)", true, 8, 1_000L),
-            ("code-copy-metadata", "```c#\nvar value = 1;\n```", false, 8, 1_000L),
-            ("diagram-limit", "```mermaid\ngraph TD\nA-->B\n```\n```mermaid\ngraph TD\nB-->C\n```", false, 1, 1_000L),
-            ("diagram-source-limit", "```mermaid\ngraph TD\nA-->B\n```", false, 8, 1L)
+            ("remote-images-off", "![remote](https://example.test/image.png)", false, 8, 1_000L, MarkdownRenderer.MaxRenderedHtmlBytes),
+            ("remote-images-on", "![remote](https://example.test/image.png)", true, 8, 1_000L, MarkdownRenderer.MaxRenderedHtmlBytes),
+            ("code-copy-metadata", "```c#\nvar value = 1;\n```", false, 8, 1_000L, MarkdownRenderer.MaxRenderedHtmlBytes),
+            ("diagram-limit", "```mermaid\ngraph TD\nA-->B\n```\n```mermaid\ngraph TD\nB-->C\n```", false, 1, 1_000L, MarkdownRenderer.MaxRenderedHtmlBytes),
+            ("diagram-source-limit", "```mermaid\ngraph TD\nA-->B\n```", false, 8, 1L, MarkdownRenderer.MaxRenderedHtmlBytes),
+            ("rendered-output-limit", "# bounded output", false, 8, 1_000L, 1L)
         })
         {
-            var boundedRenderer = new MarkdownRenderer(maxDiagramCount: maxDiagrams, maxDiagramSourceBytes: maxSource);
-            RenderedDocument document = await boundedRenderer.RenderAsync(markdown,
-                new RenderContext(Path.Combine(_repositoryRoot, "compat", "virtual.md"), _repositoryRoot, AppTheme.System, AllowRemoteAssets: remote), cancellationToken);
-            cases.Add(Case("rendering", name, new JsonObject { ["markdown"] = markdown, ["allowRemoteAssets"] = remote }, null,
-                new JsonObject { ["html"] = ParityNormalizer.NormalizeHtml(document.HtmlContent), ["assets"] = ToNode(document.AssetReferences) }, sourceRevision));
+            var boundedRenderer = new MarkdownRenderer(renderedHtmlLimitBytes: htmlLimit, maxDiagramCount: maxDiagrams, maxDiagramSourceBytes: maxSource);
+            JsonObject input = new() { ["markdown"] = markdown, ["allowRemoteAssets"] = remote, ["maxDiagramCount"] = maxDiagrams, ["maxDiagramSourceBytes"] = maxSource, ["maxRenderedHtmlBytes"] = htmlLimit };
+            try
+            {
+                RenderedDocument document = await boundedRenderer.RenderAsync(markdown,
+                    new RenderContext(Path.Combine(_repositoryRoot, "compat", "virtual.md"), _repositoryRoot, AppTheme.System, AllowRemoteAssets: remote), cancellationToken);
+                cases.Add(Case("rendering", name, input, null,
+                    new JsonObject { ["outcome"] = "rendered", ["html"] = ParityNormalizer.NormalizeHtml(document.HtmlContent), ["assets"] = ToNode(document.AssetReferences) }, sourceRevision));
+            }
+            catch (DocumentTooLargeException exception)
+            {
+                cases.Add(Case("rendering", name, input, null, new JsonObject { ["outcome"] = "rejected", ["exception"] = exception.GetType().Name, ["maximumBytes"] = exception.MaximumBytes }, sourceRevision));
+            }
         }
+
+        cases.Add(CreateMarkdownInputBoundCase(sourceRevision));
 
         cases.Add(SettingsCase("malformed-settings", "{ not valid json", sourceRevision));
         cases.Add(SettingsCase("recent-item-bounds", null, sourceRevision));
 
-        foreach ((string name, string json) in new[]
-        {
-            ("checksum-mismatch", "{\"tag_name\":\"v1.4.0\",\"html_url\":\"https://github.com/ramanacr/marknexia/releases/tag/v1.4.0\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"Marknexia-v1.4.0-win-x64.zip\",\"browser_download_url\":\"https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip\",\"size\":123}]}"),
-            ("missing-payload-files", "{\"tag_name\":\"v1.4.0\",\"html_url\":\"https://evil.example/release\",\"draft\":false,\"prerelease\":false}"),
-            ("archive-traversal", "{\"tag_name\":\"v1.4.0\",\"html_url\":\"https://github.com/ramanacr/marknexia/releases/tag/v1.4.0\",\"draft\":false,\"prerelease\":true}"),
-            ("expansion-limits", "{\"tag_name\":\"v999999999999999999999\",\"html_url\":\"https://github.com/ramanacr/marknexia/releases/tag/v999999999999999999999\",\"draft\":false,\"prerelease\":false}"),
-            ("stale-stage-cleanup", "{\"tag_name\":\"v1.4.0\",\"html_url\":\"https://github.com/ramanacr/marknexia/releases/tag/v1.4.0\",\"draft\":true,\"prerelease\":false}")
-        })
-        {
-            UpdateCheckResult update = UpdateService.ParseLatestReleaseJson(json, "1.3.0");
-            cases.Add(Case("update-archives", name, new JsonObject { ["releaseJson"] = json }, null,
-                new JsonObject { ["isUpdateAvailable"] = update.IsUpdateAvailable, ["latestVersion"] = update.LatestVersion, ["error"] = update.Error, ["assetCount"] = update.Assets.Count }, sourceRevision));
-        }
+        cases.AddRange(await BuildUpdateArchiveCasesAsync(sourceRevision, cancellationToken));
 
         return cases;
     }
@@ -178,6 +213,165 @@ public sealed class ParityExporter(string repositoryRoot)
         }
     }
 
+    private static JsonObject NavigationInput(string destination, ResolutionContext context, string virtualRoot) => new()
+    {
+        ["destination"] = destination,
+        ["currentFile"] = Path.GetRelativePath(virtualRoot, context.CurrentFilePath).Replace('\\', '/'),
+        ["repositoryRoot"] = context.RepositoryRoot is null ? null : "navigation",
+        ["policy"] = new JsonObject
+        {
+            ["enforceRepositorySandbox"] = context.Policy.EnforceRepositorySandbox,
+            ["allowExternalLinks"] = context.Policy.AllowExternalLinks,
+            ["allowRemoteAssets"] = context.Policy.AllowRemoteAssets
+        }
+    };
+
+    private static ParityCase CreateMarkdownInputBoundCase(string sourceRevision)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "marknexia-parity-file-bound-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "large.md");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            using (FileStream stream = new(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                stream.SetLength(FileService.LargeFileThresholdBytes + 1);
+            var fileService = new FileService(new PathCanonicalizer());
+            try
+            {
+                fileService.ReadTextAsync(path).GetAwaiter().GetResult();
+                throw new InvalidOperationException("The file-size boundary case unexpectedly read an oversized document.");
+            }
+            catch (DocumentTooLargeException exception)
+            {
+                return Case("rendering", "markdown-input-limit", new JsonObject
+                {
+                    ["inputBytes"] = exception.SizeBytes,
+                    ["maximumBytes"] = FileService.LargeFileThresholdBytes
+                }, new JsonObject { ["root"] = "input-bound", ["files"] = new JsonArray("large.md") }, new JsonObject
+                {
+                    ["outcome"] = "rejected-before-read",
+                    ["exception"] = exception.GetType().Name,
+                    ["maximumBytes"] = exception.MaximumBytes
+                }, sourceRevision);
+            }
+        }
+        finally { TryDeleteDirectory(directory); }
+    }
+
+    private static async Task<IEnumerable<ParityCase>> BuildUpdateArchiveCasesAsync(string sourceRevision, CancellationToken cancellationToken)
+    {
+        var cases = new List<ParityCase>();
+        byte[] validPayload = CreateZip(new Dictionary<string, byte[]>
+        {
+            ["Marknexia.App.exe"] = [1], ["Marknexia.App.dll"] = [2], ["Marknexia.App.pri"] = [3], ["marknexia-sbom.spdx.json"] = [4]
+        });
+        cases.Add(await StageArchiveCaseAsync("checksum-mismatch", validPayload, new string('0', 64), sourceRevision, cancellationToken));
+        cases.Add(await StageArchiveCaseAsync("archive-traversal", CreateZip(new Dictionary<string, byte[]> { ["../escaped.txt"] = [1] }), null, sourceRevision, cancellationToken));
+        cases.Add(await StageArchiveCaseAsync("missing-payload-files", CreateZip(new Dictionary<string, byte[]> { ["Marknexia.App.exe"] = [1] }), null, sourceRevision, cancellationToken));
+        cases.Add(await StageArchiveCaseAsync("expansion-limits", CreateZipWithDeclaredLength(UpdateService.MaxDownloadBytes + 1), null, sourceRevision, cancellationToken));
+        cases.Add(await StageArchiveCaseAsync("stale-stage-cleanup", CreateZip(new Dictionary<string, byte[]> { ["../stale.txt"] = [1] }), null, sourceRevision, cancellationToken));
+        return cases;
+    }
+
+    private static async Task<ParityCase> StageArchiveCaseAsync(string name, byte[] archive, string? checksumOverride, string sourceRevision, CancellationToken cancellationToken)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "marknexia-parity-update-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Uri packageUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip");
+        Uri checksumUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip.sha256");
+        string checksum = checksumOverride ?? Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant();
+        var responses = new Dictionary<Uri, byte[]> { [packageUri] = archive, [checksumUri] = Encoding.UTF8.GetBytes(checksum + "  package.zip\n") };
+        var update = new UpdateCheckResult(true, "1.3.0", "1.4.0", new Uri("https://github.com/ramanacr/marknexia/releases/tag/v1.4.0"))
+        {
+            Assets = new[] { new UpdateAsset("Marknexia-v1.4.0-win-x64.zip", packageUri, archive.LongLength), new UpdateAsset("Marknexia-v1.4.0-win-x64.zip.sha256", checksumUri, checksum.Length + 14) }
+        };
+        try
+        {
+            using var client = new HttpClient(new FixtureHttpHandler(responses));
+            try
+            {
+                await new UpdateService(client).DownloadAndStageAsync(update, root, cancellationToken);
+                throw new InvalidOperationException($"The '{name}' update archive fixture unexpectedly staged.");
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException)
+            {
+                return Case("update-archives", name, new JsonObject
+                {
+                    ["packageEntries"] = ArchiveEntryNames(archive),
+                    ["checksumMatches"] = checksumOverride is null,
+                    ["packageBytes"] = archive.LongLength,
+                    ["maximumExpandedBytes"] = UpdateService.MaxDownloadBytes
+                }, new JsonObject { ["root"] = "updates", ["files"] = new JsonArray() }, new JsonObject
+                {
+                    ["outcome"] = "rejected",
+                    ["exception"] = exception.GetType().Name,
+                    ["message"] = exception.Message,
+                    ["pendingStageDirectories"] = Directory.EnumerateDirectories(root, "pending-*", SearchOption.TopDirectoryOnly).Count()
+                }, sourceRevision);
+            }
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    private static byte[] CreateZip(IReadOnlyDictionary<string, byte[]> files)
+    {
+        using var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+            foreach ((string name, byte[] contents) in files)
+            {
+                ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.NoCompression);
+                using Stream target = entry.Open();
+                target.Write(contents);
+            }
+        return stream.ToArray();
+    }
+
+    private static byte[] CreateZipWithDeclaredLength(long length)
+    {
+        const string name = "oversized.bin";
+        byte[] nameBytes = Encoding.UTF8.GetBytes(name);
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(0x04034b50u); writer.Write((ushort)20); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0);
+        writer.Write(0u); writer.Write(0u); writer.Write(0u); writer.Write((ushort)nameBytes.Length); writer.Write((ushort)0); writer.Write(nameBytes);
+        long centralOffset = stream.Position;
+        writer.Write(0x02014b50u); writer.Write((ushort)20); writer.Write((ushort)20); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0);
+        writer.Write(0u); writer.Write(0u); writer.Write(checked((uint)length)); writer.Write((ushort)nameBytes.Length); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write(0u); writer.Write(0u); writer.Write(nameBytes);
+        long centralLength = stream.Position - centralOffset;
+        writer.Write(0x06054b50u); writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)1); writer.Write((ushort)1); writer.Write(checked((uint)centralLength)); writer.Write(checked((uint)centralOffset)); writer.Write((ushort)0);
+        return stream.ToArray();
+    }
+
+    private static JsonArray ArchiveEntryNames(byte[] archive)
+    {
+        try
+        {
+            using var stream = new MemoryStream(archive);
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
+            return new JsonArray(zip.Entries.Select(entry => JsonValue.Create(entry.FullName)).ToArray());
+        }
+        catch (InvalidDataException) { return new JsonArray("oversized.bin"); }
+    }
+
+    private sealed class FixtureHttpHandler(IReadOnlyDictionary<Uri, byte[]> responses) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri is null || !responses.TryGetValue(request.RequestUri, out byte[]? content))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(content) });
+        }
+    }
+
+    private sealed class RecordingFileService : IFileService
+    {
+        public List<string> CheckedPaths { get; } = new();
+        public bool FileExists(string filePath) { CheckedPaths.Add(filePath); return false; }
+        public bool DirectoryExists(string directoryPath) { CheckedPaths.Add(directoryPath); return false; }
+        public string ComputeContentHash(string content) => throw new NotSupportedException();
+        public Task<FileReadResult> ReadTextAsync(string filePath, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
     private static ParityCase Case(string area, string name, JsonNode input, JsonNode? virtualFileSystem, JsonNode expected, string sourceRevision) =>
         new(area, name, input, virtualFileSystem, expected, sourceRevision);
 
@@ -191,15 +385,24 @@ public sealed class ParityExporter(string repositoryRoot)
         ["diagrams"] = ToNode(parsed.DiagramBlocks)
     };
 
-    private static JsonObject IntentExpected(NavigationIntent intent) => new()
+    private static JsonObject IntentExpected(NavigationIntent intent, string virtualRoot) => new()
     {
         ["kind"] = intent.Kind.ToString(),
         ["fragment"] = intent.Fragment,
         ["isSafe"] = intent.IsSafe,
-        ["targetDocument"] = intent.TargetDocument?.ToString(),
+        ["targetDocument"] = ToVirtualDocument(intent.TargetDocument, virtualRoot),
         ["externalUri"] = intent.ExternalUri?.ToString(),
         ["diagnostic"] = intent.Diagnostic
     };
+
+    private static string? ToVirtualDocument(DocumentUri? document, string virtualRoot)
+    {
+        if (document is null) return null;
+        string relative = Path.GetRelativePath(virtualRoot, document.CanonicalPath).Replace('\\', '/');
+        if (relative.StartsWith("../", StringComparison.Ordinal) || relative == "..")
+            throw new InvalidDataException("Navigation fixture target escaped its declared virtual root.");
+        return string.IsNullOrEmpty(document.Fragment) ? relative : relative + "#" + document.Fragment;
+    }
 
     private static JsonObject VirtualFileSystem(string root) => new()
     {
@@ -222,7 +425,7 @@ public sealed class ParityExporter(string repositoryRoot)
         ["sourceRevision"] = parityCase.SourceRevision
     };
 
-    private static string CaseName(string value) => value.Replace('/', '-').Replace(' ', '-').Replace("%", "percent-", StringComparison.Ordinal)
+    private static string CaseName(string value) => value.Replace('/', '-').Replace(' ', '-').Replace(':', '-').Replace("%", "percent-", StringComparison.Ordinal)
         .Replace(".md", string.Empty, StringComparison.OrdinalIgnoreCase).ToLowerInvariant();
 
     private static void WriteCanonicalJson(string path, JsonNode node)
@@ -256,13 +459,114 @@ public sealed class ParityExporter(string repositoryRoot)
         node.WriteTo(writer);
     }
 
-    private static string GetSourceRevision(string repositoryRoot)
+    private static string ValidateRepositoryRoot(string repositoryRoot)
     {
+        string fullRoot = Path.GetFullPath(repositoryRoot);
+        if (!File.Exists(Path.Combine(fullRoot, "Marknexia.slnx")))
+            throw new DirectoryNotFoundException("The parity exporter must be given the Marknexia repository root.");
+        return fullRoot;
+    }
+
+    private static string ResolveSourceRevision(string repositoryRoot, string? frozenSourceRevision)
+    {
+        string revision = string.IsNullOrWhiteSpace(frozenSourceRevision)
+            ? RunGit(repositoryRoot, "rev-parse HEAD")
+            : RunGit(repositoryRoot, $"rev-parse {frozenSourceRevision}^{{commit}}");
+
+        if (!string.IsNullOrWhiteSpace(frozenSourceRevision))
+        {
+            // A v1 replay is valid only while the files that define the oracle still
+            // match its declared revision. Exporter/test changes do not affect this check.
+            RunGitExpectSuccess(repositoryRoot, $"diff --quiet {revision} -- src test-fixtures");
+        }
+        else if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain -- src test-fixtures")))
+        {
+            throw new InvalidOperationException("Refusing to stamp a parity baseline from a dirty behavioral oracle. Commit or revert src/test-fixtures changes first.");
+        }
+
+        return revision;
+    }
+
+    private static string RunGit(string repositoryRoot, string arguments)
+    {
+        using var process = Process.Start(new ProcessStartInfo("git", arguments)
+        {
+            WorkingDirectory = repositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }) ?? throw new InvalidOperationException("Could not start git to resolve parity provenance.");
+        if (!process.WaitForExit(5000) || process.ExitCode != 0)
+            throw new InvalidOperationException($"Could not resolve parity provenance: {process.StandardError.ReadToEnd().Trim()}");
+        return process.StandardOutput.ReadToEnd().Trim();
+    }
+
+    private static void RunGitExpectSuccess(string repositoryRoot, string arguments)
+    {
+        using var process = Process.Start(new ProcessStartInfo("git", arguments)
+        {
+            WorkingDirectory = repositoryRoot,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        }) ?? throw new InvalidOperationException("Could not start git to validate parity provenance.");
+        if (!process.WaitForExit(5000) || process.ExitCode != 0)
+            throw new InvalidOperationException("The behavioral oracle differs from the frozen parity revision; regenerate a new baseline instead of relabeling it.");
+    }
+
+    private static void ValidateOutputRoot(string repositoryRoot, string outputRoot)
+    {
+        if (PathsEqual(repositoryRoot, outputRoot) || IsWithin(repositoryRoot, outputRoot))
+            throw new InvalidOperationException("The parity output directory must not be the repository root or an ancestor of it.");
+
+        string fixturesRoot = Path.Combine(repositoryRoot, "compat", "fixtures");
+        if (IsWithin(outputRoot, repositoryRoot) && !IsWithin(outputRoot, fixturesRoot) && !PathsEqual(outputRoot, fixturesRoot))
+            throw new InvalidOperationException("Repository-local parity output must stay under compat/fixtures.");
+
+        if (Directory.Exists(outputRoot) && Directory.EnumerateFileSystemEntries(outputRoot).Any() && !IsOwnedFixtureDirectory(outputRoot))
+            throw new InvalidOperationException("Refusing to replace a non-fixture output directory.");
+    }
+
+    private static bool IsOwnedFixtureDirectory(string directory)
+    {
+        string manifest = Path.Combine(directory, "manifest.json");
+        if (!File.Exists(manifest)) return false;
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("git", "rev-parse HEAD") { WorkingDirectory = repositoryRoot, RedirectStandardOutput = true, UseShellExecute = false });
-            return process is not null && process.WaitForExit(5000) && process.ExitCode == 0 ? process.StandardOutput.ReadToEnd().Trim() : "unavailable";
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifest));
+            if (!document.RootElement.TryGetProperty("schemaVersion", out JsonElement version)
+                || version.GetString() != ParityCase.SchemaVersion) return false;
+            return Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).All(file =>
+                Path.GetFileName(file).Equals("manifest.json", StringComparison.Ordinal)
+                || file.EndsWith(".case.json", StringComparison.Ordinal));
         }
-        catch { return "unavailable"; }
+        catch (JsonException) { return false; }
+    }
+
+    private static void ReplaceOwnedFixtureDirectory(string outputRoot, string temporaryRoot)
+    {
+        if (Directory.Exists(outputRoot))
+        {
+            if (Directory.EnumerateFileSystemEntries(outputRoot).Any() && !IsOwnedFixtureDirectory(outputRoot))
+                throw new InvalidOperationException("Refusing to replace a directory that is not an owned parity fixture corpus.");
+            Directory.Delete(outputRoot, recursive: true);
+        }
+        Directory.Move(temporaryRoot, outputRoot);
+    }
+
+    private static bool PathsEqual(string first, string second) =>
+        Path.GetFullPath(first).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Equals(Path.GetFullPath(second).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsWithin(string candidate, string root)
+    {
+        string normalizedCandidate = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch { }
     }
 }

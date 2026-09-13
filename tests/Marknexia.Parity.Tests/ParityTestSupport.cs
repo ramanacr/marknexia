@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Json.Schema;
+using Marknexia.ParityExporter;
 
 namespace Marknexia.Parity.Tests;
 
@@ -17,6 +17,16 @@ internal static class ParityTestSupport
     public static void DeleteTempDirectory(string path)
     {
         if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+    }
+
+    public static void CopyDirectory(string source, string destination)
+    {
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(destination, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, overwrite: true);
+        }
     }
 
     public static string FindRepositoryRoot()
@@ -45,14 +55,20 @@ internal static class ParityTestSupport
 
     public static bool ValidateEveryCaseAgainstSchema(string fixtureRoot)
     {
-        string schemaPath = Path.Combine(FindRepositoryRoot(), "compat", "schema", "marknexia-parity-v1.schema.json");
-        JsonSchema schema = JsonSchema.FromText(File.ReadAllText(schemaPath));
-
-        return Directory.EnumerateFiles(fixtureRoot, "*.case.json", SearchOption.AllDirectories)
-            .All(path =>
-            {
-                using JsonDocument instance = JsonDocument.Parse(File.ReadAllText(path));
-                return schema.Evaluate(instance.RootElement).IsValid;
-            });
+        try
+        {
+            ParityFixtureValidator.Validate(fixtureRoot, FindRepositoryRoot());
+            return true;
+        }
+        catch (InvalidDataException) { return false; }
     }
+
+    public static int ReadManifestCaseCount(string fixtureRoot)
+    {
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixtureRoot, "manifest.json")));
+        return manifest.RootElement.GetProperty("caseCount").GetInt32();
+    }
+
+    public static string[] AreaNames(string fixtureRoot) => Directory.EnumerateDirectories(fixtureRoot)
+        .Select(Path.GetFileName).Where(name => !string.IsNullOrWhiteSpace(name)).Cast<string>().Order(StringComparer.Ordinal).ToArray();
 }

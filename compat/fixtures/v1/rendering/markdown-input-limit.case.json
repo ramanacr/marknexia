@@ -1,0 +1,21 @@
+{
+  "area": "rendering",
+  "expected": {
+    "exception": "DocumentTooLargeException",
+    "maximumBytes": 52428800,
+    "outcome": "rejected-before-read"
+  },
+  "input": {
+    "inputBytes": 52428801,
+    "maximumBytes": 52428800
+  },
+  "name": "markdown-input-limit",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
+  "virtualFileSystem": {
+    "files": [
+      "large.md"
+    ],
+    "root": "input-bound"
+  }
+}

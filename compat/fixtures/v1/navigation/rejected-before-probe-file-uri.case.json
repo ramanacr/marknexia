@@ -1,24 +1,27 @@
 {
   "area": "navigation",
   "expected": {
-    "diagnostic": null,
-    "externalUri": "https://github.com/",
-    "fragment": null,
-    "isSafe": true,
-    "kind": "ExternalBrowser",
-    "targetDocument": null
+    "fileSystemProbeCount": 0,
+    "intent": {
+      "diagnostic": "Access blocked: Network file paths and invalid local paths are not supported.",
+      "externalUri": null,
+      "fragment": null,
+      "isSafe": false,
+      "kind": "BlockedOrInvalid",
+      "targetDocument": null
+    }
   },
   "input": {
     "currentFile": "README.md",
-    "destination": "https://github.com",
+    "destination": "file://server.test/share/document.md",
     "policy": {
       "allowExternalLinks": true,
       "allowRemoteAssets": false,
       "enforceRepositorySandbox": true
     },
-    "repositoryRoot": "navigation"
+    "repositoryRoot": null
   },
-  "name": "remote-link",
+  "name": "rejected-before-probe-file-uri",
   "schemaVersion": "marknexia-parity-v1",
   "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
   "virtualFileSystem": {

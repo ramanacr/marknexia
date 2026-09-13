@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="JsonSchema.Net" />
     <ProjectReference Include="..\..\src\Marknexia.Core\Marknexia.Core.csproj" />
     <ProjectReference Include="..\..\src\Marknexia.Files\Marknexia.Files.csproj" />
     <ProjectReference Include="..\..\src\Marknexia.Navigation\Marknexia.Navigation.csproj" />

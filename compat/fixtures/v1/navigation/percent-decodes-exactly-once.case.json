@@ -6,14 +6,21 @@
     "fragment": "literal%20",
     "isSafe": true,
     "kind": "CrossDocumentWithAnchor",
-    "targetDocument": "D:\\Practice\\marknexia\\.worktrees\\ramana_rust_win32_feasibility\\test-fixtures\\markdown\\navigation\\docs\\literal%20.md#literal%20"
+    "targetDocument": "docs/literal%20.md#literal%20"
   },
   "input": {
-    "destination": "docs/literal%2520.md#literal%2520"
+    "currentFile": "README.md",
+    "destination": "docs/literal%2520.md#literal%2520",
+    "policy": {
+      "allowExternalLinks": true,
+      "allowRemoteAssets": false,
+      "enforceRepositorySandbox": true
+    },
+    "repositoryRoot": "navigation"
   },
   "name": "percent-decodes-exactly-once",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "2931037abd86d02fca258d61c9171cf451d482e2",
+  "sourceRevision": "d976711b0da9b878fc57947b963b417be909ba92",
   "virtualFileSystem": {
     "files": [
       "README.md",
