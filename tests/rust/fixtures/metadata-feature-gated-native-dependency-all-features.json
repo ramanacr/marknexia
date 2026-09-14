@@ -1,0 +1,50 @@
+{
+  "packages": [
+    {
+      "name": "marknexia-core",
+      "id": "path+file:///fixture#marknexia-core@0.1.0",
+      "dependencies": [
+        {
+          "name": "optional-native-bridge",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "optional-native-bridge",
+      "id": "registry+https://example.invalid#optional-native-bridge@1.0.0",
+      "dependencies": []
+    },
+    {
+      "name": "windows-core",
+      "id": "registry+https://example.invalid#windows-core@0.62.0",
+      "dependencies": []
+    }
+  ],
+  "resolve": {
+    "nodes": [
+      {
+        "id": "path+file:///fixture#marknexia-core@0.1.0",
+        "deps": [
+          {
+            "name": "optional-native-bridge",
+            "pkg": "registry+https://example.invalid#optional-native-bridge@1.0.0"
+          }
+        ]
+      },
+      {
+        "id": "registry+https://example.invalid#optional-native-bridge@1.0.0",
+        "deps": [
+          {
+            "name": "windows-core",
+            "pkg": "registry+https://example.invalid#windows-core@0.62.0"
+          }
+        ]
+      },
+      {
+        "id": "registry+https://example.invalid#windows-core@0.62.0",
+        "deps": []
+      }
+    ]
+  }
+}

@@ -23,7 +23,7 @@ else {
         throw "Cargo executable was not found: $Cargo"
     }
 
-    $metadataJson = & $Cargo metadata --format-version 1 --manifest-path $manifestPath --locked
+    $metadataJson = & $Cargo metadata --format-version 1 --manifest-path $manifestPath --locked --all-features
     if ($LASTEXITCODE -ne 0) {
         throw "cargo metadata failed with exit code $LASTEXITCODE"
     }
