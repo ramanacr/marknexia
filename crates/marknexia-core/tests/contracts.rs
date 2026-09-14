@@ -1,6 +1,7 @@
 use marknexia_core::contracts::{
-    AppTheme, BoundedFragment, Diagnostic, DiagnosticSeverity, DocumentId, DocumentText,
-    GenerationId, Heading, NavigationIntent, RenderRequest, RenderResult, RenderedHtml,
+    AppTheme, BoundedFragment, BoundedUrl, Diagnostic, DiagnosticSeverity, DocumentId,
+    DocumentText, GenerationId, Heading, NavigationIntent, RenderRequest, RenderResult,
+    RenderedHtml,
 };
 
 #[test]
@@ -39,4 +40,86 @@ fn bounded_contract_values_reject_oversized_input() {
     assert!(DocumentId::try_new("a".repeat(DocumentId::MAX_BYTES + 1)).is_err());
     assert!(DocumentText::try_new("a".repeat(DocumentText::MAX_BYTES + 1)).is_err());
     assert!(RenderedHtml::try_new("a".repeat(RenderedHtml::MAX_BYTES + 1)).is_err());
+}
+
+#[test]
+fn bounded_contract_values_deserialize_only_within_byte_limits() {
+    let document_id = "a".repeat(DocumentId::MAX_BYTES);
+    let document_text = "a".repeat(DocumentText::MAX_BYTES);
+    let rendered_html = "a".repeat(RenderedHtml::MAX_BYTES);
+    let fragment = "a".repeat(BoundedFragment::MAX_BYTES);
+    let url = "a".repeat(BoundedUrl::MAX_BYTES);
+
+    assert_eq!(
+        serde_json::from_str::<DocumentId>(&serde_json::to_string(&document_id).unwrap())
+            .unwrap()
+            .as_str(),
+        document_id
+    );
+    assert_eq!(
+        serde_json::from_str::<DocumentText>(&serde_json::to_string(&document_text).unwrap())
+            .unwrap()
+            .as_str(),
+        document_text
+    );
+    assert_eq!(
+        serde_json::from_str::<RenderedHtml>(&serde_json::to_string(&rendered_html).unwrap())
+            .unwrap()
+            .as_str(),
+        rendered_html
+    );
+    assert_eq!(
+        serde_json::from_str::<BoundedFragment>(&serde_json::to_string(&fragment).unwrap())
+            .unwrap()
+            .as_str(),
+        fragment
+    );
+    assert_eq!(
+        serde_json::from_str::<BoundedUrl>(&serde_json::to_string(&url).unwrap())
+            .unwrap()
+            .as_str(),
+        url
+    );
+
+    assert!(
+        serde_json::from_str::<DocumentId>(
+            &serde_json::to_string(&"a".repeat(DocumentId::MAX_BYTES + 1)).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<DocumentText>(
+            &serde_json::to_string(&"a".repeat(DocumentText::MAX_BYTES + 1)).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<RenderedHtml>(
+            &serde_json::to_string(&"a".repeat(RenderedHtml::MAX_BYTES + 1)).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<BoundedFragment>(
+            &serde_json::to_string(&"a".repeat(BoundedFragment::MAX_BYTES + 1)).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<BoundedUrl>(
+            &serde_json::to_string(&"a".repeat(BoundedUrl::MAX_BYTES + 1)).unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn bounded_contract_values_measure_utf8_bytes_not_characters() {
+    let accepted = "é".repeat(DocumentId::MAX_BYTES / 2);
+    let rejected = "é".repeat(DocumentId::MAX_BYTES / 2 + 1);
+
+    assert!(serde_json::from_str::<DocumentId>(&serde_json::to_string(&accepted).unwrap()).is_ok());
+    assert!(
+        serde_json::from_str::<DocumentId>(&serde_json::to_string(&rejected).unwrap()).is_err()
+    );
 }

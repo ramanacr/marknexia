@@ -4,7 +4,10 @@ param(
     [string]$Configuration = 'Release',
     [ValidateSet('x64', 'ARM64', 'All')]
     [string]$Architecture = 'All',
-    [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$CargoPath,
+    [string]$VsWherePath,
+    [string]$CmdPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,17 +18,27 @@ else {
     Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.cargo'
 }
 $cargoCandidates = @(
+    $CargoPath,
     (Get-Command cargo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
     (Join-Path $cargoHome 'bin\cargo.exe')
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
-$cargoPath = $cargoCandidates | Select-Object -First 1
-if (-not $cargoPath) {
+$resolvedCargoPath = $cargoCandidates | Select-Object -First 1
+if (-not $resolvedCargoPath) {
     throw 'Cargo was not found on PATH or under CARGO_HOME.'
 }
-$cmd = Get-Command cmd.exe -CommandType Application -ErrorAction Stop
+$resolvedCmdPath = if ($CmdPath) {
+    if (-not (Test-Path -LiteralPath $CmdPath -PathType Leaf)) {
+        throw "Command processor was not found: $CmdPath"
+    }
+    $CmdPath
+}
+else {
+    (Get-Command cmd.exe -CommandType Application -ErrorAction Stop).Source
+}
 
 function Resolve-VsDevCmd {
     $vswhereCandidates = @(
+        $VsWherePath,
         (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Microsoft Visual Studio\Installer\vswhere.exe'),
         (Get-Command vswhere.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
@@ -68,11 +81,11 @@ foreach ($target in $targets) {
 
     $cargoArguments = $arguments | ForEach-Object { '"{0}"' -f $_ }
     $commandLine = 'call "{0}" -no_logo -arch={1} -host_arch=x64 && "{2}" {3}' -f `
-        $vsDevCmd, $target.DeveloperArchitecture, $cargoPath, ($cargoArguments -join ' ')
+        $vsDevCmd, $target.DeveloperArchitecture, $resolvedCargoPath, ($cargoArguments -join ' ')
 
     Push-Location $RepositoryRoot
     try {
-        & $cmd.Source /d /c $commandLine
+        & $resolvedCmdPath /d /c $commandLine
     }
     finally {
         Pop-Location

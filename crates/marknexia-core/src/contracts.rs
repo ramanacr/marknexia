@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct GenerationId(pub u64);
@@ -97,11 +97,12 @@ impl std::error::Error for BoundedValueError {}
 
 macro_rules! bounded_string {
     ($name:ident, $kind:literal, $maximum:expr) => {
-        #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+        #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
         impl $name {
+            /// Maximum accepted UTF-8 encoded byte length.
             pub const MAX_BYTES: usize = $maximum;
 
             pub fn try_new(value: impl Into<String>) -> Result<Self, BoundedValueError> {
@@ -120,6 +121,16 @@ macro_rules! bounded_string {
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::try_new(value).map_err(de::Error::custom)
             }
         }
     };

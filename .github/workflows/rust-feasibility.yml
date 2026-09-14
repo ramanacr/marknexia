@@ -40,6 +40,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Portable dependency boundary
+        run: pwsh -NoProfile -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
       - name: Dependency policy
         run: cargo deny check advisories bans licenses sources
 
