@@ -5,30 +5,119 @@ import { chromium } from 'playwright';
 
 const bridge = await readFile(new URL('../../src/Marknexia.Rendering/Assets/bridge.js', import.meta.url), 'utf8');
 const documentCss = await readFile(new URL('../../src/Marknexia.Rendering/Assets/github-markdown.css', import.meta.url), 'utf8');
+const mermaidBundle = await readFile(new URL('../../src/Marknexia.Rendering/Assets/mermaid.min.js', import.meta.url), 'utf8');
 let browser;
 before(async () => {
   browser = await chromium.launch({ headless: true, channel: process.env.MARKNEXIA_TEST_BROWSER || undefined });
 });
 after(async () => { await browser?.close(); });
 
-async function withDocument(html, check) {
+async function withDocument(html, check, options = {}) {
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
+    if (options.colorScheme) await page.emulateMedia({ colorScheme: options.colorScheme });
     // Stub only the native-host boundary. Run the production bridge before a
     // real document load so its DOMContentLoaded handlers are exercised too.
     await page.addInitScript({ content: `
       window.hostMessages = [];
       window.chrome ||= {};
       window.chrome.webview = { postMessage: message => window.hostMessages.push(message) };
+      ${options.beforeBridge ?? ''}
+      ${options.useBundledMermaid ? mermaidBundle : ''}
       ${bridge}` });
     await page.goto('data:text/html;charset=utf-8,' + encodeURIComponent(
-      `<body><aside>read outside document</aside><main class="markdown-body">${html}</main></body>`));
+      `<html ${options.htmlAttributes ?? ''}><body><aside>read outside document</aside><main class="markdown-body">${html}</main></body></html>`));
     await check(page);
     assert.deepEqual(errors, [], 'bridge must not raise uncaught browser errors');
   } finally { await page.close(); }
 }
+
+test('explicit dark documents use the Metallic Radium palette', async () => {
+  await withDocument(`<style>${documentCss}</style><p>Radium document</p>`, async page => {
+    const colors = await page.locator('body').evaluate(element => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, foreground: style.color };
+    });
+
+    assert.deepEqual(colors, { background: 'rgb(23, 26, 28)', foreground: 'rgb(241, 244, 239)' });
+  }, { htmlAttributes: 'data-theme="dark"', colorScheme: 'light' });
+});
+
+test('dark ColorCode string and number tokens use Metallic Radium contrast colors', async () => {
+  await withDocument(`<style>${documentCss}</style><pre><span class="string">"radium"</span> <span class="number">42</span></pre>`, async page => {
+    const colors = await page.locator('pre span').evaluateAll(tokens => tokens.map(token => getComputedStyle(token).color));
+    assert.deepEqual(colors, ['rgb(104, 232, 117)', 'rgb(98, 195, 255)']);
+  }, { htmlAttributes: 'data-theme="dark"', colorScheme: 'light' });
+});
+
+test('light documents preserve existing control hover and important alert colors', async () => {
+  await withDocument(`<style>${documentCss}</style><button class="copy-btn">Copy</button><div class="markdown-alert markdown-alert-important"><div class="markdown-alert-title">Important</div></div>`, async page => {
+    const copy = page.locator('.copy-btn');
+    await copy.hover();
+    await page.waitForTimeout(250);
+    assert.equal(await copy.evaluate(button => getComputedStyle(button).backgroundColor), 'rgb(234, 238, 242)');
+    assert.equal(await page.locator('.markdown-alert-title').evaluate(element => getComputedStyle(element).color), 'rgb(130, 80, 223)');
+  }, { htmlAttributes: 'data-theme="light"', colorScheme: 'light' });
+});
+
+test('search-current keeps the original Light and System-light colors while dark uses Radium', async () => {
+  const currentHighlight = async (htmlAttributes, colorScheme) => {
+    let colors;
+    await withDocument(`<style>${documentCss}</style><p>Search result</p>`, async page => {
+      colors = await page.locator('body').evaluate(element => {
+        const style = getComputedStyle(element, '::highlight(marknexia-search-current)');
+        return { background: style.backgroundColor, foreground: style.color };
+      });
+    }, { htmlAttributes, colorScheme });
+    return colors;
+  };
+
+  assert.deepEqual(await currentHighlight('data-theme="light"', 'light'), {
+    background: 'rgb(96, 165, 250)', foreground: 'rgb(15, 23, 42)'
+  });
+  assert.deepEqual(await currentHighlight('data-theme="system"', 'light'), {
+    background: 'rgb(96, 165, 250)', foreground: 'rgb(15, 23, 42)'
+  });
+  assert.deepEqual(await currentHighlight('data-theme="dark"', 'light'), {
+    background: 'rgb(183, 255, 60)', foreground: 'rgb(23, 32, 0)'
+  });
+});
+
+test('system Mermaid diagrams rerender the real bundled SVG across color-scheme changes without losing source', async () => {
+  const source = 'graph TD; A[Radium]-->B[Theme];';
+  await withDocument(`<style>${documentCss}</style><div class="marknexia-mermaid" id="radium-diagram"><pre class="mermaid">${source}</pre></div>`, async page => {
+    const container = page.locator('#radium-diagram');
+    const diagram = container.locator('.mermaid');
+    await diagram.locator('svg').waitFor();
+    const lightSvg = await diagram.innerHTML();
+    assert.equal(await container.getAttribute('data-marknexia-mermaid-source'), source);
+
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.waitForFunction(({source, lightSvg}) => {
+      const container = document.getElementById('radium-diagram');
+      const svg = container?.querySelector('.mermaid')?.innerHTML ?? '';
+      return container?.getAttribute('data-marknexia-mermaid-source') === source
+        && svg !== lightSvg
+        && /303639/i.test(svg);
+    }, { source, lightSvg });
+
+    const darkSvg = await diagram.innerHTML();
+    await page.emulateMedia({ colorScheme: 'light' });
+    await page.waitForFunction(({source, darkSvg}) => {
+      const container = document.getElementById('radium-diagram');
+      const svg = container?.querySelector('.mermaid')?.innerHTML ?? '';
+      return container?.getAttribute('data-marknexia-mermaid-source') === source
+        && svg !== darkSvg
+        && !/303639/i.test(svg);
+    }, { source, darkSvg });
+  }, {
+    htmlAttributes: 'data-theme="system"',
+    colorScheme: 'light',
+    useBundledMermaid: true
+  });
+});
 
 async function find(page, query, backwards = false) {
   return page.evaluate(({query, backwards}) => window.marknexiaBridge.findText(query, backwards), {query, backwards});

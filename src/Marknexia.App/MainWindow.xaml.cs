@@ -127,6 +127,7 @@ public sealed partial class MainWindow : Window
         // is ready to attach to the native tree control.
         if (Content is FrameworkElement rootElement)
         {
+            rootElement.ActualThemeChanged += (_, _) => RefreshWebViewBackgroundColors();
             if (rootElement.IsLoaded)
             {
                 _ = InitializeAfterLoadAsync();
@@ -427,9 +428,7 @@ public sealed partial class MainWindow : Window
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
-            DefaultBackgroundColor = currentTheme == AppTheme.Dark
-                ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
-                : Windows.UI.Color.FromArgb(255, 255, 255, 255)
+            DefaultBackgroundColor = GetWebViewBackgroundColor()
         };
 
         var tabState = new DocumentTabState(canonicalPath, readResult.Content, rendered, webView, repositoryRoot)
@@ -1172,10 +1171,7 @@ public sealed partial class MainWindow : Window
                 active.Document = rendered;
                 active.SourceText = readResult.Content;
                 active.PendingScroll = true;
-                AppTheme currentTheme = GetCurrentTheme();
-                active.WebView.DefaultBackgroundColor = currentTheme == AppTheme.Dark
-                    ? Windows.UI.Color.FromArgb(255, 13, 17, 23)
-                    : Windows.UI.Color.FromArgb(255, 255, 255, 255);
+                active.WebView.DefaultBackgroundColor = GetWebViewBackgroundColor();
 
                 await PrepareWebViewAsync(active.WebView, active.FilePath, rendered);
                 UpdateOutlineList(rendered.Headings);
@@ -1403,6 +1399,26 @@ public sealed partial class MainWindow : Window
     private AppTheme GetCurrentTheme()
     {
         return _settingsService.Current.Theme;
+    }
+
+    private Windows.UI.Color GetWebViewBackgroundColor()
+    {
+        bool nativeSystemIsDark = Content is FrameworkElement root && root.ActualTheme == ElementTheme.Dark;
+        uint argb = ThemeResolution.ResolveWebViewBackgroundArgb(GetCurrentTheme(), nativeSystemIsDark);
+        return Windows.UI.Color.FromArgb(
+            (byte)(argb >> 24),
+            (byte)(argb >> 16),
+            (byte)(argb >> 8),
+            (byte)argb);
+    }
+
+    private void RefreshWebViewBackgroundColors()
+    {
+        Windows.UI.Color background = GetWebViewBackgroundColor();
+        foreach (DocumentTabState tab in _tabStates)
+        {
+            tab.WebView.DefaultBackgroundColor = background;
+        }
     }
 
     private static string JsArg(string value) => JsonSerializer.Serialize(value);
