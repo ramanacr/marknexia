@@ -10,7 +10,7 @@
   "input": {
     "archiveBytesBase64": "UEsDBBQAAAAAAAAAIVAb3wWlAQAAAAEAAAAOAAAALi4vZXNjYXBlZC50eHQBUEsBAhQAFAAAAAAAAAAhUBvfBaUBAAAAAQAAAA4AAAAAAAAAAAAAAAAAAAAAAC4uL2VzY2FwZWQudHh0UEsFBgAAAAABAAEAPAAAAC0AAAAAAA==",
     "checksumMatches": true,
-    "checksumText": "0f7b95b92feda1687063ebf3a7819c36ee49828bf0afcf219eb640210cdb526a  package.zip\\n",
+    "checksumText": "0f7b95b92feda1687063ebf3a7819c36ee49828bf0afcf219eb640210cdb526a  package.zip\n",
     "maximumExpandedBytes": 1000000000,
     "packageBytes": 127,
     "packageEntries": [
@@ -24,7 +24,7 @@
   },
   "name": "archive-traversal",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "5ff161b0a18d8cbc4625311b707f24daf5a6bffa",
+  "sourceRevision": "978483037d8042f18f19df39e1ce70f36d10fdd0",
   "virtualFileSystem": {
     "files": [],
     "root": "updates"

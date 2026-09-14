@@ -63,9 +63,11 @@ public sealed class ParityExporterTests
             ParityTestSupport.CopyDirectory(baseline, copy);
             string target = Path.Combine(copy, "rendering", "rendered-output-limit.case.json");
             await File.WriteAllTextAsync(target, (await File.ReadAllTextAsync(target)).Replace("\"maximumBytes\": 1", "\"maximumBytes\": 2", StringComparison.Ordinal));
+            byte[] mutatedCopy = await File.ReadAllBytesAsync(target);
 
             await FluentActions.Invoking(() => ParityBaselineVerifier.VerifyAsync(root, copy, CancellationToken.None))
                 .Should().ThrowAsync<InvalidDataException>();
+            (await File.ReadAllBytesAsync(target)).Should().Equal(mutatedCopy);
             (await File.ReadAllBytesAsync(source)).Should().Equal(original);
         }
         finally { ParityTestSupport.DeleteTempDirectory(copy); }
@@ -129,6 +131,27 @@ public sealed class ParityExporterTests
     }
 
     [Fact]
+    public async Task FrozenExport_RejectsUntrackedAllowlistedOracleInput()
+    {
+        string root = ParityTestSupport.FindRepositoryRoot();
+        string untracked = Path.Combine(root, "src", "Marknexia.Core", "__parity_untracked_input__.cs");
+        string output = ParityTestSupport.CreateTempDirectory();
+        try
+        {
+            await File.WriteAllTextAsync(untracked, "// untracked oracle input\n");
+            string revision = ParityBaselineVerifier.GetFrozenRevision(Path.Combine(root, "compat", "fixtures", "v1"));
+
+            await FluentActions.Invoking(() => new Exporter(root, revision).ExportAsync(output, CancellationToken.None))
+                .Should().ThrowAsync<InvalidOperationException>();
+        }
+        finally
+        {
+            if (File.Exists(untracked)) File.Delete(untracked);
+            ParityTestSupport.DeleteTempDirectory(output);
+        }
+    }
+
+    [Fact]
     public void FixtureValidation_CanRunTwiceInOneProcess()
     {
         string fixtures = Path.Combine(ParityTestSupport.FindRepositoryRoot(), "compat", "fixtures", "v1");
@@ -154,9 +177,12 @@ public sealed class ParityExporterTests
         string root = Path.Combine(ParityTestSupport.FindRepositoryRoot(), "compat", "fixtures", "v1", "update-archives");
         using JsonDocument traversal = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "archive-traversal.case.json")));
         using JsonDocument expansion = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "expansion-limits.case.json")));
+        using JsonDocument checksum = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "checksum-mismatch.case.json")));
 
         traversal.RootElement.GetProperty("expected").GetProperty("message").GetString().Should().Be("The update archive contains a path traversal entry.");
         expansion.RootElement.GetProperty("input").GetProperty("packageEntries")[0].GetProperty("declaredUncompressedBytes").GetInt64().Should().Be(1_000_000_001L);
+        string checksumText = checksum.RootElement.GetProperty("input").GetProperty("checksumText").GetString()!;
+        checksumText.Should().EndWith("\n").And.NotContain("\\n");
     }
 
     [Fact]

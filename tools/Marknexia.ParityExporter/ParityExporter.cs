@@ -289,10 +289,11 @@ public sealed class ParityExporter
         Uri packageUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip");
         Uri checksumUri = new("https://github.com/ramanacr/marknexia/releases/download/v1.4.0/Marknexia-v1.4.0-win-x64.zip.sha256");
         string checksum = checksumOverride ?? Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant();
-        var responses = new Dictionary<Uri, byte[]> { [packageUri] = archive, [checksumUri] = Encoding.UTF8.GetBytes(checksum + "  package.zip\n") };
+        string checksumText = checksum + "  package.zip\n";
+        var responses = new Dictionary<Uri, byte[]> { [packageUri] = archive, [checksumUri] = Encoding.UTF8.GetBytes(checksumText) };
         var update = new UpdateCheckResult(true, "1.3.0", "1.4.0", new Uri("https://github.com/ramanacr/marknexia/releases/tag/v1.4.0"))
         {
-            Assets = new[] { new UpdateAsset("Marknexia-v1.4.0-win-x64.zip", packageUri, archive.LongLength), new UpdateAsset("Marknexia-v1.4.0-win-x64.zip.sha256", checksumUri, checksum.Length + 14) }
+            Assets = new[] { new UpdateAsset("Marknexia-v1.4.0-win-x64.zip", packageUri, archive.LongLength), new UpdateAsset("Marknexia-v1.4.0-win-x64.zip.sha256", checksumUri, Encoding.UTF8.GetByteCount(checksumText)) }
         };
         try
         {
@@ -309,7 +310,7 @@ public sealed class ParityExporter
                     ["archiveBytesBase64"] = Convert.ToBase64String(archive),
                     ["packageEntries"] = DescribeArchiveEntries(archive),
                     ["checksumMatches"] = checksumOverride is null,
-                    ["checksumText"] = checksum + "  package.zip\\n",
+                    ["checksumText"] = checksumText,
                     ["packageBytes"] = archive.LongLength,
                     ["maximumExpandedBytes"] = UpdateService.MaxDownloadBytes
                     , ["preExistingStage"] = preExistingStaleStage ? "pending-stale-fixture" : null
@@ -508,7 +509,7 @@ public sealed class ParityExporter
             // match its declared revision. Exporter/test changes do not affect this check.
             RunGitExpectSuccess(repositoryRoot, $"diff --quiet {revision} -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json");
         }
-        else if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain --untracked-files=all -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json")))
+        if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain --untracked-files=all -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json")))
         {
             throw new InvalidOperationException("Refusing to stamp a parity baseline from dirty oracle/build inputs. Commit or revert the documented allowlist first.");
         }

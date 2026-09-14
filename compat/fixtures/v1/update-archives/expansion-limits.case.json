@@ -10,7 +10,7 @@
   "input": {
     "archiveBytesBase64": "UEsDBBQAAAAAAAAAAAAAAAAAAAAAAAAAAAANAAAAb3ZlcnNpemVkLmJpblBLAQIUABQAAAAAAAAAAAAAAAAAAAAAAAHKmjsNAAAAAAAAAAAAAAAAAAAAAABvdmVyc2l6ZWQuYmluUEsFBgAAAAABAAEAOwAAACsAAAAAAA==",
     "checksumMatches": true,
-    "checksumText": "79cf6a499d0cb9980b84d9e6e72535918ba37299d64291b9300e1b256663a3f6  package.zip\\n",
+    "checksumText": "79cf6a499d0cb9980b84d9e6e72535918ba37299d64291b9300e1b256663a3f6  package.zip\n",
     "maximumExpandedBytes": 1000000000,
     "packageBytes": 124,
     "packageEntries": [
@@ -24,7 +24,7 @@
   },
   "name": "expansion-limits",
   "schemaVersion": "marknexia-parity-v1",
-  "sourceRevision": "5ff161b0a18d8cbc4625311b707f24daf5a6bffa",
+  "sourceRevision": "978483037d8042f18f19df39e1ce70f36d10fdd0",
   "virtualFileSystem": {
     "files": [],
     "root": "updates"
