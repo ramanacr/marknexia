@@ -266,29 +266,56 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);
   if (typeof mermaid !== 'undefined') {
     try {
-      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: isDark ? 'dark' : 'default',
-        securityLevel: 'strict'
-      });
-      
-      document.querySelectorAll('.marknexia-mermaid').forEach(container => {
-        const id = container.id;
-        const preEl = container.querySelector('.mermaid');
-        if (preEl) {
-          const code = preEl.textContent;
+      const requestedTheme = document.documentElement.getAttribute('data-theme');
+      const systemColorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+      let renderSequence = 0;
+      const renderMermaidDiagrams = () => {
+        const isDark = requestedTheme === 'dark'
+          || (requestedTheme === 'system' && systemColorScheme.matches);
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: isDark ? 'base' : 'default',
+          themeVariables: isDark ? {
+            background: '#171A1C',
+            primaryColor: '#303639',
+            primaryTextColor: '#F1F4EF',
+            primaryBorderColor: '#485054',
+            lineColor: '#AAB2B0',
+            secondaryColor: '#24292C',
+            tertiaryColor: '#171A1C',
+            mainBkg: '#303639',
+            nodeBorder: '#485054',
+            clusterBkg: '#24292C',
+            clusterBorder: '#485054',
+            titleColor: '#F1F4EF',
+            edgeLabelBackground: '#24292C',
+            textColor: '#F1F4EF'
+          } : undefined,
+          securityLevel: 'strict'
+        });
+
+        document.querySelectorAll('.marknexia-mermaid').forEach(container => {
+          const id = container.id;
+          const preEl = container.querySelector('.mermaid');
+          if (!id || !preEl) return;
+          const code = container.dataset.marknexiaMermaidSource ?? preEl.textContent;
+          container.dataset.marknexiaMermaidSource = code;
+          const renderId = `${id}-svg-${++renderSequence}`;
+          container.dataset.marknexiaMermaidRenderId = renderId;
           try {
-            mermaid.render(id + '-svg', code).then(res => {
-              preEl.innerHTML = res.svg;
+            mermaid.render(renderId, code).then(res => {
+              if (container.dataset.marknexiaMermaidRenderId === renderId) preEl.innerHTML = res.svg;
             }).catch(err => {
-              showDiagramError(id, err);
+              if (container.dataset.marknexiaMermaidRenderId === renderId) showDiagramError(id, err);
             });
           } catch (err) {
-            showDiagramError(id, err);
+            if (container.dataset.marknexiaMermaidRenderId === renderId) showDiagramError(id, err);
           }
-        }
-      });
+        });
+      };
+
+      renderMermaidDiagrams();
+      if (requestedTheme === 'system') systemColorScheme.addEventListener('change', renderMermaidDiagrams);
     } catch (e) {
       console.error('Mermaid initialization failed', e);
     }
