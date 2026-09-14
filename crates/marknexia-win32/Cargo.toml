@@ -1,0 +1,13 @@
+[package]
+name = "marknexia-win32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "marknexia-win32"
+path = "src/main.rs"
+
+[dependencies]
+marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+marknexia-webview = { path = "../marknexia-webview", version = "=0.1.0" }

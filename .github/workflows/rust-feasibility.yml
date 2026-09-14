@@ -1,0 +1,68 @@
+name: Rust Feasibility
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1-x86_64-pc-windows-msvc
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  rust-quality:
+    name: Rust quality and policy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Install pinned policy tools
+        run: |
+          $tools = Get-Content tools/rust-tools.lock -Raw | ConvertFrom-Json
+          cargo install cargo-deny --version $tools.tools.cargoDeny --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo install cargo-fuzz --version $tools.tools.cargoFuzz --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Dependency policy
+        run: cargo deny check advisories bans licenses sources
+
+  rust-release-build:
+    name: Rust release build (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Build feasibility artifacts
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+  dotnet-preservation:
+    name: .NET Release preservation
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Run existing .NET Release suite
+        run: dotnet test Marknexia.slnx --configuration Release

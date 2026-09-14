@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/marknexia-core",
+    "crates/marknexia-files",
+    "crates/marknexia-navigation",
+    "crates/marknexia-markdown",
+    "crates/marknexia-security",
+    "crates/marknexia-rendering",
+    "crates/marknexia-webview",
+    "crates/marknexia-update",
+    "crates/marknexia-win32",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["Marknexia Contributors"]
+repository = "https://github.com/ramanacr/marknexia"
+
+[workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[profile.release]
+incremental = false
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
