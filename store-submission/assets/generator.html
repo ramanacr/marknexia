@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Marknexia Store Asset Generator</title>
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; font-family: 'Segoe UI Variable Display', 'Segoe UI', -apple-system, sans-serif; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <img id="logo" src="data:image/png;base64,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" style="display:none;" />
+  <canvas id="c"></canvas>
+  <script>
+    const logoImg = document.getElementById('logo');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+      if (typeof r === 'number') r = {tl: r, tr: r, br: r, bl: r};
+      ctx.beginPath();
+      ctx.moveTo(x + r.tl, y);
+      ctx.lineTo(x + w - r.tr, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+      ctx.lineTo(x + w, y + h - r.br);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+      ctx.lineTo(x + r.bl, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+      ctx.lineTo(x, y + r.tl);
+      ctx.quadraticCurveTo(x, y, x + r.tl, y);
+      ctx.closePath();
+      if (fill) ctx.fill();
+      if (stroke) ctx.stroke();
+    }
+
+    function drawShell(title, activeTab, tabs, isSearchActive) {
+      canvas.width = 1920;
+      canvas.height = 1080;
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, 1920, 1080);
+
+      // Titlebar
+      ctx.fillStyle = '#161b22';
+      ctx.fillRect(0, 0, 1920, 38);
+      ctx.drawImage(logoImg, 14, 8, 22, 22);
+      ctx.fillStyle = '#e6edf3';
+      ctx.font = '600 13px "Segoe UI", sans-serif';
+      ctx.fillText('Marknexia — ' + title, 44, 24);
+
+      // Window controls
+      ctx.fillStyle = '#848d97';
+      ctx.font = '14px "Segoe UI", sans-serif';
+      ctx.fillText('—', 1780, 24);
+      ctx.fillText('□', 1830, 23);
+      ctx.fillText('✕', 1880, 23);
+
+      // TabView Bar
+      ctx.fillStyle = '#161b22';
+      ctx.fillRect(0, 38, 1920, 42);
+      let tabX = 14;
+      tabs.forEach(t => {
+        const isActive = t === activeTab;
+        const tabWidth = 180;
+        if (isActive) {
+          ctx.fillStyle = '#0d1117';
+          roundRect(ctx, tabX, 42, tabWidth, 38, {tl: 6, tr: 6, br: 0, bl: 0}, true, false);
+          ctx.fillStyle = '#2f81f7';
+          ctx.fillRect(tabX + 16, 78, tabWidth - 32, 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '600 13px "Segoe UI", sans-serif';
+        } else {
+          ctx.fillStyle = '#1f242c';
+          roundRect(ctx, tabX, 45, tabWidth, 35, {tl: 6, tr: 6, br: 0, bl: 0}, true, false);
+          ctx.fillStyle = '#848d97';
+          ctx.font = '400 13px "Segoe UI", sans-serif';
+        }
+        ctx.fillText(t, tabX + 18, 64);
+        ctx.fillStyle = '#848d97';
+        ctx.font = '12px "Segoe UI", sans-serif';
+        ctx.fillText('×', tabX + tabWidth - 22, 64);
+        tabX += tabWidth + 6;
+      });
+
+      // New Tab Button
+      ctx.fillStyle = '#21262d';
+      roundRect(ctx, tabX, 45, 34, 34, 6, true, false);
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('+', tabX + 12, 67);
+
+      // Command Toolbar
+      ctx.fillStyle = '#161b22';
+      ctx.fillRect(0, 80, 1920, 48);
+      ctx.strokeStyle = '#30363d';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, 128); ctx.lineTo(1920, 128);
+      ctx.stroke();
+
+      // Toolbar Buttons
+      const buttons = [
+        { label: 'Sidebar', icon: '☰' },
+        { label: 'Open File', icon: '📄' },
+        { label: 'Open Folder', icon: '📁' },
+        { label: 'Theme: Dark', icon: '🌙' },
+        { label: 'Zoom: 100%', icon: '🔍' },
+        { label: 'Settings', icon: '⚙' }
+      ];
+      let btnX = 16;
+      buttons.forEach(b => {
+        ctx.fillStyle = '#21262d';
+        roundRect(ctx, btnX, 88, 110, 32, 6, true, false);
+        ctx.fillStyle = '#c9d1d9';
+        ctx.font = '13px "Segoe UI", sans-serif';
+        ctx.fillText(b.icon + ' ' + b.label, btnX + 12, 109);
+        btnX += 120;
+      });
+
+      // Split View Sidebar
+      ctx.fillStyle = '#161b22';
+      ctx.fillRect(0, 128, 320, 952);
+      ctx.strokeStyle = '#30363d';
+      ctx.beginPath();
+      ctx.moveTo(320, 128); ctx.lineTo(320, 1080);
+      ctx.stroke();
+
+      // Main Viewer Area
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(321, 128, 1599, 952);
+
+      if (isSearchActive) {
+        const sX = 1520, sY = 144, sW = 360, sH = 46;
+        ctx.fillStyle = '#1f2937';
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 2;
+        roundRect(ctx, sX, sY, sW, sH, 8, true, true);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '14px "Cascadia Code", monospace';
+        ctx.fillText('Mermaid', sX + 16, sY + 28);
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '13px "Segoe UI", sans-serif';
+        ctx.fillText('1 of 4 matches', sX + 140, sY + 28);
+        ctx.fillText('↑  ↓  ✕', sX + 280, sY + 28);
+      }
+    }
+
+    window.renderScreenshot1 = function() {
+      drawShell('README.md', 'README.md', ['README.md', 'features.md', 'architecture.md'], false);
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillText('DOCUMENT OUTLINE', 24, 160);
+      
+      const outlineItems = [
+        { level: 1, text: 'Marknexia' },
+        { level: 2, text: '⚡ GitHub-Style Alerts' },
+        { level: 2, text: '📊 GFM Tables & Tasks' },
+        { level: 2, text: '🧭 Repository Navigation' },
+        { level: 2, text: '🛠 Syntax Highlighting' },
+        { level: 2, text: '🔒 Offline Security' }
+      ];
+      let oY = 195;
+      outlineItems.forEach(item => {
+        const indent = (item.level - 1) * 16;
+        if (item.level === 1) {
+          ctx.fillStyle = '#1f2937';
+          roundRect(ctx, 16, oY - 18, 288, 28, 4, true, false);
+          ctx.fillStyle = '#58a6ff';
+          ctx.font = 'bold 13px "Segoe UI", sans-serif';
+        } else {
+          ctx.fillStyle = '#c9d1d9';
+          ctx.font = '400 13px "Segoe UI", sans-serif';
+        }
+        ctx.fillText((item.level === 1 ? '● ' : '  ▸ ') + item.text, 24 + indent, oY);
+        oY += 34;
+      });
+
+      let mX = 380, mY = 180;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('Marknexia — GitHub-Style Markdown Viewer', mX, mY);
+      mY += 28;
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('Native offline-first Windows Markdown documentation and repository reader with 100% GFM parity.', mX, mY);
+      mY += 48;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 24px "Segoe UI", sans-serif';
+      ctx.fillText('Authentic GitHub Alert Callouts', mX, mY);
+      mY += 28;
+
+      const alerts = [
+        { type: 'NOTE', color: '#2f81f7', bg: 'rgba(56, 139, 253, 0.12)', text: 'Highlights information that users should take into account, even when skimming.' },
+        { type: 'TIP', color: '#3fb950', bg: 'rgba(63, 185, 80, 0.12)', text: 'Optional advice to help a user be more successful with local repositories.' },
+        { type: 'IMPORTANT', color: '#a371f7', bg: 'rgba(163, 113, 247, 0.12)', text: 'Crucial information necessary for users to succeed and avoid configuration errors.' },
+        { type: 'WARNING', color: '#d29922', bg: 'rgba(210, 153, 34, 0.12)', text: 'Critical content demanding immediate user attention due to potential risks.' },
+        { type: 'CAUTION', color: '#f85149', bg: 'rgba(248, 81, 73, 0.12)', text: 'Negative potential consequences of an action or missing dependency.' }
+      ];
+
+      alerts.forEach(a => {
+        const aWidth = 960;
+        ctx.fillStyle = a.bg;
+        roundRect(ctx, mX, mY, aWidth, 48, 6, true, false);
+        ctx.fillStyle = a.color;
+        ctx.fillRect(mX, mY, 4, 48);
+        ctx.fillStyle = a.color;
+        ctx.font = 'bold 13px "Segoe UI", sans-serif';
+        ctx.fillText(a.type, mX + 18, mY + 29);
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = '14px "Segoe UI", sans-serif';
+        ctx.fillText(a.text, mX + 120, mY + 29);
+        mY += 56;
+      });
+
+      mY += 12;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 20px "Segoe UI", sans-serif';
+      ctx.fillText('Extended GFM Tables & Task Lists', mX, mY);
+      mY += 24;
+
+      const tW = 960;
+      ctx.fillStyle = '#161b22';
+      ctx.fillRect(mX, mY, tW, 36);
+      ctx.strokeStyle = '#30363d';
+      ctx.strokeRect(mX, mY, tW, 36);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 13px "Segoe UI", sans-serif';
+      ctx.fillText('FEATURE', mX + 20, mY + 23);
+      ctx.fillText('SPECIFICATION', mX + 260, mY + 23);
+      ctx.fillText('WINDOWS STATUS', mX + 560, mY + 23);
+      ctx.fillText('OFFLINE CAPABILITY', mX + 760, mY + 23);
+      mY += 36;
+
+      const rows = [
+        ['Alert Callouts', 'GitHub Primer Syntax [!NOTE]', '100% Native Rendered', 'Offline Bundled'],
+        ['Mermaid 11.4', 'Flowchart, Sequence, ER', 'Hardware Accelerated', 'Offline Bundled'],
+        ['Heading Anchors', 'GitHub slug algorithm', 'Deterministic Jump', 'Local Traversal Sandboxed']
+      ];
+      rows.forEach((r, idx) => {
+        ctx.fillStyle = idx % 2 === 0 ? '#0d1117' : '#161b22';
+        ctx.fillRect(mX, mY, tW, 32);
+        ctx.strokeRect(mX, mY, tW, 32);
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = '13px "Segoe UI", sans-serif';
+        ctx.fillText(r[0], mX + 20, mY + 21);
+        ctx.fillText(r[1], mX + 260, mY + 21);
+        ctx.fillStyle = '#3fb950';
+        ctx.fillText('✔ ' + r[2], mX + 560, mY + 21);
+        ctx.fillStyle = '#58a6ff';
+        ctx.fillText(r[3], mX + 760, mY + 21);
+        mY += 32;
+      });
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderScreenshot2 = function() {
+      drawShell('architecture.md', 'architecture.md', ['README.md', 'architecture.md', 'roadmap.md'], false);
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillText('ARCHITECTURE OUTLINE', 24, 160);
+      const items = ['Overview', 'Data Pipeline', 'Mermaid Runtime', 'Sequence Flow', 'Security Bounds'];
+      let sY = 195;
+      items.forEach((it, i) => {
+        ctx.fillStyle = i === 3 ? '#58a6ff' : '#c9d1d9';
+        ctx.font = (i === 3 ? 'bold ' : '') + '13px "Segoe UI", sans-serif';
+        ctx.fillText('▸ ' + it, 24, sY);
+        sY += 32;
+      });
+
+      let mX = 380, mY = 180;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('Offline Mermaid Diagrams & Visualizations', mX, mY);
+      mY += 28;
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('Interactive sequence diagrams and flowcharts rendered completely offline with bundled Mermaid 11.4 runtime.', mX, mY);
+      mY += 48;
+
+      const boxW = 1000, boxH = 330;
+      ctx.fillStyle = '#161b22';
+      ctx.strokeStyle = '#30363d';
+      ctx.lineWidth = 1;
+      roundRect(ctx, mX, mY, boxW, boxH, 8, true, true);
+
+      ctx.fillStyle = '#21262d';
+      roundRect(ctx, mX, mY, boxW, 40, {tl: 8, tr: 8, br: 0, bl: 0}, true, false);
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = 'bold 13px "Cascadia Code", monospace';
+      ctx.fillText('mermaid: SequenceDiagram', mX + 16, mY + 25);
+      
+      ctx.fillStyle = '#30363d';
+      roundRect(ctx, mX + boxW - 200, mY + 8, 90, 24, 4, true, false);
+      roundRect(ctx, mX + boxW - 100, mY + 8, 86, 24, 4, true, false);
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = '11px "Segoe UI", sans-serif';
+      ctx.fillText('Copy Source', mX + boxW - 188, mY + 24);
+      ctx.fillText('Toggle Code', mX + boxW - 90, mY + 24);
+
+      const pY = mY + 68;
+      const participants = [
+        { name: 'User / Windows', x: mX + 70 },
+        { name: 'Marknexia App', x: mX + 310 },
+        { name: 'GFM Parser', x: mX + 550 },
+        { name: 'Offline Mermaid', x: mX + 790 }
+      ];
+
+      participants.forEach(p => {
+        ctx.fillStyle = '#1f2937';
+        ctx.strokeStyle = '#388bfd';
+        ctx.lineWidth = 2;
+        roundRect(ctx, p.x, pY, 150, 40, 6, true, true);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 13px "Segoe UI", sans-serif';
+        ctx.fillText(p.name, p.x + 18, pY + 25);
+
+        ctx.strokeStyle = '#30363d';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(p.x + 75, pY + 40);
+        ctx.lineTo(p.x + 75, pY + 200);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      });
+
+      const arrows = [
+        { from: mX + 145, to: mX + 385, y: pY + 65, label: '1. Open repository document (.md)' },
+        { from: mX + 385, to: mX + 625, y: pY + 105, label: '2. Generate GFM AST & Callouts' },
+        { from: mX + 625, to: mX + 865, y: pY + 145, label: '3. Render SVG Diagrams offline' },
+        { from: mX + 865, to: mX + 385, y: pY + 185, label: '4. Hardware-accelerated canvas' }
+      ];
+
+      arrows.forEach(arr => {
+        ctx.strokeStyle = '#58a6ff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(arr.from, arr.y);
+        ctx.lineTo(arr.to, arr.y);
+        ctx.stroke();
+
+        const dir = arr.to > arr.from ? 1 : -1;
+        ctx.fillStyle = '#58a6ff';
+        ctx.beginPath();
+        ctx.moveTo(arr.to, arr.y);
+        ctx.lineTo(arr.to - dir * 8, arr.y - 5);
+        ctx.lineTo(arr.to - dir * 8, arr.y + 5);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = '12px "Cascadia Code", monospace';
+        const midX = (arr.from + arr.to) / 2 - 100;
+        ctx.fillText(arr.label, midX, arr.y - 6);
+      });
+
+      mY += boxH + 30;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 20px "Segoe UI", sans-serif';
+      ctx.fillText('Offline Rendering Fallback & Security Sandbox', mX, mY);
+      mY += 20;
+
+      const fW = 1000, fH = 130;
+      ctx.fillStyle = '#161b22';
+      roundRect(ctx, mX, mY, fW, fH, 8, true, true);
+
+      const nodes = [
+        { text: 'Start: Local Markdown', x: mX + 50, y: mY + 40, color: '#388bfd' },
+        { text: 'Sanitize DOM & HTML', x: mX + 290, y: mY + 40, color: '#8957e5' },
+        { text: 'Offline Mermaid Engine', x: mX + 530, y: mY + 40, color: '#238636' },
+        { text: 'Smooth Native Render', x: mX + 770, y: mY + 40, color: '#3fb950' }
+      ];
+      nodes.forEach((n, idx) => {
+        ctx.fillStyle = '#21262d';
+        ctx.strokeStyle = n.color;
+        ctx.lineWidth = 2;
+        roundRect(ctx, n.x, n.y, 175, 50, 8, true, true);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 12px "Segoe UI", sans-serif';
+        ctx.fillText(n.text, n.x + 15, n.y + 30);
+
+        if (idx < nodes.length - 1) {
+          ctx.strokeStyle = '#58a6ff';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(n.x + 175, n.y + 25);
+          ctx.lineTo(n.x + 225, n.y + 25);
+          ctx.stroke();
+          ctx.fillStyle = '#58a6ff';
+          ctx.beginPath();
+          ctx.moveTo(n.x + 225, n.y + 25);
+          ctx.lineTo(n.x + 217, n.y + 21);
+          ctx.lineTo(n.x + 217, n.y + 29);
+          ctx.closePath();
+          ctx.fill();
+        }
+      });
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderScreenshot3 = function() {
+      drawShell('setup.md', 'setup.md', ['README.md', 'setup.md', 'api.md'], false);
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillText('REPOSITORY EXPLORER', 24, 160);
+
+      const files = [
+        { type: 'folder', name: 'marknexia', open: true, depth: 0 },
+        { type: 'folder', name: '.github', open: false, depth: 1 },
+        { type: 'folder', name: 'docs', open: true, depth: 1 },
+        { type: 'file', name: 'architecture.md', depth: 2 },
+        { type: 'file', name: 'setup.md', active: true, depth: 2 },
+        { type: 'file', name: 'troubleshooting.md', depth: 2 },
+        { type: 'folder', name: 'src', open: true, depth: 1 },
+        { type: 'file', name: 'Marknexia.slnx', depth: 2 },
+        { type: 'file', name: 'Directory.Build.props', depth: 2 },
+        { type: 'file', name: 'README.md', depth: 1 },
+        { type: 'file', name: 'LICENSE', depth: 1 }
+      ];
+
+      let fY = 195;
+      files.forEach(f => {
+        const indent = f.depth * 18;
+        if (f.active) {
+          ctx.fillStyle = '#1f2937';
+          roundRect(ctx, 16, fY - 18, 288, 28, 4, true, false);
+          ctx.fillStyle = '#58a6ff';
+        } else {
+          ctx.fillStyle = f.type === 'folder' ? '#d29922' : '#c9d1d9';
+        }
+        ctx.font = (f.active ? 'bold ' : '') + '13px "Segoe UI", sans-serif';
+        const icon = f.type === 'folder' ? (f.open ? '▾ 📁 ' : '▸ 📁 ') : '  📄 ';
+        ctx.fillText(icon + f.name, 20 + indent, fY);
+        fY += 32;
+      });
+
+      let mX = 380, mY = 180;
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = '13px "Cascadia Code", monospace';
+      ctx.fillText('marknexia / docs / setup.md', mX, mY);
+      mY += 32;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('Repository Navigation & Cross-File Linking', mX, mY);
+      mY += 28;
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('Smooth traversal across documentation trees with repository-relative root paths, anchor targeting, and history navigation.', mX, mY);
+      mY += 48;
+
+      const cW = 980;
+      ctx.fillStyle = '#161b22';
+      roundRect(ctx, mX, mY, cW, 360, 8, true, true);
+
+      let lY = mY + 36;
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = 'bold 18px "Segoe UI", sans-serif';
+      ctx.fillText('Resilient Relative Path Resolution', mX + 24, lY);
+      lY += 32;
+
+      const linkDemos = [
+        { label: 'Relative file link:', code: '[Architecture Guide](./architecture.md)', result: 'Resolves to docs/architecture.md within repository workspace' },
+        { label: 'Repository root path:', code: '[Build Config](/Directory.Build.props)', result: 'Automatically maps / to the git repository root folder boundary' },
+        { label: 'Cross-document anchor:', code: '[Security Model](./architecture.md#security-sandbox)', result: 'Opens target document and automatically scrolls smoothly to heading' },
+        { label: 'Directory sandboxing:', code: '[Blocked Escape](../../../Windows/System32)', result: 'Blocked: Directory traversal sandboxing prevents unauthorized filesystem escapes' }
+      ];
+
+      linkDemos.forEach(ld => {
+        ctx.fillStyle = '#848d97';
+        ctx.font = 'bold 13px "Segoe UI", sans-serif';
+        ctx.fillText(ld.label, mX + 24, lY);
+        
+        ctx.fillStyle = '#1f242c';
+        roundRect(ctx, mX + 230, lY - 16, 330, 24, 4, true, false);
+        ctx.fillStyle = '#79c0ff';
+        ctx.font = '12px "Cascadia Code", monospace';
+        ctx.fillText(ld.code, mX + 238, lY);
+
+        ctx.fillStyle = '#3fb950';
+        ctx.font = '12px "Segoe UI", sans-serif';
+        ctx.fillText('➔ ' + ld.result, mX + 24, lY + 24);
+        lY += 56;
+      });
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderScreenshot4 = function() {
+      drawShell('specifications.md', 'specifications.md', ['README.md', 'specifications.md'], true);
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillText('OUTLINE (SEARCH FILTERED)', 24, 160);
+      const items = ['1. Overview', '2. Mermaid Specification (2 matches)', '3. Diagram Architecture (1 match)', '4. Performance Metrics (1 match)'];
+      let sY = 195;
+      items.forEach((it, i) => {
+        ctx.fillStyle = it.includes('matches') ? '#d29922' : '#c9d1d9';
+        ctx.font = (it.includes('matches') ? 'bold ' : '') + '13px "Segoe UI", sans-serif';
+        ctx.fillText('▸ ' + it, 24, sY);
+        sY += 32;
+      });
+
+      let mX = 380, mY = 180;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('In-Page Search with Instant Match Highlighting', mX, mY);
+      mY += 28;
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('Built-in search engine (Ctrl+F) with real-time match counters, keyword navigation, and active hit highlighting.', mX, mY);
+      mY += 48;
+
+      const p1 = "Marknexia includes a dedicated offline ";
+      const hl = "Mermaid";
+      const p2 = " engine supporting Flowcharts, Sequence Diagrams, Class Diagrams, and State Diagrams.";
+      
+      ctx.fillStyle = '#e6edf3';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText(p1, mX, mY);
+      const w1 = ctx.measureText(p1).width;
+      
+      ctx.fillStyle = '#f59e0b';
+      roundRect(ctx, mX + w1 - 2, mY - 18, 74, 26, 4, true, false);
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 16px "Segoe UI", sans-serif';
+      ctx.fillText(hl, mX + w1 + 3, mY);
+
+      ctx.fillStyle = '#e6edf3';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText(p2, mX + w1 + 78, mY);
+      mY += 40;
+
+      const p3 = "When an offline document embeds a code block,";
+      const p4 = " code block, Marknexia parses the AST node and sends it to the isolated renderer.";
+      ctx.fillText(p3, mX, mY);
+      const w3 = ctx.measureText(p3).width;
+      ctx.fillStyle = '#eab308';
+      roundRect(ctx, mX + w3 - 2, mY - 18, 74, 26, 4, true, false);
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 16px "Segoe UI", sans-serif';
+      ctx.fillText(hl, mX + w3 + 3, mY);
+
+      ctx.fillStyle = '#e6edf3';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText(p4, mX + w3 + 78, mY);
+      mY += 60;
+
+      const fW = 980;
+      ctx.fillStyle = '#161b22';
+      roundRect(ctx, mX, mY, fW, 250, 8, true, true);
+
+      let gY = mY + 36;
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = 'bold 18px "Segoe UI", sans-serif';
+      ctx.fillText('Keyboard Search Accelerator & Controls', mX + 24, gY);
+      gY += 32;
+
+      const shortcuts = [
+        { key: 'Ctrl + F', desc: 'Open in-page search bar instantly' },
+        { key: 'Enter / F3', desc: 'Jump to next match smoothly' },
+        { key: 'Shift + Enter / Shift + F3', desc: 'Jump to previous match' },
+        { key: 'Escape', desc: 'Dismiss search bar and restore focus' }
+      ];
+
+      shortcuts.forEach(sc => {
+        ctx.fillStyle = '#21262d';
+        ctx.strokeStyle = '#388bfd';
+        roundRect(ctx, mX + 24, gY - 16, 200, 26, 4, true, true);
+        ctx.fillStyle = '#79c0ff';
+        ctx.font = 'bold 12px "Cascadia Code", monospace';
+        ctx.fillText(sc.key, mX + 36, gY + 1);
+
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = '13px "Segoe UI", sans-serif';
+        ctx.fillText(sc.desc, mX + 240, gY + 1);
+        gY += 40;
+      });
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderScreenshot5 = function() {
+      drawShell('CHANGELOG.md', 'CHANGELOG.md', ['README.md', 'CHANGELOG.md'], false);
+
+      ctx.fillStyle = '#848d97';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillText('VERSIONS & MILESTONES', 24, 160);
+      const items = ['v1.0.17 (Latest)', 'v1.0.16', 'v1.0.15', 'v1.0.12', 'v1.0.0 Initial Release'];
+      let sY = 195;
+      items.forEach((it, i) => {
+        ctx.fillStyle = i === 0 ? '#3fb950' : '#c9d1d9';
+        ctx.font = (i === 0 ? 'bold ' : '') + '13px "Segoe UI", sans-serif';
+        ctx.fillText((i === 0 ? '● ' : '  ') + it, 24, sY);
+        sY += 32;
+      });
+
+      let mX = 380, mY = 180;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('GitHub Primer Dark Theme & Modern Performance', mX, mY);
+      mY += 28;
+      ctx.fillStyle = '#848d97';
+      ctx.font = '16px "Segoe UI", sans-serif';
+      ctx.fillText('Engineered with .NET 10, C# 13, and WinUI 3 (Windows App SDK) for instant cold startup and minimal memory footprint.', mX, mY);
+      mY += 48;
+
+      const metrics = [
+        { val: '< 500 ms', lbl: 'Interactive Startup (p95)', sub: 'Native compiled WinUI shell' },
+        { val: '100%', lbl: 'Offline Independence', sub: 'Zero external network calls' },
+        { val: '< 35 MB', lbl: 'Host Working Set', sub: 'Optimized memory management' },
+        { val: 'x64 & ARM64', lbl: 'Native Architecture', sub: 'Optimized for Surface & Copilot+ PCs' }
+      ];
+
+      let cardX = mX;
+      metrics.forEach(m => {
+        ctx.fillStyle = '#161b22';
+        ctx.strokeStyle = '#30363d';
+        roundRect(ctx, cardX, mY, 235, 110, 8, true, true);
+        ctx.fillStyle = '#58a6ff';
+        ctx.font = 'bold 24px "Segoe UI", sans-serif';
+        ctx.fillText(m.val, cardX + 16, mY + 36);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 13px "Segoe UI", sans-serif';
+        ctx.fillText(m.lbl, cardX + 16, mY + 65);
+        ctx.fillStyle = '#848d97';
+        ctx.font = '11px "Segoe UI", sans-serif';
+        ctx.fillText(m.sub, cardX + 16, mY + 88);
+        cardX += 248;
+      });
+
+      mY += 140;
+      const cW = 980, cH = 300;
+      ctx.fillStyle = '#161b22';
+      roundRect(ctx, mX, mY, cW, cH, 8, true, true);
+      
+      ctx.fillStyle = '#21262d';
+      roundRect(ctx, mX, mY, cW, 36, {tl: 8, tr: 8, br: 0, bl: 0}, true, false);
+      ctx.fillStyle = '#848d97';
+      ctx.font = '12px "Cascadia Code", monospace';
+      ctx.fillText('csharp — Marknexia.Rendering/TemplateEngine.cs', mX + 16, mY + 23);
+
+      const codeLines = [
+        { tokens: [{ t: 'public sealed class ', c: '#ff7b72' }, { t: 'TemplateEngine', c: '#ffa657' }] },
+        { tokens: [{ t: '{', c: '#e6edf3' }] },
+        { tokens: [{ t: '    public string ', c: '#ff7b72' }, { t: 'GenerateHtml', c: '#d2a8ff' }, { t: '(string bodyHtml, RenderContext context)', c: '#e6edf3' }] },
+        { tokens: [{ t: '    {', c: '#e6edf3' }] },
+        { tokens: [{ t: '        // 100% Offline-first rendering with bundled CSS and Mermaid 11.4', c: '#8b949e' }] },
+        { tokens: [{ t: '        var sb = new StringBuilder();', c: '#e6edf3' }] },
+        { tokens: [{ t: '        sb.AppendLine("<div class=\"markdown-body\">");', c: '#a5d6ff' }] },
+        { tokens: [{ t: '        sb.AppendLine(Sanitizer.CleanHtml(bodyHtml));', c: '#e6edf3' }] },
+        { tokens: [{ t: '        return sb.ToString();', c: '#ff7b72' }] },
+        { tokens: [{ t: '    }', c: '#e6edf3' }] },
+        { tokens: [{ t: '}', c: '#e6edf3' }] }
+      ];
+
+      let cdY = mY + 62;
+      codeLines.forEach(cl => {
+        let cdX = mX + 24;
+        cl.tokens.forEach(tok => {
+          ctx.fillStyle = tok.c;
+          ctx.font = '13px "Cascadia Code", Consolas, monospace';
+          ctx.fillText(tok.t, cdX, cdY);
+          cdX += ctx.measureText(tok.t).width;
+        });
+        cdY += 21;
+      });
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderPosterArt = function() {
+      canvas.width = 720;
+      canvas.height = 1080;
+
+      const grad = ctx.createLinearGradient(0, 0, 720, 1080);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.5, '#0B152B');
+      grad.addColorStop(1, '#080E1C');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 720, 1080);
+
+      const halo = ctx.createRadialGradient(360, 420, 40, 360, 420, 320);
+      halo.addColorStop(0, 'rgba(37, 99, 235, 0.45)');
+      halo.addColorStop(0.6, 'rgba(6, 182, 212, 0.15)');
+      halo.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, 720, 1080);
+
+      ctx.drawImage(logoImg, 220, 240, 280, 280);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 54px "Segoe UI Variable Display", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Marknexia', 360, 600);
+
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = '600 20px "Segoe UI", sans-serif';
+      ctx.fillText('GitHub-Style Markdown. Native on Windows.', 360, 642);
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(240, 680); ctx.lineTo(480, 680);
+      ctx.stroke();
+
+      const badges = ['100% GFM Parity', 'Offline Mermaid 11.4', 'Native WinUI 3 & .NET 10'];
+      let bY = 730;
+      badges.forEach(b => {
+        ctx.fillStyle = 'rgba(31, 41, 55, 0.85)';
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
+        roundRect(ctx, 210, bY - 24, 300, 42, 21, true, true);
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '600 15px "Segoe UI", sans-serif';
+        ctx.fillText(b, 360, bY + 3);
+        bY += 60;
+      });
+
+      ctx.textAlign = 'left';
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderBoxArt = function() {
+      canvas.width = 1080;
+      canvas.height = 1080;
+
+      const grad = ctx.createLinearGradient(0, 0, 1080, 1080);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.5, '#0E1A38');
+      grad.addColorStop(1, '#070D1C');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 1080, 1080);
+
+      const halo = ctx.createRadialGradient(540, 460, 60, 540, 460, 480);
+      halo.addColorStop(0, 'rgba(37, 99, 235, 0.5)');
+      halo.addColorStop(0.7, 'rgba(6, 182, 212, 0.15)');
+      halo.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, 1080, 1080);
+
+      ctx.drawImage(logoImg, 340, 200, 400, 400);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 76px "Segoe UI Variable Display", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Marknexia', 540, 710);
+
+      ctx.fillStyle = '#93c5fd';
+      ctx.font = '600 26px "Segoe UI", sans-serif';
+      ctx.fillText('GitHub-Style Markdown Viewer for Windows', 540, 765);
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '400 20px "Segoe UI", sans-serif';
+      ctx.fillText('Offline Mermaid Diagrams • Heading Anchors • Fluent UI', 540, 815);
+
+      ctx.textAlign = 'left';
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderAppTile = function(size) {
+      canvas.width = size;
+      canvas.height = size;
+
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, size, size);
+
+      const grad = ctx.createRadialGradient(size/2, size/2, size*0.1, size/2, size/2, size*0.6);
+      grad.addColorStop(0, '#2563eb');
+      grad.addColorStop(1, '#0f172a');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+
+      const pad = size * 0.12;
+      ctx.drawImage(logoImg, pad, pad, size - pad * 2, size - pad * 2);
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderSuperHero = function() {
+      canvas.width = 1920;
+      canvas.height = 1080;
+
+      const grad = ctx.createLinearGradient(0, 0, 1920, 1080);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.4, '#0C1B3A');
+      grad.addColorStop(0.8, '#102A54');
+      grad.addColorStop(1, '#081326');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 1920, 1080);
+
+      const r1 = ctx.createRadialGradient(960, 540, 100, 960, 540, 800);
+      r1.addColorStop(0, 'rgba(37, 99, 235, 0.45)');
+      r1.addColorStop(0.5, 'rgba(6, 182, 212, 0.2)');
+      r1.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = r1;
+      ctx.fillRect(0, 0, 1920, 1080);
+
+      ctx.drawImage(logoImg, 720, 300, 480, 480);
+
+      ctx.strokeStyle = 'rgba(96, 165, 250, 0.2)';
+      ctx.lineWidth = 1;
+      for (let y = 100; y < 1080; y += 120) {
+        ctx.beginPath();
+        ctx.moveTo(0, y); ctx.lineTo(1920, y);
+        ctx.stroke();
+      }
+      for (let x = 120; x < 1920; x += 180) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0); ctx.lineTo(x, 1080);
+        ctx.stroke();
+      }
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderXboxKeyArt = function() {
+      canvas.width = 584;
+      canvas.height = 800;
+
+      const grad = ctx.createLinearGradient(0, 0, 584, 800);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.5, '#0D1A38');
+      grad.addColorStop(1, '#060D1A');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 584, 800);
+
+      ctx.drawImage(logoImg, 182, 140, 220, 220);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 44px "Segoe UI Variable Display", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Marknexia', 292, 430);
+
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = '600 16px "Segoe UI", sans-serif';
+      ctx.fillText('Markdown & Repository Viewer', 292, 470);
+
+      ctx.textAlign = 'left';
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderXboxTitledHero = function() {
+      canvas.width = 1920;
+      canvas.height = 1080;
+
+      const grad = ctx.createLinearGradient(0, 0, 1920, 1080);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.5, '#0E1D40');
+      grad.addColorStop(1, '#070F20');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 1920, 1080);
+
+      ctx.drawImage(logoImg, 320, 360, 360, 360);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 96px "Segoe UI Variable Display", sans-serif';
+      ctx.fillText('Marknexia', 740, 520);
+
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = '600 32px "Segoe UI", sans-serif';
+      ctx.fillText('GitHub-Style Markdown. Native on Windows.', 740, 580);
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '400 24px "Segoe UI", sans-serif';
+      ctx.fillText('Offline Mermaid 11.4 Diagrams • GFM Alert Callouts • WinUI 3', 740, 630);
+
+      return canvas.toDataURL('image/png');
+    };
+
+    window.renderXboxPromotionalSquare = function() {
+      canvas.width = 1080;
+      canvas.height = 1080;
+
+      const grad = ctx.createLinearGradient(0, 0, 1080, 1080);
+      grad.addColorStop(0, '#060B14');
+      grad.addColorStop(0.5, '#0F2147');
+      grad.addColorStop(1, '#070F21');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 1080, 1080);
+
+      const halo = ctx.createRadialGradient(540, 540, 80, 540, 540, 500);
+      halo.addColorStop(0, 'rgba(37, 99, 235, 0.5)');
+      halo.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, 1080, 1080);
+
+      ctx.drawImage(logoImg, 290, 290, 500, 500);
+      return canvas.toDataURL('image/png');
+    };
+  </script>
+</body>
+</html>
