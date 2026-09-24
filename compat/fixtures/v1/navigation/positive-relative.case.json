@@ -1,0 +1,31 @@
+{
+  "area": "navigation",
+  "expected": {
+    "fileSystemProbeCount": 1,
+    "intent": {
+      "diagnostic": null,
+      "externalUri": null,
+      "fragment": null,
+      "isSafe": true,
+      "kind": "CrossDocument",
+      "targetDocument": "c:/repo/docs/api.md"
+    }
+  },
+  "input": {
+    "currentFile": "C:/repo/README.md",
+    "destination": "docs/api.md",
+    "policy": {
+      "allowExternalLinks": true,
+      "allowRemoteAssets": false,
+      "enforceRepositorySandbox": true
+    },
+    "repositoryRoot": "C:/repo"
+  },
+  "name": "positive-relative",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": {
+    "files": ["c:/repo/README.md", "c:/repo/docs/api.md"],
+    "root": "C:/repo"
+  }
+}

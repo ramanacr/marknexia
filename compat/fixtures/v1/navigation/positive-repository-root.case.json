@@ -1,0 +1,31 @@
+{
+  "area": "navigation",
+  "expected": {
+    "fileSystemProbeCount": 1,
+    "intent": {
+      "diagnostic": null,
+      "externalUri": null,
+      "fragment": "overview",
+      "isSafe": true,
+      "kind": "CrossDocumentWithAnchor",
+      "targetDocument": "c:/repo/docs/api.md#overview"
+    }
+  },
+  "input": {
+    "currentFile": "C:/repo/docs/nested/details.md",
+    "destination": "/docs/api.md#overview",
+    "policy": {
+      "allowExternalLinks": true,
+      "allowRemoteAssets": false,
+      "enforceRepositorySandbox": true
+    },
+    "repositoryRoot": "C:/repo"
+  },
+  "name": "positive-repository-root",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": {
+    "files": ["c:/repo/docs/nested/details.md", "c:/repo/docs/api.md"],
+    "root": "C:/repo"
+  }
+}

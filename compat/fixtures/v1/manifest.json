@@ -1,5 +1,5 @@
 {
-  "caseCount": 46,
+  "caseCount": 50,
   "cases": [
     "headings/alerts.case.json",
     "headings/custom-anchor.case.json",
@@ -24,6 +24,10 @@
     "navigation/external-disabled.case.json",
     "navigation/file-uri-rejected.case.json",
     "navigation/percent-decodes-exactly-once.case.json",
+    "navigation/positive-absolute-local.case.json",
+    "navigation/positive-relative.case.json",
+    "navigation/positive-repository-root.case.json",
+    "navigation/positive-windows-absolute.case.json",
     "navigation/rejected-before-probe-encoded-unc.case.json",
     "navigation/rejected-before-probe-file-uri.case.json",
     "navigation/rejected-before-probe-unc.case.json",
