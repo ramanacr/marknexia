@@ -6,3 +6,9 @@ license.workspace = true
 
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+percent-encoding = "=2.3.2"
+serde.workspace = true
+serde_json.workspace = true
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Com"] }
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging"] }
