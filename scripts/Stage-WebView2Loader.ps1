@@ -8,6 +8,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
+$resolvedPackage = [IO.Path]::GetFullPath($PackagePath)
+$resolvedLock = [IO.Path]::GetFullPath($LockPath)
+$pathComparer = [StringComparer]::OrdinalIgnoreCase
+if ($pathComparer.Equals($resolvedOutput, $resolvedPackage) -or $pathComparer.Equals($resolvedOutput, $resolvedLock)) {
+    throw 'OutputPath must not overwrite PackagePath or LockPath.'
+}
 if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw "WebView2 SDK package not found: $PackagePath" }
 $lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json -AsHashtable
 if ($lock.schemaVersion -ne 'webview2-loader-lock-v1' -or -not $lock.loaders.ContainsKey($Architecture)) {
@@ -36,7 +43,6 @@ finally { $archive.Dispose() }
 $actualEntryHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 if ($actualEntryHash -ne $expected.sha256) { throw 'WebView2 loader entry SHA-256 does not match the lock.' }
 & (Join-Path $PSScriptRoot 'Test-RustArchitecture.ps1') -InputBytes $bytes -Expected $Architecture | Out-Null
-$resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resolvedOutput)) | Out-Null
 $temporaryOutput = $resolvedOutput + '.staging.bin'
 try {

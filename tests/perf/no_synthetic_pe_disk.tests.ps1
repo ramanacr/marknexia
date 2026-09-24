@@ -11,12 +11,21 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'tests\p
     if ($text.Contains('.pefixture') -or $text.Contains('New-PeFixture')) {
         $violations.Add("$($file.Name): legacy disk PE fixture marker")
     }
-    $writesBytes = $text.Contains('WriteAllBytes')
+    $writesBytes = $text -match '\b(WriteAllBytes|WriteAllText|Set-Content|Out-File|OpenWrite|CreateNew|FileStream)\b'
     $constructsPeHeader = $text -match '\[0\]\s*=\s*0x4d' -and
         $text -match '\[1\]\s*=\s*0x5a' -and
         (($text -match '\[128\]\s*=\s*0x50' -and $text -match '\[129\]\s*=\s*0x45') -or $text.Contains('0x00004550'))
     if ($writesBytes -and $constructsPeHeader) {
         $violations.Add("$($file.Name): constructs PE bytes and writes bytes to disk")
+    }
+
+    $createsArchive = $text -match '\bCompress-Archive\b' -or
+        $text -match '\[IO\.Compression\.ZipFile\]::CreateFromDirectory' -or
+        $text -match '\[IO\.Compression\.ZipArchive\]::new\([^\r\n]*ZipArchiveMode\.Create' -or
+        $text -match '\.Open\([^\r\n]*ZipArchiveMode\.Create'
+    $writesArchivePath = $text -match '(?i)["''][^"'']+\.(zip|nupkg|7z|tar|gz)["'']' -and $writesBytes
+    if ($createsArchive -or $writesArchivePath) {
+        $violations.Add("$($file.Name): creates or writes a synthetic archive on disk")
     }
 }
 

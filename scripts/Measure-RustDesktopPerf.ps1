@@ -18,6 +18,35 @@ if ($artifact.kind -ne 'artifact-measurement-v1' -or -not (Test-Json -LiteralPat
     throw 'Artifact measurement must satisfy artifact-measurement-v1 before desktop samples are imported.'
 }
 if ([string]::IsNullOrWhiteSpace($scenarioData.id)) { throw 'Scenario must have an id.' }
+$scenarioSha256 = (Get-FileHash -LiteralPath $Scenario -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not $samples.ContainsKey('provenance') -or $samples.provenance -isnot [System.Collections.IDictionary]) {
+    throw 'Imported samples must include provenance for the measured build, scenario, artifact, hardware, and operating system.'
+}
+$provenance = $samples.provenance
+foreach ($field in @('commit', 'fixtureDigest', 'scenario', 'architecture', 'nativeArtifact', 'hardware', 'operatingSystem')) {
+    if (-not $provenance.ContainsKey($field)) { throw "Imported sample provenance is missing $field." }
+}
+if ($provenance.commit -cne $artifact.commit) { throw 'Imported sample commit does not match the artifact measurement.' }
+if ($provenance.fixtureDigest -cne $artifact.fixtureDigest) { throw 'Imported sample fixture digest does not match the artifact measurement.' }
+if ($provenance.scenario.id -cne $scenarioData.id -or $provenance.scenario.sha256 -cne $scenarioSha256) {
+    throw 'Imported sample scenario id or SHA-256 does not match the supplied scenario.'
+}
+if ($provenance.architecture -cne $artifact.architecture) { throw 'Imported sample architecture does not match the artifact measurement.' }
+foreach ($field in @('path', 'machine', 'evidenceType', 'nativeRuntimeVerified')) {
+    if ($provenance.nativeArtifact[$field] -cne $artifact.nativeArtifact[$field]) {
+        throw "Imported sample native artifact identity does not match ($field)."
+    }
+}
+foreach ($field in @('machineName', 'processor', 'logicalProcessorCount', 'physicalMemoryBytes')) {
+    if ($provenance.hardware[$field] -cne $artifact.hardware[$field]) {
+        throw "Imported sample hardware identity does not match ($field)."
+    }
+}
+foreach ($field in @('caption', 'build')) {
+    if ($provenance.operatingSystem[$field] -cne $artifact.operatingSystem[$field]) {
+        throw "Imported sample operating-system identity does not match ($field)."
+    }
+}
 if ($samples.webViewResidency -ne 'separate-process') { throw 'WebView2 residency must identify a separate process.' }
 if (@($samples.cold).Count -ne 30) { throw 'Desktop evidence requires exactly 30 cold samples.' }
 if (@($samples.warm).Count -ne 30) { throw 'Desktop evidence requires exactly 30 warm samples.' }
@@ -60,9 +89,12 @@ $result = [ordered]@{
     fixtureDigest = $artifact.fixtureDigest
     runCount = 60
     webViewResidency = 'separate-process'
+    sampleSource = 'imported-external'
+    runtimeCollectorStatus = 'unavailable-deferred'
+    sampleProvenance = $provenance
     scenario = [ordered]@{
         id = $scenarioData.id
-        sha256 = (Get-FileHash -LiteralPath $Scenario -Algorithm SHA256).Hash.ToLowerInvariant()
+        sha256 = $scenarioSha256
     }
     runs = [ordered]@{ cold = @($samples.cold); warm = @($samples.warm) }
     metrics = Get-PhaseMetrics @($samples.cold)

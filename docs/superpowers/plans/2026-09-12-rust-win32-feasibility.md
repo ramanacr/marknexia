@@ -485,6 +485,14 @@ rtk git add scripts/Measure-RustArtifacts.ps1 scripts/Measure-RustDesktopPerf.ps
 rtk git commit -m "test: measure Rust release feasibility"
 ```
 
+#### Task 7 evidence ledger — 2026-09-24 source-only fix round
+
+**Implemented in source:** `stage_webview2_loader.tests.ps1` now inspects loader source contracts and creates no package, ZIP, or PE fixture. `no_synthetic_pe_disk.tests.ps1` checks performance test sources for PE-byte writes and on-disk archive creation. `Stage-WebView2Loader.ps1` canonicalizes `OutputPath`, `PackagePath`, and `LockPath`, then rejects output collisions case-insensitively before opening inputs or creating output. Desktop sample import now requires and cross-checks provenance for commit, fixture digest, scenario ID and SHA-256, architecture, native artifact identity, hardware, and OS; the output retains that provenance and labels samples `imported-external` with `runtimeCollectorStatus: unavailable-deferred`.
+
+**Evidence available:** source inspection only. Static regression coverage was added but not executed in this fix round.
+
+**Unavailable / deferred:** no runtime desktop metrics were collected. The repository currently has no runtime collector that launches the shell, observes WebView2 readiness/rendering, and separately samples host and WebView2 memory; `Measure-RustDesktopPerf.ps1` only imports externally collected samples. The 30 cold/30 warm performance gate, native x64/ARM64 measurements, schema/runtime validation, and executable loader behavior remain unverified and deferred. Static PE-header evidence does not establish native execution.
+
 ### Task 8: Produce the Reviewed Go/No-Go Evidence Package
 
 **Files:**

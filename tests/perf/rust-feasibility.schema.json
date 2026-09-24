@@ -64,6 +64,21 @@
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
+    "sampleSource": { "const": "imported-external" },
+    "runtimeCollectorStatus": { "const": "unavailable-deferred" },
+    "sampleProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commit", "fixtureDigest", "scenario", "architecture", "nativeArtifact", "hardware", "operatingSystem"],
+      "properties": {
+        "commit": { "$ref": "#/properties/commit" },
+        "fixtureDigest": { "$ref": "#/properties/fixtureDigest" },
+        "scenario": { "$ref": "#/properties/scenario" },
+        "architecture": { "$ref": "#/properties/architecture" },
+        "nativeArtifact": { "$ref": "#/properties/nativeArtifact" },
+        "hardware": { "$ref": "#/properties/hardware" },
+        "operatingSystem": { "$ref": "#/properties/operatingSystem" }
+      }
+    },
     "runs": {
       "type": "object", "additionalProperties": false,
       "required": ["cold", "warm"],
@@ -128,7 +143,7 @@
     {
       "if": { "properties": { "kind": { "const": "desktop-performance-measurement-v1" } } },
       "then": {
-        "required": ["scenario", "runs", "warmMetrics"],
+        "required": ["scenario", "runs", "warmMetrics", "sampleSource", "runtimeCollectorStatus", "sampleProvenance"],
         "properties": {
           "runCount": { "const": 60 },
           "webViewResidency": { "const": "separate-process" },

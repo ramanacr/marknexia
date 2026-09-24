@@ -25,13 +25,22 @@ try {
     $artifact | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $artifactPath
     $cold = @(1..30 | ForEach-Object { @{ shellVisibleMs=$_;webViewReadyMs=($_+10);firstRenderMs=($_+20);hostPrivateBytes=15000000;webView2WorkingSetBytes=40000000 } })
     $warm = @(1..30 | ForEach-Object { @{ shellVisibleMs=($_+1);webViewReadyMs=($_+11);firstRenderMs=($_+21);hostPrivateBytes=16000000;webView2WorkingSetBytes=41000000 } })
-    @{ cold=$cold; warm=$warm; webViewResidency='separate-process' } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $samplesPath
+    $scenarioDigest = (Get-FileHash -LiteralPath $scenario -Algorithm SHA256).Hash.ToLowerInvariant()
+    $provenance = @{
+        commit=$artifact.commit; fixtureDigest=$artifact.fixtureDigest
+        scenario=@{ id='empty-shell'; sha256=$scenarioDigest }; architecture=$artifact.architecture
+        nativeArtifact=$artifact.nativeArtifact; hardware=$hardware; operatingSystem=$os
+    }
+    $sampleDocument = @{ cold=$cold; warm=$warm; webViewResidency='separate-process'; provenance=$provenance }
+    $sampleDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $samplesPath
     & $script -Scenario $scenario -SamplesPath $samplesPath -ArtifactMeasurementPath $artifactPath -OutputPath $outputPath | Out-Null
     Assert-That (Test-Json -LiteralPath $outputPath -SchemaFile $schema) 'Thirty cold and warm runs must produce schema-valid desktop evidence.'
     $result = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json -AsHashtable
     Assert-That ($result.runs.cold.Count -eq 30 -and $result.runs.warm.Count -eq 30) 'Desktop evidence must retain each separate sample.'
     Assert-That ($result.metrics.shellVisibleMs.median -eq 15.5) 'Median must be derived from per-run cold samples.'
     Assert-That ($result.metrics.shellVisibleMs.p95 -eq 29) 'P95 must be derived from per-run cold samples.'
+    Assert-That ($result.sampleSource -eq 'imported-external' -and $result.runtimeCollectorStatus -eq 'unavailable-deferred') 'Imported metrics must retain the collector availability boundary.'
+    Assert-That ($result.sampleProvenance.commit -eq $artifact.commit -and $result.sampleProvenance.scenario.sha256 -eq $scenarioDigest) 'Desktop evidence must retain sample provenance.'
     $short = Get-Content -LiteralPath $samplesPath -Raw | ConvertFrom-Json -AsHashtable
     $short.warm = @($short.warm | Select-Object -First 29)
     $short | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $samplesPath
@@ -39,6 +48,24 @@ try {
     try { & $script -Scenario $scenario -SamplesPath $samplesPath -ArtifactMeasurementPath $artifactPath -OutputPath $outputPath | Out-Null }
     catch { $rejected = $_.Exception.Message -like '*30 warm*' }
     Assert-That $rejected 'Desktop evidence must reject 29 warm samples.'
+    $provenanceCases = @(
+        @{ name='commit'; expected='*commit does not match*'; mutate={ param($value) $value.provenance.commit='fedcba9876543210' } },
+        @{ name='fixture digest'; expected='*fixture digest does not match*'; mutate={ param($value) $value.provenance.fixtureDigest=('c' * 64) } },
+        @{ name='scenario digest'; expected='*scenario id or SHA-256*'; mutate={ param($value) $value.provenance.scenario.sha256=('d' * 64) } },
+        @{ name='architecture'; expected='*architecture does not match*'; mutate={ param($value) $value.provenance.architecture='ARM64' } },
+        @{ name='native artifact'; expected='*native artifact identity does not match*'; mutate={ param($value) $value.provenance.nativeArtifact.path='other.exe' } },
+        @{ name='hardware'; expected='*hardware identity does not match*'; mutate={ param($value) $value.provenance.hardware.machineName='other-host' } },
+        @{ name='operating system'; expected='*operating-system identity does not match*'; mutate={ param($value) $value.provenance.operatingSystem.build='99999' } }
+    )
+    foreach ($case in $provenanceCases) {
+        $invalidSamples = $sampleDocument | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable
+        & $case.mutate $invalidSamples
+        $invalidSamples | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $samplesPath
+        $provenanceRejected = $false
+        try { & $script -Scenario $scenario -SamplesPath $samplesPath -ArtifactMeasurementPath $artifactPath -OutputPath $outputPath | Out-Null }
+        catch { $provenanceRejected = $_.Exception.Message -like $case.expected }
+        Assert-That $provenanceRejected "Imported samples must be rejected when their $($case.name) provenance differs."
+    }
     Write-Host 'Rust desktop performance measurement regression tests passed.'
 }
 finally {
