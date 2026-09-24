@@ -1,0 +1,654 @@
+//! STA-owned controller fleet. COM callbacks enqueue events; the host pumps them.
+
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
+    rc::{Rc, Weak},
+};
+
+use windows::Win32::Foundation::HWND;
+
+use crate::{
+    environment::{
+        BrowserExit, BrowserExitSubscription, EnvironmentError, StaApartment, WebViewEnvironment,
+    },
+    host::{HostError, ProcessFailure, WebViewHost},
+    policy::{DocumentError, HostDocument},
+    protocol::PageToHost,
+    recovery::{RecoveryAction, RecoveryCoordinator},
+};
+
+enum SessionEvent {
+    EnvironmentCreated(u64, Result<WebViewEnvironment, EnvironmentError>),
+    HostCreated(u64, u64, Result<WebViewHost, HostError>),
+    ProcessFailure(u64, u64, ProcessFailure),
+    BrowserExited(u64, BrowserExit),
+}
+
+#[derive(Debug)]
+pub enum SessionError {
+    Closed,
+    AlreadyStarted,
+    Recovering,
+    DuplicateTab,
+    MissingTab,
+    Document(DocumentError),
+    Environment(EnvironmentError),
+    Host(HostError),
+}
+
+impl From<EnvironmentError> for SessionError {
+    fn from(error: EnvironmentError) -> Self {
+        Self::Environment(error)
+    }
+}
+
+impl From<HostError> for SessionError {
+    fn from(error: HostError) -> Self {
+        Self::Host(error)
+    }
+}
+
+/// Own this value on the STA that owns `parent`. Call `poll` from the shell's
+/// message loop after dispatch; callbacks only enqueue and never borrow this
+/// session mutably across a COM call. `close` precedes destruction of `parent`.
+pub struct WebViewSession {
+    apartment: Rc<StaApartment>,
+    parent: HWND,
+    user_data_folder: PathBuf,
+    page_observer: Weak<dyn Fn(PageToHost)>,
+    events: Rc<RefCell<VecDeque<SessionEvent>>>,
+    documents: BTreeMap<u64, HostDocument>,
+    hosts: BTreeMap<u64, WebViewHost>,
+    orphaned_hosts: BTreeMap<u64, WebViewHost>,
+    process_observers: BTreeMap<u64, Rc<dyn Fn(ProcessFailure)>>,
+    browser_observer: Option<Rc<dyn Fn(BrowserExit)>>,
+    browser_subscription: Option<BrowserExitSubscription>,
+    environment: Option<WebViewEnvironment>,
+    recovery: RecoveryCoordinator,
+    pending_hosts: BTreeSet<u64>,
+    recreating_tabs: BTreeSet<u64>,
+    generation: u64,
+    creating_environment: bool,
+    teardown_pending: bool,
+    environment_recreate_pending: bool,
+    active_tab_restore_pending: Option<u64>,
+    browser_recovering: bool,
+    recovery_generation: Option<u64>,
+    closed: bool,
+}
+
+impl WebViewSession {
+    pub fn new(
+        apartment: Rc<StaApartment>,
+        parent: HWND,
+        user_data_folder: PathBuf,
+        page_observer: Weak<dyn Fn(PageToHost)>,
+    ) -> Self {
+        Self {
+            apartment,
+            parent,
+            user_data_folder,
+            page_observer,
+            events: Rc::new(RefCell::new(VecDeque::new())),
+            documents: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            orphaned_hosts: BTreeMap::new(),
+            process_observers: BTreeMap::new(),
+            browser_observer: None,
+            browser_subscription: None,
+            environment: None,
+            recovery: RecoveryCoordinator::new(None),
+            pending_hosts: BTreeSet::new(),
+            recreating_tabs: BTreeSet::new(),
+            generation: 0,
+            creating_environment: false,
+            teardown_pending: false,
+            environment_recreate_pending: false,
+            active_tab_restore_pending: None,
+            browser_recovering: false,
+            recovery_generation: None,
+            closed: false,
+        }
+    }
+
+    pub fn add_document(&mut self, document: HostDocument) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        document.validate().map_err(SessionError::Document)?;
+        let tab_id = document.tab_id;
+        if self.documents.contains_key(&tab_id) {
+            return Err(SessionError::DuplicateTab);
+        }
+        self.documents.insert(tab_id, document);
+        if self.environment.is_some() && !self.browser_recovering {
+            self.begin_host(tab_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn select_tab(&mut self, tab_id: u64) -> Result<(), SessionError> {
+        if self.browser_recovering {
+            return Err(SessionError::Recovering);
+        }
+        if !self.documents.contains_key(&tab_id) {
+            return Err(SessionError::MissingTab);
+        }
+        self.recovery.set_active_tab(Some(tab_id));
+        self.apply_visibility(tab_id)?;
+        Ok(())
+    }
+
+    pub fn start(&mut self) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        if self.environment.is_some() || self.creating_environment || self.browser_recovering {
+            return Err(SessionError::AlreadyStarted);
+        }
+        self.begin_environment()
+    }
+
+    fn begin_environment(&mut self) -> Result<(), SessionError> {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let events = Rc::clone(&self.events);
+        self.creating_environment = true;
+        let result = WebViewEnvironment::create_async(
+            Rc::clone(&self.apartment),
+            &self.user_data_folder,
+            Box::new(move |result| {
+                events
+                    .borrow_mut()
+                    .push_back(SessionEvent::EnvironmentCreated(generation, result));
+            }),
+        );
+        if let Err(error) = result {
+            self.creating_environment = false;
+            return Err(SessionError::Environment(error));
+        }
+        Ok(())
+    }
+
+    fn begin_host(&mut self, tab_id: u64) -> Result<(), SessionError> {
+        if self.hosts.contains_key(&tab_id) || !self.pending_hosts.insert(tab_id) {
+            return Ok(());
+        }
+        let Some(environment) = self.environment.as_ref() else {
+            self.pending_hosts.remove(&tab_id);
+            return Err(SessionError::Environment(
+                EnvironmentError::MissingEnvironment,
+            ));
+        };
+        let events = Rc::clone(&self.events);
+        let generation = self.generation;
+        let result = environment.create_host_async(
+            self.parent,
+            Box::new(move |result| {
+                events
+                    .borrow_mut()
+                    .push_back(SessionEvent::HostCreated(generation, tab_id, result));
+            }),
+        );
+        if let Err(error) = result {
+            self.pending_hosts.remove(&tab_id);
+            return Err(SessionError::Host(error));
+        }
+        Ok(())
+    }
+
+    /// Drain after Win32 dispatch, never inside a WebView2 callback.
+    pub fn poll(&mut self) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        loop {
+            let next = { self.events.borrow_mut().pop_front() };
+            let Some(event) = next else {
+                break;
+            };
+            self.apply_event(event)?;
+        }
+        if self.teardown_pending {
+            self.finish_teardown()?;
+        }
+        if self.environment_recreate_pending {
+            self.recreate_environment()?;
+        }
+        if self.environment.is_some()
+            && !self.teardown_pending
+            && !self.environment_recreate_pending
+        {
+            if !self.browser_recovering {
+                self.retry_renderer_recreation()?;
+            }
+            self.close_orphaned_hosts()?;
+            for tab_id in self.documents.keys().copied().collect::<Vec<_>>() {
+                if !self.hosts.contains_key(&tab_id)
+                    && !self.orphaned_hosts.contains_key(&tab_id)
+                    && !self.recreating_tabs.contains(&tab_id)
+                {
+                    self.begin_host(tab_id)?;
+                }
+            }
+        }
+        self.finish_environment_restore()?;
+        if let Some(tab_id) = self.active_tab_restore_pending {
+            self.restore_active_tab(tab_id)?;
+        }
+        Ok(())
+    }
+
+    fn apply_event(&mut self, event: SessionEvent) -> Result<(), SessionError> {
+        match event {
+            SessionEvent::EnvironmentCreated(generation, result) => {
+                if generation != self.generation {
+                    return Ok(());
+                }
+                self.creating_environment = false;
+                let environment = result?;
+                let events = Rc::clone(&self.events);
+                let observer: Rc<dyn Fn(BrowserExit)> = Rc::new(move |exit| {
+                    events
+                        .borrow_mut()
+                        .push_back(SessionEvent::BrowserExited(generation, exit));
+                });
+                let subscription = environment.observe_browser_exit(Rc::downgrade(&observer))?;
+                self.browser_observer = Some(observer);
+                self.browser_subscription = Some(subscription);
+                self.environment = Some(environment);
+                for tab_id in self.documents.keys().copied().collect::<Vec<_>>() {
+                    self.begin_host(tab_id)?;
+                }
+                self.finish_environment_restore()?;
+            }
+            SessionEvent::HostCreated(generation, tab_id, result) => {
+                if generation != self.generation
+                    || (self.browser_recovering && self.recovery_generation != Some(generation))
+                    || self.closed
+                {
+                    if let Ok(mut host) = result {
+                        let _ = host.close();
+                    }
+                    return Ok(());
+                }
+                self.pending_hosts.remove(&tab_id);
+                let mut host = result?;
+                let Some(document) = self.documents.get(&tab_id).cloned() else {
+                    let _ = host.close();
+                    return Ok(());
+                };
+                let events = Rc::clone(&self.events);
+                let generation = self.generation;
+                let observer: Rc<dyn Fn(ProcessFailure)> = Rc::new(move |failure| {
+                    events
+                        .borrow_mut()
+                        .push_back(SessionEvent::ProcessFailure(generation, tab_id, failure));
+                });
+                if let Err(error) = host
+                    .observe_process_failures(Rc::downgrade(&observer))
+                    .and_then(|()| host.bind_document(document, self.page_observer.clone()))
+                {
+                    if host.close().is_err() {
+                        self.orphaned_hosts.insert(tab_id, host);
+                    }
+                    return Err(SessionError::Host(error));
+                }
+                self.process_observers.insert(tab_id, observer);
+                self.hosts.insert(tab_id, host);
+                self.recovery.renderer_restored(tab_id);
+                self.finish_environment_restore()?;
+            }
+            SessionEvent::ProcessFailure(generation, tab_id, ProcessFailure::BrowserExited)
+                if generation == self.generation =>
+            {
+                let action = self.recovery.record_browser_exit();
+                self.apply_recovery_action(action)?;
+                self.process_observers.remove(&tab_id);
+            }
+            SessionEvent::ProcessFailure(
+                generation,
+                tab_id,
+                ProcessFailure::RendererExited | ProcessFailure::RendererUnresponsive,
+            ) if generation == self.generation => {
+                let action = self.recovery.record_renderer_failure(tab_id);
+                self.apply_recovery_action(action)?;
+            }
+            SessionEvent::ProcessFailure(_, _, _) => {}
+            SessionEvent::BrowserExited(generation, _exit) if generation == self.generation => {
+                let action = self.recovery.browser_process_exited();
+                self.apply_recovery_action(action)?;
+            }
+            SessionEvent::BrowserExited(_, _) => {}
+        }
+        Ok(())
+    }
+
+    fn apply_recovery_action(&mut self, action: RecoveryAction) -> Result<(), SessionError> {
+        match action {
+            RecoveryAction::None => {}
+            RecoveryAction::RecreateController { tab_id } => {
+                self.recreating_tabs.insert(tab_id);
+                self.retry_renderer_recreation()?;
+            }
+            RecoveryAction::CloseAllControllers => {
+                self.browser_recovering = true;
+                self.teardown_pending = true;
+                self.recreating_tabs.clear();
+                self.finish_teardown()?;
+            }
+            RecoveryAction::RecreateEnvironment => {
+                self.environment_recreate_pending = true;
+                self.recreate_environment()?;
+            }
+            RecoveryAction::RestoreActiveTab { tab_id } => {
+                self.active_tab_restore_pending = Some(tab_id);
+                self.restore_active_tab(tab_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_teardown(&mut self) -> Result<(), SessionError> {
+        let mut first_error = None;
+        for tab_id in self.hosts.keys().copied().collect::<Vec<_>>() {
+            if let Some(host) = self.hosts.get_mut(&tab_id) {
+                match host.close() {
+                    Ok(()) => {
+                        self.hosts.remove(&tab_id);
+                        self.process_observers.remove(&tab_id);
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(SessionError::Host(error));
+        }
+        self.close_orphaned_hosts()?;
+        self.teardown_pending = false;
+        let action = self.recovery.controllers_closed();
+        self.apply_recovery_action(action)
+    }
+
+    fn retry_renderer_recreation(&mut self) -> Result<(), SessionError> {
+        for tab_id in self.recreating_tabs.iter().copied().collect::<Vec<_>>() {
+            if let Some(host) = self.hosts.get_mut(&tab_id) {
+                host.close()?;
+            }
+            self.hosts.remove(&tab_id);
+            self.process_observers.remove(&tab_id);
+            if self.orphaned_hosts.contains_key(&tab_id) {
+                continue;
+            }
+            self.begin_host(tab_id)?;
+            self.recreating_tabs.remove(&tab_id);
+        }
+        Ok(())
+    }
+
+    fn close_orphaned_hosts(&mut self) -> Result<(), SessionError> {
+        for tab_id in self.orphaned_hosts.keys().copied().collect::<Vec<_>>() {
+            if let Some(host) = self.orphaned_hosts.get_mut(&tab_id) {
+                host.close()?;
+            }
+            self.orphaned_hosts.remove(&tab_id);
+        }
+        Ok(())
+    }
+
+    fn recreate_environment(&mut self) -> Result<(), SessionError> {
+        if let Some(subscription) = self.browser_subscription.as_mut() {
+            subscription.close()?;
+        }
+        self.browser_subscription.take();
+        self.browser_observer.take();
+        self.environment.take();
+        self.pending_hosts.clear();
+        self.begin_environment()?;
+        self.recovery_generation = Some(self.generation);
+        self.environment_recreate_pending = false;
+        Ok(())
+    }
+
+    fn restore_active_tab(&mut self, tab_id: u64) -> Result<(), SessionError> {
+        self.apply_visibility(tab_id)?;
+        self.recovery.active_tab_restored(tab_id);
+        self.active_tab_restore_pending = None;
+        self.browser_recovering = false;
+        self.recovery_generation = None;
+        Ok(())
+    }
+
+    fn finish_environment_restore(&mut self) -> Result<(), SessionError> {
+        if self.browser_recovering
+            && !self.creating_environment
+            && self.pending_hosts.is_empty()
+            && self.hosts.len() == self.documents.len()
+        {
+            let action = self.recovery.environment_restored();
+            if action == RecoveryAction::None && self.recovery.is_healthy() {
+                self.browser_recovering = false;
+                self.recovery_generation = None;
+            }
+            self.apply_recovery_action(action)?;
+        }
+        Ok(())
+    }
+
+    fn apply_visibility(&self, active: u64) -> Result<(), SessionError> {
+        for (tab_id, host) in &self.hosts {
+            host.set_visible(*tab_id == active)?;
+        }
+        Ok(())
+    }
+
+    pub fn host(&self, tab_id: u64) -> Option<&WebViewHost> {
+        self.hosts.get(&tab_id)
+    }
+
+    pub fn close(&mut self) -> Result<(), SessionError> {
+        self.closed = true;
+        self.recovery.close();
+        self.events.borrow_mut().clear();
+        let mut first_error = None;
+        for host in self.hosts.values_mut() {
+            if let Err(error) = host.close() {
+                first_error.get_or_insert(SessionError::Host(error));
+            }
+        }
+        for host in self.orphaned_hosts.values_mut() {
+            if let Err(error) = host.close() {
+                first_error.get_or_insert(SessionError::Host(error));
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        self.hosts.clear();
+        self.orphaned_hosts.clear();
+        self.process_observers.clear();
+        if let Some(subscription) = self.browser_subscription.as_mut() {
+            subscription.close()?;
+        }
+        self.browser_subscription.take();
+        self.browser_observer.take();
+        self.environment.take();
+        self.pending_hosts.clear();
+        Ok(())
+    }
+}
+
+impl Drop for WebViewSession {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)] // Ignored native tests create a real HWND on the STA.
+mod native_tests {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
+
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+                WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            },
+        },
+        core::w,
+    };
+
+    use super::{ProcessFailure, SessionEvent, WebViewSession};
+    use crate::{environment::StaApartment, probe, protocol::PageToHost};
+
+    fn open_probe() -> (
+        HWND,
+        WebViewSession,
+        Rc<RefCell<Vec<PageToHost>>>,
+        Rc<dyn Fn(PageToHost)>,
+    ) {
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Marknexia native callback test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                800,
+                600,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let messages = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&messages);
+        let observer: Rc<dyn Fn(PageToHost)> =
+            Rc::new(move |message| captured.borrow_mut().push(message));
+        let folder = std::env::temp_dir()
+            .join("marknexia-webview-native-tests")
+            .join(std::process::id().to_string());
+        let mut session = WebViewSession::new(apartment, parent, folder, Rc::downgrade(&observer));
+        // The caller retains the application observer; session callbacks
+        // intentionally keep only Weak references to it.
+        session.add_document(probe::document(7, 1)).unwrap();
+        session.add_document(probe::document(8, 1)).unwrap();
+        session.select_tab(7).unwrap();
+        session.start().unwrap();
+        (parent, session, messages, observer)
+    }
+
+    fn pump_until(
+        session: &mut WebViewSession,
+        timeout: Duration,
+        condition: impl Fn(&WebViewSession) -> bool,
+    ) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline && !condition(session) {
+            let mut message = MSG::default();
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
+                unsafe { DispatchMessageW(&message) };
+            }
+            session.poll().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            condition(session),
+            "native WebView2 probe did not reach its expected state"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_two_tab_resource_message_renderer_and_teardown_contract() {
+        let (parent, mut session, messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some()
+                && session.host(8).is_some()
+                && [7, 8].into_iter().all(|tab_id| {
+                    messages.borrow().iter().any(|message| {
+                        matches!(message, PageToHost::Ready { tab_id: ready_tab, document_epoch: 1, .. } if *ready_tab == tab_id)
+                    })
+                })
+        });
+        assert_eq!(
+            session.host(7).unwrap().document_identity().unwrap(),
+            (7, 1)
+        );
+        assert_eq!(
+            session.host(8).unwrap().document_identity().unwrap(),
+            (8, 1)
+        );
+        // Simulate the callback signal after the real native resource/message
+        // path is installed; the adapter must close and recreate only tab 7.
+        session
+            .events
+            .borrow_mut()
+            .push_back(SessionEvent::ProcessFailure(
+                session.generation,
+                7,
+                ProcessFailure::RendererExited,
+            ));
+        session.poll().unwrap();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some() && session.host(8).is_some()
+        });
+        session.close().unwrap();
+        assert!(session.host(7).is_none() && session.host(8).is_none());
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual native browser-process exit required after both tabs appear"]
+    fn native_browser_exit_recreates_environment_and_immutable_tabs() {
+        let (parent, mut session, messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some()
+                && session.host(8).is_some()
+                && messages.borrow().iter().any(|message| {
+                    matches!(
+                        message,
+                        PageToHost::Ready {
+                            tab_id: 7,
+                            document_epoch: 1,
+                            ..
+                        }
+                    )
+                })
+        });
+        let original_generation = session.generation;
+        // During this bounded dwell, a tester must terminate only this probe's
+        // WebView2 browser process. The environment event and controller events
+        // may arrive in either order; session.poll serializes both.
+        pump_until(&mut session, Duration::from_secs(60), |session| {
+            session.generation > original_generation
+                && session.host(7).is_some()
+                && session.host(8).is_some()
+        });
+        assert_eq!(
+            session.host(7).unwrap().document_identity().unwrap(),
+            (7, 1)
+        );
+        assert_eq!(
+            session.host(8).unwrap().document_identity().unwrap(),
+            (8, 1)
+        );
+        session.close().unwrap();
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+}

@@ -175,6 +175,7 @@ fn serializes_render_content_as_json_data_not_interpolated_script() {
         document_epoch: 42,
         html,
     };
+    assert_eq!(message.identity(), (1, 7, 42));
     assert_eq!(
         serialize_host_message(&message),
         Ok("{\"type\":\"renderDocument\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"html\":\"<p title=\\\"x\\\">a</p>\"}}".to_owned())

@@ -29,6 +29,25 @@ pub enum HostToPage {
     },
 }
 
+impl HostToPage {
+    pub const fn identity(&self) -> (u16, u64, u64) {
+        match self {
+            Self::RenderDocument {
+                protocol,
+                tab_id,
+                document_epoch,
+                ..
+            }
+            | Self::SetTheme {
+                protocol,
+                tab_id,
+                document_epoch,
+                ..
+            } => (*protocol, *tab_id, *document_epoch),
+        }
+    }
+}
+
 pub fn serialize_host_message(message: &HostToPage) -> Result<String, MessageError> {
     let json = serde_json::to_string(message).map_err(|_| MessageError::InvalidPayload)?;
     if json.len() > MAX_HOST_MESSAGE_BYTES {

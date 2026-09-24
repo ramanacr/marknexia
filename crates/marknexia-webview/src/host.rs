@@ -1,6 +1,9 @@
 //! One native controller and its CoreWebView2 interface on the owning STA.
 
-use std::rc::Weak;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    rc::{Rc, Weak},
+};
 
 use webview2_com::{
     Microsoft::Web::WebView2::Win32::{
@@ -13,7 +16,12 @@ use webview2_com::{
 };
 use windows::{Win32::Foundation::RECT, core::BOOL};
 
-use crate::environment::WebViewEnvironment;
+use crate::{
+    callbacks::CallbackTokens,
+    environment::WebViewEnvironment,
+    policy::HostDocument,
+    protocol::{HostToPage, PageToHost, serialize_host_message},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostError {
@@ -21,7 +29,16 @@ pub enum HostError {
     MissingController,
     MissingWebView(i32),
     CallFailed(i32),
+    InvalidDocument,
+    InvalidMessage,
+    AlreadyBound,
     Closed,
+}
+
+impl HostError {
+    pub(crate) fn from_com(error: windows::core::Error) -> Self {
+        Self::CallFailed(error.code().0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +98,8 @@ pub struct WebViewHost {
     core: Option<ICoreWebView2>,
     controller: Option<ICoreWebView2Controller>,
     process_failure_tokens: Vec<i64>,
+    callbacks: Option<CallbackTokens>,
+    document: Option<Rc<HostDocument>>,
     _environment: WebViewEnvironment,
 }
 
@@ -98,6 +117,8 @@ impl WebViewHost {
             core: Some(core),
             controller: Some(controller),
             process_failure_tokens: Vec::new(),
+            callbacks: None,
+            document: None,
             _environment: environment,
         })
     }
@@ -151,7 +172,7 @@ impl WebViewHost {
                 // SAFETY: the event args are owned for this STA callback. The
                 // output is a live stack value and is not retained by COM.
                 unsafe { args.ProcessFailedKind(&mut kind) }?;
-                observer(ProcessFailure::from(kind));
+                let _ = catch_unwind(AssertUnwindSafe(|| observer(ProcessFailure::from(kind))));
             }
             Ok(())
         }));
@@ -165,28 +186,97 @@ impl WebViewHost {
         Ok(())
     }
 
+    /// The immutable document is retained for the full controller lifetime.
+    /// Every event sink receives a weak reference and has no path to raw COM
+    /// from the application observer. A failed binding closes this controller.
+    pub fn bind_document(
+        &mut self,
+        document: HostDocument,
+        observer: Weak<dyn Fn(PageToHost)>,
+    ) -> Result<(), HostError> {
+        if self.callbacks.is_some() {
+            return Err(HostError::AlreadyBound);
+        }
+        document
+            .validate()
+            .map_err(|_| HostError::InvalidDocument)?;
+        let core = self.core.as_ref().ok_or(HostError::Closed)?.clone();
+        let document = Rc::new(document);
+        self.callbacks = Some(CallbackTokens::new(&core));
+        self.document = Some(Rc::clone(&document));
+        if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
+            self._environment.native_environment(),
+            &document,
+            observer,
+        ) {
+            // Retain failed removal tokens in the host if cleanup itself
+            // fails. The session can retry `close` before releasing COM.
+            let _ = self.close();
+            return Err(error);
+        }
+        let uri = document.document_uri();
+        let uri: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: the URI remains live for this synchronous COM call. The
+        // registered resource handler supplies exactly the immutable document.
+        if let Err(error) = unsafe { core.Navigate(windows::core::PCWSTR::from_raw(uri.as_ptr())) }
+        {
+            let _ = self.close();
+            return Err(HostError::from_com(error));
+        }
+        Ok(())
+    }
+
+    pub fn document_identity(&self) -> Result<(u64, u64), HostError> {
+        let document = self.document.as_ref().ok_or(HostError::Closed)?;
+        Ok((document.tab_id, document.document_epoch))
+    }
+
+    /// Only a typed, identity-bound message can cross into the page. The
+    /// immutable document epoch makes a stale renderer response rejectable.
+    pub fn post_message(&self, message: &HostToPage) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let document = self.document.as_ref().ok_or(HostError::InvalidDocument)?;
+        if message.identity() != (1, document.tab_id, document.document_epoch) {
+            return Err(HostError::InvalidMessage);
+        }
+        let json = serialize_host_message(message).map_err(|_| HostError::InvalidMessage)?;
+        let json: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { core.PostWebMessageAsJson(windows::core::PCWSTR::from_raw(json.as_ptr())) }
+            .map_err(HostError::from_com)
+    }
+
     pub fn close(&mut self) -> Result<(), HostError> {
         let mut first_error = None;
+        if let Some(callbacks) = self.callbacks.as_mut() {
+            callbacks.close()?;
+        }
+        self.callbacks.take();
+        self.document.take();
         if let Some(core) = self.core.as_ref() {
+            let mut failed_tokens = Vec::new();
             for token in self.process_failure_tokens.drain(..) {
                 // SAFETY: remove every retained event registration on the
                 // creating STA before releasing CoreWebView2 or controller.
                 if let Err(error) = unsafe { core.remove_ProcessFailed(token) } {
                     first_error.get_or_insert(HostError::CallFailed(error.code().0));
+                    failed_tokens.push(token);
                 }
             }
+            self.process_failure_tokens = failed_tokens;
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         self.core.take();
-        let Some(controller) = self.controller.take() else {
-            return first_error.map_or(Ok(()), Err);
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(());
         };
         // SAFETY: release the page interface first, then explicitly close the
         // controller on its STA before the owning Win32 shell destroys HWND.
         // Event registrations must be removed here before they are added later.
-        if let Err(error) = unsafe { controller.Close() } {
-            first_error.get_or_insert(HostError::CallFailed(error.code().0));
-        }
-        first_error.map_or(Ok(()), Err)
+        unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        self.controller.take();
+        Ok(())
     }
 }
 

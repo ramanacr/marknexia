@@ -2,6 +2,7 @@
 
 use std::{
     os::windows::ffi::OsStrExt,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     rc::{Rc, Weak},
 };
@@ -159,13 +160,15 @@ pub struct BrowserExitSubscription {
 
 impl BrowserExitSubscription {
     pub fn close(&mut self) -> Result<(), EnvironmentError> {
-        let Some(environment) = self.environment.take() else {
+        let Some(environment) = self.environment.as_ref() else {
             return Ok(());
         };
         // SAFETY: the token belongs to this environment and is removed on the
         // creating STA before the final interface reference is released.
         unsafe { environment.remove_BrowserProcessExited(self.token) }
-            .map_err(|error| EnvironmentError::CallFailed(error.code().0))
+            .map_err(|error| EnvironmentError::CallFailed(error.code().0))?;
+        self.environment.take();
+        Ok(())
     }
 }
 
@@ -185,6 +188,9 @@ pub struct WebViewEnvironment {
 }
 
 impl WebViewEnvironment {
+    pub(crate) fn native_environment(&self) -> &ICoreWebView2Environment {
+        &self.inner
+    }
     pub fn observe_browser_exit(
         &self,
         observer: Weak<dyn Fn(BrowserExit)>,
@@ -201,10 +207,12 @@ impl WebViewEnvironment {
                 // outputs are local values and are not retained by COM.
                 unsafe { args.BrowserProcessExitKind(&mut kind) }?;
                 unsafe { args.BrowserProcessId(&mut process_id) }?;
-                observer(BrowserExit {
-                    kind: kind.into(),
-                    process_id,
-                });
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    observer(BrowserExit {
+                        kind: kind.into(),
+                        process_id,
+                    })
+                }));
             }
             Ok(())
         }));

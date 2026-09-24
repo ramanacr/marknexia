@@ -30,6 +30,44 @@ fn serves_a_valid_asset_from_its_own_tab_origin() {
 }
 
 #[test]
+fn document_is_served_only_at_the_exact_tab_origin() {
+    let mut document = request("GET", "https://tab-7.marknexia.invalid/document", 7);
+    document.kind = ResourceKind::Document;
+    assert_eq!(broker().resolve(&document), BrokerDecision::Document);
+    document.uri = "https://tab-7.marknexia.invalid/document?copy=1";
+    assert_eq!(
+        broker().resolve(&document),
+        BrokerDecision::Deny { status: 403 }
+    );
+}
+
+#[test]
+fn only_bundled_probe_script_and_stylesheet_are_allowed() {
+    let mut stylesheet = request("GET", "https://tab-7.marknexia.invalid/assets/probe.css", 7);
+    stylesheet.kind = ResourceKind::Stylesheet;
+    assert_eq!(
+        broker().resolve(&stylesheet),
+        BrokerDecision::LocalAsset {
+            relative_path: "probe.css".to_owned()
+        }
+    );
+    stylesheet.uri = "https://tab-7.marknexia.invalid/assets/other.css";
+    assert_eq!(
+        broker().resolve(&stylesheet),
+        BrokerDecision::Deny { status: 403 }
+    );
+
+    let mut script = request("GET", "https://tab-7.marknexia.invalid/assets/probe.js", 7);
+    script.kind = ResourceKind::Script;
+    assert_eq!(
+        broker().resolve(&script),
+        BrokerDecision::LocalAsset {
+            relative_path: "probe.js".to_owned()
+        }
+    );
+}
+
+#[test]
 fn rejects_non_get_even_for_a_valid_asset() {
     assert_eq!(
         broker().resolve(&request(

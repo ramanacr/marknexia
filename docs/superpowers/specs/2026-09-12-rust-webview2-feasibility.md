@@ -86,6 +86,41 @@ only to permit evaluation on this host while Cargo's Schannel TLS fails. It
 must be regenerated against verified registry packages before a portable
 commit or release.
 
+## Task 5 source-only implementation, 2026-09-24
+
+The current source now connects the broker to a WebView2 resource-request
+handler. The handler obtains and completes a deferral, maps the request's
+method/URI/resource context through an immutable per-controller document,
+and supplies bounded in-memory 200/403/405 responses with fixed content-type,
+nosniff, no-store, and CSP headers. Navigation permits only the exact virtual
+document URI; new windows are suppressed. Web messages are parsed from
+WebView2's `Source` and JSON event fields against the exact origin, source,
+tab, protocol, and document epoch. Typed outbound messages also check their
+identity before posting. Event handlers hold weak application observers, and
+event tokens are removed before controller closure; failed removals remain
+retryable while the host is retained.
+
+`WebViewSession` is the STA-owned adapter for the pure recovery coordinator.
+It queues callback notifications, deduplicates old-generation signals,
+closes controllers before environment recreation, and restores the same
+immutable two-tab documents and selected tab. Retry state is retained for
+failed controller teardown, event-token cleanup, environment replacement,
+and active-tab visibility. Text-only HTML/CSS/JavaScript/SVG probe assets,
+an interactive example, pure policy tests, and ignored native test source
+were added. The approved plan names a PNG probe image; SVG was used in this
+source-only pass because binary artifact creation was explicitly prohibited.
+
+Only Rust source formatting/parsing, manifest/static inspection, and Git
+whitespace checks are permitted for this pass. No Cargo command, native
+test, WebView2 process, executable, UI, or PE/archive generator was run.
+Consequently this implementation is **uncompiled and unproved**. In
+particular, a COM failure while constructing or setting a resource response
+needs native validation for fail-closed behavior. The example does not yet
+exercise every planned focus/resize/link/copy/bootstrap path automatically;
+native x64 and ARM64 lifecycle/security/recovery runs and portable lockfile
+regeneration remain integration gates. The historical observations above do
+not verify this new source.
+
 ## Reference behavior
 
 Microsoft documents that `ProcessFailed` and `BrowserProcessExited` can arrive

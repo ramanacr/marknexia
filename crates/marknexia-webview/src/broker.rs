@@ -22,6 +22,7 @@ pub struct BrokerRequest<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerDecision {
+    Document,
     LocalAsset { relative_path: String },
     Deny { status: u16 },
 }
@@ -49,6 +50,11 @@ impl TabResourceBroker {
     pub fn origin(&self) -> &str {
         &self.origin
     }
+
+    #[must_use]
+    pub fn document_uri(&self) -> String {
+        format!("{}/document", self.origin)
+    }
 }
 
 impl ResourceBroker for TabResourceBroker {
@@ -59,8 +65,8 @@ impl ResourceBroker for TabResourceBroker {
         if request.controller_tab_id != self.tab_id {
             return BrokerDecision::Deny { status: 403 };
         }
-        if request.kind != ResourceKind::Image {
-            return BrokerDecision::Deny { status: 403 };
+        if request.kind == ResourceKind::Document && request.uri == self.document_uri() {
+            return BrokerDecision::Document;
         }
         let Some(raw_path) = request
             .uri
@@ -72,6 +78,15 @@ impl ResourceBroker for TabResourceBroker {
         let Some(relative_path) = decode_safe_relative_path(raw_path) else {
             return BrokerDecision::Deny { status: 403 };
         };
+        let allowed = match request.kind {
+            ResourceKind::Image => true,
+            ResourceKind::Stylesheet => relative_path == "probe.css",
+            ResourceKind::Script => relative_path == "probe.js",
+            ResourceKind::Document | ResourceKind::Other => false,
+        };
+        if !allowed {
+            return BrokerDecision::Deny { status: 403 };
+        }
         BrokerDecision::LocalAsset { relative_path }
     }
 }

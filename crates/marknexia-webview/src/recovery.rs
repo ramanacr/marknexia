@@ -30,6 +30,10 @@ pub struct RecoveryCoordinator {
 }
 
 impl RecoveryCoordinator {
+    pub fn is_healthy(&self) -> bool {
+        self.browser_stage == BrowserStage::Healthy
+    }
+
     #[must_use]
     pub fn new(active_tab_id: Option<u64>) -> Self {
         Self {
@@ -37,6 +41,12 @@ impl RecoveryCoordinator {
             renderer_pending: BTreeSet::new(),
             browser_stage: BrowserStage::Healthy,
             browser_exit_observed: false,
+        }
+    }
+
+    pub fn set_active_tab(&mut self, tab_id: Option<u64>) {
+        if self.browser_stage == BrowserStage::Healthy {
+            self.active_tab_id = tab_id;
         }
     }
 

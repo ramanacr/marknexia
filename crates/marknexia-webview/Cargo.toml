@@ -11,4 +11,4 @@ serde.workspace = true
 serde_json.workspace = true
 windows-sys = { version = "=0.61.2", features = ["Win32_System_Com"] }
 webview2-com = "=0.39.1"
-windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging"] }

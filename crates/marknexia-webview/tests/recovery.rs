@@ -88,6 +88,20 @@ fn browser_recovery_restores_active_tab_identity_once() {
 }
 
 #[test]
+fn active_tab_snapshot_is_frozen_during_browser_recovery() {
+    let mut recovery = RecoveryCoordinator::new(Some(7));
+    recovery.set_active_tab(Some(12));
+    recovery.record_browser_exit();
+    recovery.set_active_tab(Some(99));
+    recovery.controllers_closed();
+    recovery.browser_process_exited();
+    assert_eq!(
+        recovery.environment_restored(),
+        RecoveryAction::RestoreActiveTab { tab_id: 12 }
+    );
+}
+
+#[test]
 fn browser_exit_supersedes_pending_renderer_recovery() {
     let mut recovery = RecoveryCoordinator::new(Some(7));
     recovery.record_renderer_failure(7);
