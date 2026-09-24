@@ -1,17 +1,25 @@
 #requires -Version 7.0
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Bytes', DontShow)][byte[]]$InputBytes,
     [Parameter(Mandatory)][ValidateSet('x64', 'ARM64')][string]$Expected
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    throw "Executable was not found: $Path"
+$resolvedPath = '<in-memory>'
+if ($PSCmdlet.ParameterSetName -eq 'Path') {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Executable was not found: $Path"
+    }
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    $stream = [IO.File]::OpenRead($resolvedPath)
+}
+else {
+    $stream = [IO.MemoryStream]::new($InputBytes, $false)
 }
 
-$resolvedPath = [IO.Path]::GetFullPath($Path)
-$reader = [IO.BinaryReader]::new([IO.File]::OpenRead($resolvedPath))
+$reader = [IO.BinaryReader]::new($stream)
 try {
     $length = $reader.BaseStream.Length
     if ($length -lt 90 -or $reader.ReadUInt16() -ne 0x5a4d) {

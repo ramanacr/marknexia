@@ -7,14 +7,7 @@ if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
     throw 'Test-RustArchitecture.ps1 must exist.'
 }
 
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('marknexia-pe-test-' + [Guid]::NewGuid().ToString('N'))
-$resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$resolvedTarget = [IO.Path]::GetFullPath($temporaryRoot)
-if (-not $resolvedTarget.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Test directory escaped the system temporary directory.'
-}
-
-function New-PeFixture([string]$Path, [uint16]$Machine) {
+function New-PeBytes([uint16]$Machine) {
     $bytes = [byte[]]::new(256)
     $bytes[0] = 0x4d
     $bytes[1] = 0x5a
@@ -24,47 +17,29 @@ function New-PeFixture([string]$Path, [uint16]$Machine) {
     [BitConverter]::GetBytes($Machine).CopyTo($bytes, 132)
     [BitConverter]::GetBytes([uint16]2).CopyTo($bytes, 148)
     [BitConverter]::GetBytes([uint16]0x20b).CopyTo($bytes, 152)
-    [IO.File]::WriteAllBytes($Path, $bytes)
+    return $bytes
 }
 
-try {
-    [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
-    $x64Path = Join-Path $temporaryRoot 'x64.pefixture'
-    $arm64Path = Join-Path $temporaryRoot 'arm64.pefixture'
-    $invalidPath = Join-Path $temporaryRoot 'invalid.pefixture'
-    # Synthetic PE bytes are parsed as data only; never give them an executable filename.
-    foreach ($fixturePath in @($x64Path, $arm64Path, $invalidPath)) {
-        if ([IO.Path]::GetExtension($fixturePath) -in @('.exe', '.dll')) {
-            throw "Synthetic PE fixture must not use an executable filename: $fixturePath"
-        }
-    }
-    New-PeFixture $x64Path 0x8664
-    New-PeFixture $arm64Path 0xaa64
-    [IO.File]::WriteAllBytes($invalidPath, [byte[]](1..8))
+$x64Bytes = New-PeBytes 0x8664
+$arm64Bytes = New-PeBytes 0xaa64
+& $script -InputBytes $x64Bytes -Expected x64 | Out-Null
+& $script -InputBytes $arm64Bytes -Expected ARM64 | Out-Null
 
-    & $script -Path $x64Path -Expected x64 | Out-Null
-    & $script -Path $arm64Path -Expected ARM64 | Out-Null
-
-    foreach ($case in @(
-        @{ path = $x64Path; expected = 'ARM64' },
-        @{ path = $arm64Path; expected = 'x64' },
-        @{ path = $invalidPath; expected = 'x64' }
-    )) {
-        $rejected = $false
-        try {
-            & $script -Path $case.path -Expected $case.expected | Out-Null
-        }
-        catch {
-            $rejected = $true
-        }
-        if (-not $rejected) {
-            throw "Architecture check accepted an invalid fixture: $($case.path) as $($case.expected)."
-        }
+foreach ($case in @(
+    @{ bytes = $x64Bytes; expected = 'ARM64' },
+    @{ bytes = $arm64Bytes; expected = 'x64' },
+    @{ bytes = [byte[]](1..8); expected = 'x64' }
+)) {
+    $rejected = $false
+    try {
+        & $script -InputBytes $case.bytes -Expected $case.expected | Out-Null
     }
-    Write-Host 'Rust architecture static-check regression tests passed.'
-}
-finally {
-    if (Test-Path -LiteralPath $resolvedTarget -PathType Container) {
-        Remove-Item -LiteralPath $resolvedTarget -Recurse -Force
+    catch {
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw "Architecture check accepted invalid in-memory bytes as $($case.expected)."
     }
 }
+
+Write-Host 'Rust architecture in-memory regression tests passed.'

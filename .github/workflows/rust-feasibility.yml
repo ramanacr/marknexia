@@ -48,6 +48,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          pwsh -NoProfile -File tests/perf/no_synthetic_pe_disk.tests.ps1
           pwsh -NoProfile -File tests/perf/test_rust_architecture.tests.ps1
           pwsh -NoProfile -File tests/perf/measure_rust_artifacts.tests.ps1
           pwsh -NoProfile -File tests/perf/measure_rust_desktop_perf.tests.ps1

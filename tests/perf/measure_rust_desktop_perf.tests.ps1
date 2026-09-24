@@ -17,10 +17,10 @@ try {
     $os = @{ caption='Windows Test'; build='26100' }
     $artifact = @{
         schemaVersion='rust-feasibility-v1'; kind='artifact-measurement-v1'; hardware=$hardware; operatingSystem=$os
-        architecture='x64'; nativeArtifact=@{ path='marknexia.pefixture'; machine='0x8664'; evidenceType='static-pe-header-only'; nativeRuntimeVerified=$false }
+        architecture='x64'; nativeArtifact=@{ path='marknexia-win32.exe'; machine='0x8664'; evidenceType='static-pe-header-only'; nativeRuntimeVerified=$false }
         commit='0123456789abcdef'; fixtureDigest=('a' * 64); runCount=1; webViewResidency='not-measured'
         metrics=@{ shellVisibleMs=@{median=$null;p95=$null}; webViewReadyMs=@{median=$null;p95=$null}; firstRenderMs=@{median=$null;p95=$null}; hostPrivateBytes=$null; webView2WorkingSetBytes=$null }
-        artifacts=@{ totalBytes=256;binaryBytes=256;assetsBytes=0;unpackedBytes=256;files=@(@{path='marknexia.pefixture';bytes=256;sha256=('b' * 64)}) }
+        artifacts=@{ totalBytes=256;binaryBytes=256;assetsBytes=0;unpackedBytes=256;files=@(@{path='marknexia-win32.exe';bytes=256;sha256=('b' * 64)}) }
     }
     $artifact | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $artifactPath
     $cold = @(1..30 | ForEach-Object { @{ shellVisibleMs=$_;webViewReadyMs=($_+10);firstRenderMs=($_+20);hostPrivateBytes=15000000;webView2WorkingSetBytes=40000000 } })

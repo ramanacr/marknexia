@@ -35,12 +35,12 @@ finally { $archive.Dispose() }
 
 $actualEntryHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 if ($actualEntryHash -ne $expected.sha256) { throw 'WebView2 loader entry SHA-256 does not match the lock.' }
+& (Join-Path $PSScriptRoot 'Test-RustArchitecture.ps1') -InputBytes $bytes -Expected $Architecture | Out-Null
 $resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resolvedOutput)) | Out-Null
 $temporaryOutput = $resolvedOutput + '.staging.bin'
 try {
     [IO.File]::WriteAllBytes($temporaryOutput, $bytes)
-    & (Join-Path $PSScriptRoot 'Test-RustArchitecture.ps1') -Path $temporaryOutput -Expected $Architecture | Out-Null
     Move-Item -LiteralPath $temporaryOutput -Destination $resolvedOutput -Force
 }
 finally {

@@ -11,20 +11,6 @@ function Assert-That([bool]$Condition, [string]$Message) {
     }
 }
 
-function New-PeFixture([string]$Path, [uint16]$Machine) {
-    Assert-That ([IO.Path]::GetExtension($Path) -eq '.pefixture') 'Synthetic PE bytes require an inert .pefixture name.'
-    $bytes = [byte[]]::new(256)
-    $bytes[0] = 0x4d
-    $bytes[1] = 0x5a
-    [BitConverter]::GetBytes([int]128).CopyTo($bytes, 0x3c)
-    $bytes[128] = 0x50
-    $bytes[129] = 0x45
-    [BitConverter]::GetBytes($Machine).CopyTo($bytes, 132)
-    [BitConverter]::GetBytes([uint16]2).CopyTo($bytes, 148)
-    [BitConverter]::GetBytes([uint16]0x20b).CopyTo($bytes, 152)
-    [IO.File]::WriteAllBytes($Path, $bytes)
-}
-
 $script = Join-Path $RepositoryRoot 'scripts\Measure-RustArtifacts.ps1'
 $schema = Join-Path $RepositoryRoot 'tests\perf\rust-feasibility.schema.json'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('marknexia-rust-artifacts-' + [Guid]::NewGuid().ToString('N'))
@@ -41,21 +27,17 @@ try {
         Assert-That $mandatory "$name must be supplied explicitly; release evidence must not use placeholder defaults."
     }
 
-    $artifactRoot = Join-Path $temporaryRoot 'artifacts'
+    $nativeArtifact = (Get-Command pwsh -ErrorAction Stop).Source
+    $artifactRoot = Split-Path -Parent $nativeArtifact
     $outputPath = Join-Path $temporaryRoot 'measurement.json'
-    [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
-    [IO.Directory]::CreateDirectory((Join-Path $artifactRoot 'assets')) | Out-Null
-    $nativeArtifact = Join-Path $artifactRoot 'marknexia-win32.pefixture'
-    $wrongArchitectureArtifact = Join-Path $artifactRoot 'arm64.pefixture'
-    New-PeFixture $nativeArtifact 0x8664
-    New-PeFixture $wrongArchitectureArtifact 0xaa64
-    [IO.File]::WriteAllBytes((Join-Path $artifactRoot 'loader.bin'), [byte[]](1..29))
-    [IO.File]::WriteAllBytes((Join-Path $artifactRoot 'assets\probe.html'), [byte[]](1..7))
+    $processArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+    $architecture = if ($processArchitecture -eq 'Arm64') { 'ARM64' } else { 'x64' }
+    $wrongArchitecture = if ($architecture -eq 'x64') { 'ARM64' } else { 'x64' }
 
     $fixtureDigest = 'a' * 64
     $hardwareJson = '{"machineName":"test-host","processor":"test-cpu","logicalProcessorCount":8,"physicalMemoryBytes":17179869184}'
     $operatingSystemJson = '{"caption":"Windows Test","build":"26100"}'
-    & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $nativeArtifact -OutputPath $outputPath -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture x64 -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson
+    & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $nativeArtifact -OutputPath $outputPath -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture $architecture -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson
     $scriptSucceeded = $?
     Assert-That $scriptSucceeded 'Artifact measurement script must succeed for controlled artifacts.'
     Assert-That (Test-Path -LiteralPath $outputPath -PathType Leaf) 'Artifact measurement output was not created.'
@@ -63,22 +45,23 @@ try {
 
     $measurement = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json -AsHashtable
     Assert-That ($measurement.kind -eq 'artifact-measurement-v1') 'Artifact measurement kind must identify its contract.'
-    Assert-That ($measurement.artifacts.totalBytes -eq 548) 'Artifact sizes must equal the sum of controlled input bytes.'
-    Assert-That ($measurement.artifacts.files.Count -eq 4) 'Every controlled artifact must be recorded.'
+    Assert-That ($measurement.artifacts.totalBytes -gt 0) 'Artifact measurement must record the genuine installed PowerShell payload.'
+    Assert-That ($measurement.artifacts.files.Count -gt 0) 'Artifact measurement must record at least the genuine native binary.'
     Assert-That ($measurement.nativeArtifact.evidenceType -eq 'static-pe-header-only') 'Architecture proof must be identified as static PE evidence.'
-    Assert-That ($measurement.nativeArtifact.machine -eq '0x8664') 'Architecture proof must reflect the measured PE header.'
+    $expectedMachine = if ($architecture -eq 'x64') { '0x8664' } else { '0xaa64' }
+    Assert-That ($measurement.nativeArtifact.machine -eq $expectedMachine) 'Architecture proof must reflect the genuine native PE header.'
 
     $wrongArchitectureRejected = $false
     try {
-        & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $wrongArchitectureArtifact -OutputPath $outputPath -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture x64 -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson | Out-Null
+        & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $nativeArtifact -OutputPath $outputPath -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture $wrongArchitecture -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson | Out-Null
     }
     catch { $wrongArchitectureRejected = $_.Exception.Message -like '*PE machine mismatch*' }
     Assert-That $wrongArchitectureRejected 'Artifact measurement must reject a native PE whose machine disagrees with the claimed architecture.'
 
-    $nestedOutput = Join-Path $artifactRoot 'measurement.json'
+    $nestedOutput = Join-Path $artifactRoot ('marknexia-rejected-measurement-' + [Guid]::NewGuid().ToString('N') + '.json')
     $nestedOutputRejected = $false
     try {
-        & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $nativeArtifact -OutputPath $nestedOutput -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture x64 -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson | Out-Null
+        & $script -ArtifactsRoot $artifactRoot -NativeArtifactPath $nativeArtifact -OutputPath $nestedOutput -Commit '0123456789abcdef' -FixtureDigest $fixtureDigest -Architecture $architecture -RunCount 1 -HardwareJson $hardwareJson -OperatingSystemJson $operatingSystemJson | Out-Null
     }
     catch { $nestedOutputRejected = $_.Exception.Message -like '*OutputPath*ArtifactsRoot*' }
     Assert-That $nestedOutputRejected 'Artifact measurement must reject OutputPath within ArtifactsRoot.'
