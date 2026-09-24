@@ -29,9 +29,15 @@ function New-PeFixture([string]$Path, [uint16]$Machine) {
 
 try {
     [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
-    $x64Path = Join-Path $temporaryRoot 'x64.exe'
-    $arm64Path = Join-Path $temporaryRoot 'arm64.exe'
-    $invalidPath = Join-Path $temporaryRoot 'invalid.exe'
+    $x64Path = Join-Path $temporaryRoot 'x64.pefixture'
+    $arm64Path = Join-Path $temporaryRoot 'arm64.pefixture'
+    $invalidPath = Join-Path $temporaryRoot 'invalid.pefixture'
+    # Synthetic PE bytes are parsed as data only; never give them an executable filename.
+    foreach ($fixturePath in @($x64Path, $arm64Path, $invalidPath)) {
+        if ([IO.Path]::GetExtension($fixturePath) -in @('.exe', '.dll')) {
+            throw "Synthetic PE fixture must not use an executable filename: $fixturePath"
+        }
+    }
     New-PeFixture $x64Path 0x8664
     New-PeFixture $arm64Path 0xaa64
     [IO.File]::WriteAllBytes($invalidPath, [byte[]](1..8))
