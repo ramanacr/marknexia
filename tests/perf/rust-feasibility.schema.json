@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Marknexia Rust feasibility measurement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "hardware",
+    "operatingSystem",
+    "architecture",
+    "commit",
+    "fixtureDigest",
+    "runCount",
+    "webViewResidency",
+    "metrics",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "rust-feasibility-v1" },
+    "kind": { "enum": ["artifact-measurement-v1", "desktop-performance-measurement-v1"] },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["machineName", "processor", "logicalProcessorCount", "physicalMemoryBytes"],
+      "properties": {
+        "machineName": { "type": "string", "minLength": 1 },
+        "processor": { "type": "string", "minLength": 1 },
+        "logicalProcessorCount": { "type": "integer", "minimum": 1 },
+        "physicalMemoryBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "operatingSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caption", "build"],
+      "properties": {
+        "caption": { "type": "string", "minLength": 1 },
+        "build": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$" }
+      }
+    },
+    "architecture": { "enum": ["x64", "ARM64"] },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+    "fixtureDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runCount": { "type": "integer", "minimum": 1 },
+    "webViewResidency": { "enum": ["not-measured", "separate-process", "unavailable"] },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "$ref": "#/definitions/summary" },
+        "webViewReadyMs": { "$ref": "#/definitions/summary" },
+        "firstRenderMs": { "$ref": "#/definitions/summary" },
+        "hostPrivateBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "webView2WorkingSetBytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalBytes", "binaryBytes", "assetsBytes", "unpackedBytes", "files"],
+      "properties": {
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "binaryBytes": { "type": "integer", "minimum": 0 },
+        "assetsBytes": { "type": "integer", "minimum": 0 },
+        "unpackedBytes": { "type": "integer", "minimum": 0 },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes", "sha256"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^[^\\\\/]+(?:/[^\\\\/]+)*$" },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "desktop-performance-measurement-v1" } } },
+      "then": {
+        "properties": {
+          "webViewResidency": { "const": "separate-process" },
+          "metrics": {
+            "properties": {
+              "shellVisibleMs": { "$ref": "#/definitions/measuredSummary" },
+              "webViewReadyMs": { "$ref": "#/definitions/measuredSummary" },
+              "firstRenderMs": { "$ref": "#/definitions/measuredSummary" },
+              "hostPrivateBytes": { "type": "integer", "minimum": 0 },
+              "webView2WorkingSetBytes": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["median", "p95"],
+      "properties": {
+        "median": { "type": ["number", "null"], "minimum": 0 },
+        "p95": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "measuredSummary": {
+      "type": "object",
+      "required": ["median", "p95"],
+      "properties": {
+        "median": { "type": "number", "minimum": 0 },
+        "p95": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}
