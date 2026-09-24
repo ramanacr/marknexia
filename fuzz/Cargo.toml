@@ -1,0 +1,22 @@
+[package]
+name = "marknexia-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+marknexia-files = { path = "../crates/marknexia-files" }
+marknexia-navigation = { path = "../crates/marknexia-navigation" }
+
+[[bin]]
+name = "path_and_uri"
+path = "fuzz_targets/path_and_uri.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
