@@ -1,0 +1,10 @@
+{
+  "id": "large-document",
+  "description": "Open the pinned large Markdown fixture and wait for first render.",
+  "fixture": {
+    "source": "test-fixtures/markdown/gfm/features.md",
+    "repeat": 2000,
+    "generation": "Concatenate the UTF-8 source with one newline separator per repeat; hash the generated file before capture."
+  },
+  "requiredSignals": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"]
+}

@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ArtifactsRoot,
+    [Parameter(Mandatory)][string]$NativeArtifactPath,
     [Parameter(Mandatory)][string]$OutputPath,
     [ValidateSet('x64', 'ARM64')][string]$Architecture = 'x64',
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{7,64}$')][string]$Commit,
@@ -18,6 +19,17 @@ if (-not (Test-Path -LiteralPath $ArtifactsRoot -PathType Container)) {
 }
 
 $resolvedRoot = [IO.Path]::GetFullPath($ArtifactsRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$rootPrefix = $resolvedRoot + [IO.Path]::DirectorySeparatorChar
+$resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
+if ($resolvedOutput.Equals($resolvedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $resolvedOutput.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputPath must be outside ArtifactsRoot so measurement output cannot change the measured input.'
+}
+$resolvedNativeArtifact = [IO.Path]::GetFullPath($NativeArtifactPath)
+if (-not $resolvedNativeArtifact.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'NativeArtifactPath must be a file within ArtifactsRoot.'
+}
+$architectureEvidence = & (Join-Path $PSScriptRoot 'Test-RustArchitecture.ps1') -Path $resolvedNativeArtifact -Expected $Architecture
 $files = @(Get-ChildItem -LiteralPath $resolvedRoot -File -Recurse | Sort-Object FullName)
 if ($files.Count -eq 0) {
     throw "Artifact root contains no files: $resolvedRoot"
@@ -69,6 +81,12 @@ $measurement = [ordered]@{
     hardware = $hardware
     operatingSystem = $operatingSystem
     architecture = $Architecture
+    nativeArtifact = [ordered]@{
+        path = [IO.Path]::GetRelativePath($resolvedRoot, $resolvedNativeArtifact).Replace('\', '/')
+        machine = $architectureEvidence.machine
+        evidenceType = $architectureEvidence.evidenceType
+        nativeRuntimeVerified = $false
+    }
     commit = $Commit
     fixtureDigest = $FixtureDigest
     runCount = $RunCount
@@ -89,9 +107,9 @@ $measurement = [ordered]@{
     }
 }
 
-$outputDirectory = Split-Path -Parent $OutputPath
+$outputDirectory = Split-Path -Parent $resolvedOutput
 if ($outputDirectory) {
     [IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
 }
-$measurement | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputPath -Encoding utf8NoBOM
-Write-Host "Rust artifact measurement written to $OutputPath ($totalBytes bytes across $($records.Count) files)."
+$measurement | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedOutput -Encoding utf8NoBOM
+Write-Host "Rust artifact measurement written to $resolvedOutput ($totalBytes bytes across $($records.Count) files)."

@@ -9,6 +9,7 @@
     "hardware",
     "operatingSystem",
     "architecture",
+    "nativeArtifact",
     "commit",
     "fixtureDigest",
     "runCount",
@@ -40,10 +41,38 @@
       }
     },
     "architecture": { "enum": ["x64", "ARM64"] },
+    "nativeArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "machine", "evidenceType", "nativeRuntimeVerified"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "machine": { "enum": ["0x8664", "0xaa64"] },
+        "evidenceType": { "const": "static-pe-header-only" },
+        "nativeRuntimeVerified": { "const": false }
+      }
+    },
     "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
     "fixtureDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "runCount": { "type": "integer", "minimum": 1 },
     "webViewResidency": { "enum": ["not-measured", "separate-process", "unavailable"] },
+    "scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "runs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cold", "warm"],
+      "properties": {
+        "cold": { "type": "array", "minItems": 30, "maxItems": 30, "items": { "$ref": "#/definitions/sample" } },
+        "warm": { "type": "array", "minItems": 30, "maxItems": 30, "items": { "$ref": "#/definitions/sample" } }
+      }
+    },
+    "warmMetrics": { "$ref": "#/definitions/phaseMetrics" },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
@@ -52,8 +81,8 @@
         "shellVisibleMs": { "$ref": "#/definitions/summary" },
         "webViewReadyMs": { "$ref": "#/definitions/summary" },
         "firstRenderMs": { "$ref": "#/definitions/summary" },
-        "hostPrivateBytes": { "type": ["integer", "null"], "minimum": 0 },
-        "webView2WorkingSetBytes": { "type": ["integer", "null"], "minimum": 0 }
+        "hostPrivateBytes": { "type": ["integer", "null", "object"] },
+        "webView2WorkingSetBytes": { "type": ["integer", "null", "object"] }
       }
     },
     "artifacts": {
@@ -84,17 +113,33 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "kind": { "const": "desktop-performance-measurement-v1" } } },
+      "if": { "properties": { "kind": { "const": "artifact-measurement-v1" } } },
       "then": {
         "properties": {
+          "metrics": {
+            "properties": {
+              "hostPrivateBytes": { "type": "null" },
+              "webView2WorkingSetBytes": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "desktop-performance-measurement-v1" } } },
+      "then": {
+        "required": ["scenario", "runs", "warmMetrics"],
+        "properties": {
+          "runCount": { "const": 60 },
           "webViewResidency": { "const": "separate-process" },
           "metrics": {
+            "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
             "properties": {
               "shellVisibleMs": { "$ref": "#/definitions/measuredSummary" },
               "webViewReadyMs": { "$ref": "#/definitions/measuredSummary" },
               "firstRenderMs": { "$ref": "#/definitions/measuredSummary" },
-              "hostPrivateBytes": { "type": "integer", "minimum": 0 },
-              "webView2WorkingSetBytes": { "type": "integer", "minimum": 0 }
+              "hostPrivateBytes": { "$ref": "#/definitions/measuredSummary" },
+              "webView2WorkingSetBytes": { "$ref": "#/definitions/measuredSummary" }
             }
           }
         }
@@ -117,6 +162,28 @@
       "properties": {
         "median": { "type": "number", "minimum": 0 },
         "p95": { "type": "number", "minimum": 0 }
+      }
+    },
+    "phaseMetrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "$ref": "#/definitions/measuredSummary" },
+        "webViewReadyMs": { "$ref": "#/definitions/measuredSummary" },
+        "firstRenderMs": { "$ref": "#/definitions/measuredSummary" },
+        "hostPrivateBytes": { "$ref": "#/definitions/measuredSummary" },
+        "webView2WorkingSetBytes": { "$ref": "#/definitions/measuredSummary" }
+      }
+    },
+    "sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "type": "number", "minimum": 0 },
+        "webViewReadyMs": { "type": "number", "minimum": 0 },
+        "firstRenderMs": { "type": "number", "minimum": 0 },
+        "hostPrivateBytes": { "type": "integer", "minimum": 0 },
+        "webView2WorkingSetBytes": { "type": "integer", "minimum": 0 }
       }
     }
   }
