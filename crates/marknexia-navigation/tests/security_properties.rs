@@ -119,6 +119,26 @@ fn invalid_repository_scope_blocks_before_virtual_file_probe() {
 }
 
 #[test]
+fn invalid_current_file_blocks_enforced_repository_navigation_before_probe() {
+    let context = ResolutionContext {
+        current_file: "not-an-absolute-current.md".into(),
+        repository_root: Some("C:/repo".into()),
+        allow_external_links: true,
+        enforce_repository_sandbox: true,
+    };
+    let result = resolve(
+        Some("target.md"),
+        &context,
+        &VirtualFileSystem {
+            files: vec!["target.md".into()],
+        },
+    );
+
+    assert_eq!(result.intent.kind, "BlockedOrInvalid");
+    assert_eq!(result.file_system_probe_count, 0);
+}
+
+#[test]
 fn safe_absolute_windows_and_file_uri_targets_resolve_inside_repository_scope() {
     let context = ResolutionContext {
         current_file: "C:/repo/README.md".into(),

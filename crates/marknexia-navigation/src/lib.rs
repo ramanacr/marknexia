@@ -453,6 +453,12 @@ pub fn resolve(
                 .ok()
                 .and_then(|current| parent_canonical(&current).ok())
         };
+        if base.is_none() && context.enforce_repository_sandbox {
+            return blocked(
+                fragment,
+                "Access blocked: Current file is invalid; cannot enforce repository sandbox.",
+            );
+        }
         if let Some(base) = base {
             let Ok(target) = join_canonical(&base, &decoded) else {
                 return blocked(
