@@ -6,3 +6,13 @@ license.workspace = true
 
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+serde = { workspace = true }
+comrak = { version = "=0.55.0", optional = true, default-features = false }
+pulldown-cmark = { version = "=0.13.4", optional = true, default-features = false, features = ["html"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+candidate-comrak = ["dep:comrak"]
+candidate-pulldown = ["dep:pulldown-cmark"]

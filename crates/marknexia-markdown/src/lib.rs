@@ -1,3 +1,19 @@
 #![forbid(unsafe_code)]
 
-//! Markdown compatibility surface. Implementation follows in Task 4.
+//! Exploratory parser bake-off; no parser is selected here.
+//! Candidate output is content-unsafe and unbounded. It includes unsanitized raw
+//! HTML and must never be sent to WebView before sanitization and output limits.
+
+mod compatibility;
+mod engine;
+pub use engine::{Anchor, Diagram, Heading, MarkdownEngine, MarkdownOptions, ParsedDocument};
+
+#[cfg(feature = "candidate-comrak")]
+mod comrak_adapter;
+#[cfg(feature = "candidate-comrak")]
+pub use comrak_adapter::ComrakAdapter;
+
+#[cfg(feature = "candidate-pulldown")]
+mod pulldown_adapter;
+#[cfg(feature = "candidate-pulldown")]
+pub use pulldown_adapter::PulldownAdapter;
