@@ -493,6 +493,12 @@ rtk git commit -m "test: measure Rust release feasibility"
 
 **Unavailable / deferred:** no runtime desktop metrics were collected. The repository currently has no runtime collector that launches the shell, observes WebView2 readiness/rendering, and separately samples host and WebView2 memory; `Measure-RustDesktopPerf.ps1` only imports externally collected samples. The 30 cold/30 warm performance gate, native x64/ARM64 measurements, schema/runtime validation, and executable loader behavior remain unverified and deferred. Static PE-header evidence does not establish native execution.
 
+#### Task 7 provenance correction — 2026-09-24 source-only fix round 3
+
+Imported sample provenance now also requires `nativeArtifactSha256`. The importer resolves the native executable's unique record in `artifact.artifacts.files` by the artifact's recorded relative path and compares the supplied sample hash to that record's SHA-256. The output schema requires a lowercase 64-character digest, and regression source covers retention and mismatch rejection. This closes same-path/same-metadata artifact substitution in sample provenance.
+
+**Evidence available:** source inspection and diff checks only. Tests, builds, schema validators, parsers, and runtime collectors were not run in this round. Runtime measurements remain unavailable/deferred as recorded above.
+
 ### Task 8: Produce the Reviewed Go/No-Go Evidence Package
 
 **Files:**

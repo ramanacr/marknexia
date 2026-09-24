@@ -29,7 +29,8 @@ try {
     $provenance = @{
         commit=$artifact.commit; fixtureDigest=$artifact.fixtureDigest
         scenario=@{ id='empty-shell'; sha256=$scenarioDigest }; architecture=$artifact.architecture
-        nativeArtifact=$artifact.nativeArtifact; hardware=$hardware; operatingSystem=$os
+        nativeArtifact=$artifact.nativeArtifact; nativeArtifactSha256=$artifact.artifacts.files[0].sha256
+        hardware=$hardware; operatingSystem=$os
     }
     $sampleDocument = @{ cold=$cold; warm=$warm; webViewResidency='separate-process'; provenance=$provenance }
     $sampleDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $samplesPath
@@ -41,6 +42,7 @@ try {
     Assert-That ($result.metrics.shellVisibleMs.p95 -eq 29) 'P95 must be derived from per-run cold samples.'
     Assert-That ($result.sampleSource -eq 'imported-external' -and $result.runtimeCollectorStatus -eq 'unavailable-deferred') 'Imported metrics must retain the collector availability boundary.'
     Assert-That ($result.sampleProvenance.commit -eq $artifact.commit -and $result.sampleProvenance.scenario.sha256 -eq $scenarioDigest) 'Desktop evidence must retain sample provenance.'
+    Assert-That ($result.sampleProvenance.nativeArtifactSha256 -eq $artifact.artifacts.files[0].sha256) 'Desktop evidence must retain the measured native artifact hash.'
     $short = Get-Content -LiteralPath $samplesPath -Raw | ConvertFrom-Json -AsHashtable
     $short.warm = @($short.warm | Select-Object -First 29)
     $short | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $samplesPath
@@ -54,6 +56,7 @@ try {
         @{ name='scenario digest'; expected='*scenario id or SHA-256*'; mutate={ param($value) $value.provenance.scenario.sha256=('d' * 64) } },
         @{ name='architecture'; expected='*architecture does not match*'; mutate={ param($value) $value.provenance.architecture='ARM64' } },
         @{ name='native artifact'; expected='*native artifact identity does not match*'; mutate={ param($value) $value.provenance.nativeArtifact.path='other.exe' } },
+        @{ name='native artifact hash'; expected='*native artifact SHA-256 does not match*'; mutate={ param($value) $value.provenance.nativeArtifactSha256=('e' * 64) } },
         @{ name='hardware'; expected='*hardware identity does not match*'; mutate={ param($value) $value.provenance.hardware.machineName='other-host' } },
         @{ name='operating system'; expected='*operating-system identity does not match*'; mutate={ param($value) $value.provenance.operatingSystem.build='99999' } }
     )

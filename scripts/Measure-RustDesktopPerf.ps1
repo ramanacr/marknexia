@@ -26,6 +26,16 @@ $provenance = $samples.provenance
 foreach ($field in @('commit', 'fixtureDigest', 'scenario', 'architecture', 'nativeArtifact', 'hardware', 'operatingSystem')) {
     if (-not $provenance.ContainsKey($field)) { throw "Imported sample provenance is missing $field." }
 }
+$nativeArtifactRecords = @($artifact.artifacts.files | Where-Object { $_.path -ceq $artifact.nativeArtifact.path })
+if ($nativeArtifactRecords.Count -ne 1) {
+    throw 'Artifact measurement must contain exactly one file record for the native artifact.'
+}
+if (-not $provenance.ContainsKey('nativeArtifactSha256')) {
+    throw 'Imported sample provenance is missing nativeArtifactSha256.'
+}
+if ($provenance.nativeArtifactSha256 -cne $nativeArtifactRecords[0].sha256) {
+    throw 'Imported sample native artifact SHA-256 does not match the artifact measurement file record.'
+}
 if ($provenance.commit -cne $artifact.commit) { throw 'Imported sample commit does not match the artifact measurement.' }
 if ($provenance.fixtureDigest -cne $artifact.fixtureDigest) { throw 'Imported sample fixture digest does not match the artifact measurement.' }
 if ($provenance.scenario.id -cne $scenarioData.id -or $provenance.scenario.sha256 -cne $scenarioSha256) {

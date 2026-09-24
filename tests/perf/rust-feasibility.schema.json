@@ -68,13 +68,14 @@
     "runtimeCollectorStatus": { "const": "unavailable-deferred" },
     "sampleProvenance": {
       "type": "object", "additionalProperties": false,
-      "required": ["commit", "fixtureDigest", "scenario", "architecture", "nativeArtifact", "hardware", "operatingSystem"],
+      "required": ["commit", "fixtureDigest", "scenario", "architecture", "nativeArtifact", "nativeArtifactSha256", "hardware", "operatingSystem"],
       "properties": {
         "commit": { "$ref": "#/properties/commit" },
         "fixtureDigest": { "$ref": "#/properties/fixtureDigest" },
         "scenario": { "$ref": "#/properties/scenario" },
         "architecture": { "$ref": "#/properties/architecture" },
         "nativeArtifact": { "$ref": "#/properties/nativeArtifact" },
+        "nativeArtifactSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "hardware": { "$ref": "#/properties/hardware" },
         "operatingSystem": { "$ref": "#/properties/operatingSystem" }
       }
