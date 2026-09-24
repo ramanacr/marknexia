@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
 fn main() {
-    println!("Marknexia Rust/Win32 feasibility shell is not implemented yet.");
+    if let Err(error) = marknexia_win32::window::run() {
+        eprintln!("Marknexia Rust shell failed: {error:?}");
+        std::process::exit(1);
+    }
 }
