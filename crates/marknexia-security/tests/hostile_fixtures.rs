@@ -49,9 +49,13 @@ fn all_frozen_hostile_fixtures_preserve_expected_parity_and_fail_closed() {
         let case = fixture(source);
         assert_eq!(case.name, expected_name);
         assert_eq!(case.expected.sanitized_html, expected_output);
-        let result = match case.input.mode.as_str() {
-            "html" => HtmlPolicy::new(policy).sanitize_fragment(&case.input.html),
-            "svg" => SvgPolicy::new(policy).sanitize(&case.input.html),
+        let result: Result<(), SanitizeError> = match case.input.mode.as_str() {
+            "html" => HtmlPolicy::new(policy)
+                .sanitize_fragment(&case.input.html)
+                .map(|_| ()),
+            "svg" => SvgPolicy::new(policy)
+                .sanitize(&case.input.html)
+                .map(|_| ()),
             mode => panic!("unexpected fixture mode {mode}"),
         };
         assert!(
@@ -144,6 +148,27 @@ fn approved_external_links_do_not_depend_on_remote_image_policy() {
         urls.validate("https://example.test/image.png", UrlContext::Image),
         Err(SanitizeError::UnsafeUrl)
     );
+}
+
+#[test]
+fn url_forms_requiring_a_real_parser_or_compatibility_decision_fail_closed() {
+    let urls = UrlPolicy::new(ContentPolicy::default());
+    // The feasibility policy intentionally accepts only a conservative DNS
+    // authority and simple address/number forms. Port syntax, IPv6 literals,
+    // trailing-dot hosts, mailto headers, and telephone extensions remain
+    // deferred until a parser-backed policy and parity decision are locked.
+    for value in [
+        "https://example.test:8443/path",
+        "https://[2001:db8::1]/path",
+        "https://example.test./path",
+        "mailto:reader@example.test?subject=hello",
+        "tel:+1-555-0100;ext=9",
+    ] {
+        assert_eq!(
+            urls.validate(value, UrlContext::Link),
+            Err(SanitizeError::UnsafeUrl)
+        );
+    }
 }
 
 #[test]

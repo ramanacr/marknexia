@@ -275,10 +275,12 @@ impl UrlPolicy {
         Self { policy }
     }
 
-    /// Validate an already entity-decoded attribute value. Links permit the
-    /// approved HTTP(S), mailto, and tel schemes independently of the remote
-    /// image setting. Images require explicit HTTPS permission. Protocol-
-    /// relative URLs and all other active schemes fail.
+    /// Validate an already entity-decoded attribute value. Links permit a
+    /// deliberately conservative subset of HTTP(S), mailto, and tel forms,
+    /// independently of the remote-image setting. Images require explicit
+    /// HTTPS permission. Ports, IP literals, trailing-dot hosts, mail headers,
+    /// telephone extensions, protocol-relative URLs, and all other active
+    /// schemes fail closed pending a parser-backed compatibility decision.
     pub fn validate(&self, value: &str, context: UrlContext) -> Result<SafeUrl, SanitizeError> {
         if value.len() > self.policy.limits.max_url_bytes
             || value.is_empty()
@@ -348,11 +350,17 @@ fn valid_web_authority(after_scheme: &str) -> bool {
 }
 
 fn valid_mailto(value: &str) -> bool {
-    !value.is_empty()
-        && value.contains('@')
-        && !value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && !domain.contains(['/', '?', '#'])
+        && local.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-')
+        })
+        && valid_web_authority(domain)
 }
 
 fn valid_tel(value: &str) -> bool {

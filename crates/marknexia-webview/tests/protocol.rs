@@ -1,7 +1,9 @@
 use marknexia_core::contracts::AppTheme;
 use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::protocol::{HostToPage, serialize_host_message};
-use marknexia_webview::protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message};
+use marknexia_webview::protocol::{
+    MAX_HOST_MESSAGE_BYTES, MessageError, PageToHost, ProtocolContext, parse_page_message,
+};
 
 const SOURCE: &str = "https://tab-7.marknexia.invalid/document.html";
 const ORIGIN: &str = "https://tab-7.marknexia.invalid";
@@ -196,5 +198,26 @@ fn serializes_a_typed_theme_message_for_the_current_document() {
     assert_eq!(
         serialize_host_message(&message),
         Ok("{\"type\":\"setTheme\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"theme\":\"Dark\"}}".to_owned())
+    );
+}
+
+#[test]
+fn rejects_safely_created_content_when_json_escaping_crosses_host_cap() {
+    // A control character is inert text after HtmlPolicy encoding but expands
+    // to six JSON bytes. This exercises the real capped serializer without a
+    // public escape hatch for constructing SanitizedFragment.
+    let characters = MAX_HOST_MESSAGE_BYTES / 6 + 1;
+    let html = HtmlPolicy::new(ContentPolicy::default())
+        .encode_text(&"\u{0001}".repeat(characters))
+        .expect("input remains under the absolute HTML input/output caps");
+    let message = HostToPage::RenderDocument {
+        protocol: 1,
+        tab_id: 7,
+        document_epoch: 42,
+        html,
+    };
+    assert_eq!(
+        serialize_host_message(&message),
+        Err(MessageError::TooLarge)
     );
 }
