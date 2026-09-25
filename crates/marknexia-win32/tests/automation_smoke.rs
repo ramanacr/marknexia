@@ -10,18 +10,18 @@ use std::{
 };
 
 use windows::{
+    core::{w, Interface},
     Win32::{
-        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
         UI::{
             Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationSelectionItemPattern,
                 TreeScope_Children, UIA_SelectionItemPatternId, UIA_TabControlTypeId,
                 UIA_TabItemControlTypeId,
             },
-            WindowsAndMessaging::FindWindowW,
+            WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId},
         },
     },
-    core::{Interface, w},
 };
 
 #[test]
@@ -32,7 +32,11 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let hwnd = loop {
         if let Ok(hwnd) = unsafe { FindWindowW(w!("MarknexiaRustWindow"), None) } {
-            break hwnd;
+            let mut owner = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+            if owner == child.id() {
+                break hwnd;
+            }
         }
         assert!(Instant::now() < deadline, "shell HWND did not appear");
         thread::sleep(Duration::from_millis(100));
@@ -74,18 +78,14 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
         unsafe { first.CurrentControlType() }.unwrap(),
         UIA_TabItemControlTypeId.0
     );
-    assert!(
-        !unsafe { first.CurrentName() }
-            .unwrap()
-            .to_string()
-            .is_empty()
-    );
-    assert!(
-        !unsafe { second.CurrentName() }
-            .unwrap()
-            .to_string()
-            .is_empty()
-    );
+    assert!(!unsafe { first.CurrentName() }
+        .unwrap()
+        .to_string()
+        .is_empty());
+    assert!(!unsafe { second.CurrentName() }
+        .unwrap()
+        .to_string()
+        .is_empty());
     let pattern: IUIAutomationSelectionItemPattern =
         unsafe { first.GetCurrentPattern(UIA_SelectionItemPatternId) }
             .unwrap()

@@ -13,7 +13,7 @@ use crate::{
     environment::{
         BrowserExit, BrowserExitSubscription, EnvironmentError, StaApartment, WebViewEnvironment,
     },
-    host::{HostError, ProcessFailure, ViewportBounds, WebViewHost},
+    host::{HostColor, HostError, ProcessFailure, ViewportBounds, WebViewHost},
     policy::{DocumentError, HostDocument},
     protocol::PageToHost,
     recovery::{RecoveryAction, RecoveryCoordinator},
@@ -84,6 +84,7 @@ pub struct WebViewSession {
     recovery_generation: Option<u64>,
     closed: bool,
     viewport: ViewportBounds,
+    background: HostColor,
 }
 
 impl WebViewSession {
@@ -126,6 +127,12 @@ impl WebViewSession {
                 top: 0,
                 right: 0,
                 bottom: 0,
+            },
+            background: HostColor {
+                alpha: 255,
+                red: 255,
+                green: 255,
+                blue: 255,
             },
         }
     }
@@ -175,6 +182,17 @@ impl WebViewSession {
         self.viewport = bounds;
         for host in self.hosts.values() {
             host.set_bounds(bounds)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_background(&mut self, color: HostColor) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        self.background = color;
+        for host in self.hosts.values() {
+            host.set_default_background(color)?;
         }
         Ok(())
     }
@@ -369,6 +387,7 @@ impl WebViewSession {
                     }
                 };
                 host.set_bounds(self.viewport)?;
+                host.set_default_background(self.background)?;
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
                     if host.close().is_err() {
                         self.orphaned_hosts.entry(tab_id).or_default().push(host);
@@ -676,14 +695,14 @@ mod native_tests {
     };
 
     use windows::{
+        core::w,
         Win32::{
             Foundation::HWND,
             UI::WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+                CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
                 WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
             },
         },
-        core::w,
     };
 
     use super::{ProcessFailure, SessionEvent, WebViewSession};

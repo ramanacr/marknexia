@@ -1,55 +1,66 @@
 //! Raw Win32 shell. All HWND and WebView2 COM state stays on the owning STA.
 
-use std::{cell::RefCell, collections::BTreeMap, ffi::c_void, path::PathBuf, ptr::NonNull, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, ffi::c_void, path::PathBuf, rc::Rc};
 
 use marknexia_webview::{
-    environment::StaApartment, host::ViewportBounds, policy::HostDocument, protocol::PageToHost,
+    environment::StaApartment,
+    host::{HostColor, ViewportBounds},
+    policy::HostDocument,
+    protocol::PageToHost,
     session::WebViewSession,
 };
 use windows::{
+    core::{w, Error, PCWSTR},
     Win32::{
         Foundation::{
-            GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SetLastError, WIN32_ERROR, WPARAM,
+            GetLastError, SetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WIN32_ERROR, WPARAM,
         },
-        Graphics::Gdi::{
-            BeginPaint, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
-            COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, COLORREF, CreateSolidBrush,
-            DeleteObject, DrawFocusRect, EndPaint, FillRect, GetSysColor, GetSysColorBrush,
-            HGDIOBJ, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+        Graphics::{
+            Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE},
+            Gdi::{
+                BeginPaint, CreateSolidBrush, DeleteObject, DrawFocusRect, EndPaint, FillRect,
+                GetSysColor, GetSysColorBrush, SetBkMode, SetTextColor, TextOutW, COLORREF,
+                COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+                COLOR_WINDOW, COLOR_WINDOWTEXT, HGDIOBJ, PAINTSTRUCT, TRANSPARENT,
+            },
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+        },
         UI::{
             HiDpi::{
-                AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-                GetDpiForWindow, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext,
+                AreDpiAwarenessContextsEqual, GetDpiForWindow, GetThreadDpiAwarenessContext,
+                SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             },
             Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT},
             WindowsAndMessaging::{
-                CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-                IDC_ARROW, InvalidateRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW,
-                SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetFocus, SetWindowLongPtrW,
-                SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WM_DESTROY, WM_DPICHANGED, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE,
-                WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-                WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+                GetMessageW, GetWindowLongPtrW, InvalidateRect, LoadCursorW, PostMessageW,
+                PostQuitMessage, RegisterClassW, SetFocus, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
+                IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+                WINDOW_STYLE, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_GETOBJECT, WM_KEYDOWN,
+                WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
+                WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW,
+                WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
-    core::{Error, PCWSTR, w},
 };
 
 use crate::{
-    accessibility::native::{NativeAccessibility, is_uia_root_request},
+    accessibility::native::{is_uia_root_request, NativeAccessibility},
     app::{AppState as PortableAppState, FocusSurface},
-    keyboard::{KeyChord, ShellCommand, route_key},
+    keyboard::{route_key, KeyChord, ShellCommand},
     layout::{PixelRect, ShellLayout, ShellLayoutRequest},
-    theme::{ColorSpec, EffectiveTheme, SystemColorRole, palette, resolve_theme},
+    theme::{palette, resolve_theme, ColorSpec, EffectiveTheme, SystemColorRole},
 };
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
 const WINDOW_TITLE: PCWSTR = w!("Marknexia");
+const WM_SELECT_TAB: u32 = WM_APP + 1;
 
 #[derive(Debug)]
 pub enum WindowError {
@@ -79,6 +90,7 @@ struct AppState {
     apartment: Option<Rc<StaApartment>>,
     page_observer: Option<Rc<dyn Fn(PageToHost)>>,
     accessibility: Option<NativeAccessibility>,
+    uia_selection: Option<Rc<dyn Fn(crate::tabs::TabId)>>,
     last_error: Option<String>,
     dpi: u32,
     theme: EffectiveTheme,
@@ -94,34 +106,17 @@ impl AppState {
             apartment: None,
             page_observer: None,
             accessibility: None,
+            uia_selection: None,
             last_error: None,
             dpi: 96,
             theme: EffectiveTheme::Light,
             destroyed: false,
         }
     }
-    fn close(&mut self) {
-        if self.destroyed {
-            return;
-        }
-        self.destroyed = true;
-        if let Some(a11y) = self.accessibility.as_mut() {
-            a11y.disconnect();
-        }
-        if let Some(session) = self.webview.as_mut() {
-            if let Err(error) = session.close() {
-                self.last_error = Some(format!("WebView2 close: {error:?}"));
-            }
-        }
-        self.webview.take();
-        self.page_observer.take();
-        self.apartment.take();
-        self.controls.take();
-    }
 }
 
 struct CreatePayload {
-    state: Option<Box<AppState>>,
+    state: Option<Box<Rc<RefCell<AppState>>>>,
 }
 
 pub fn run() -> Result<(), WindowError> {
@@ -152,7 +147,7 @@ pub fn run() -> Result<(), WindowError> {
         }
     }
     let mut payload = CreatePayload {
-        state: Some(Box::new(AppState::new())),
+        state: Some(Box::new(Rc::new(RefCell::new(AppState::new())))),
     };
     let hwnd = unsafe {
         CreateWindowExW(
@@ -261,18 +256,41 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             1005,
         )?,
     };
-    let state = unsafe { app_state_mut(hwnd) }.ok_or(WindowError::State)?;
-    state.controls = Some(controls);
-    state.dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let state = unsafe { app_state_handle(hwnd) }.ok_or(WindowError::State)?;
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let portable = {
+        let mut state = state.borrow_mut();
+        state.controls = Some(controls);
+        state.dpi = dpi;
+        Rc::clone(&state.portable)
+    };
     {
-        let mut app = state.portable.borrow_mut();
+        let mut app = portable.borrow_mut();
         let _ = app.open_tab("Welcome");
         let _ = app.open_tab("Security and privacy");
     }
-    state.accessibility = Some(NativeAccessibility::new(
+    let select_callback: Rc<dyn Fn(crate::tabs::TabId)> = Rc::new(move |tab_id| {
+        // Queue selection onto the shell loop. The UIA callback never borrows
+        // shell state or calls WebView2 while COM is still on its stack.
+        let _ = unsafe {
+            PostMessageW(
+                Some(hwnd),
+                WM_SELECT_TAB,
+                WPARAM(tab_id.get() as usize),
+                LPARAM(0),
+            )
+        };
+    });
+    let accessibility = NativeAccessibility::new(
         controls.tabs,
-        Rc::downgrade(&state.portable),
-    ));
+        Rc::downgrade(&portable),
+        Rc::downgrade(&select_callback),
+    );
+    {
+        let mut state = state.borrow_mut();
+        state.accessibility = Some(accessibility);
+        state.uia_selection = Some(select_callback);
+    }
     match StaApartment::enter() {
         Ok(apartment) => {
             let apartment = Rc::new(apartment);
@@ -283,38 +301,53 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
                 webview_folder(),
                 Rc::downgrade(&observer),
             );
-            let app = state.portable.borrow();
-            for tab in app.tabs().tabs() {
-                let html = format!("<!doctype html><html><body><main><h1>{}</h1><p>Marknexia native document viewport.</p></main></body></html>", tab.title()).into_bytes();
+            let (tabs, active) = {
+                let app = portable.borrow();
+                (
+                    app.tabs()
+                        .tabs()
+                        .iter()
+                        .map(|tab| (tab.id(), tab.title().to_owned()))
+                        .collect::<Vec<_>>(),
+                    app.active_id(),
+                )
+            };
+            let mut startup_error = None;
+            for (tab_id, title) in tabs {
+                let html = format!("<!doctype html><html><body><main><h1>{title}</h1><p>Marknexia native document viewport.</p></main></body></html>").into_bytes();
                 if let Err(error) = session.add_document(HostDocument {
-                    tab_id: tab.id().get(),
+                    tab_id: tab_id.get(),
                     document_epoch: 1,
                     html,
                     assets: BTreeMap::new(),
                 }) {
-                    state.last_error = Some(format!("WebView2 document: {error:?}"));
+                    startup_error = Some(format!("WebView2 document: {error:?}"));
                 }
             }
-            if let Some(active) = app.active_id() {
+            if let Some(active) = active {
                 let _ = session.select_tab(active.get());
             }
-            drop(app);
             match session.start() {
                 Ok(()) => {
+                    let mut state = state.borrow_mut();
                     state.webview = Some(session);
                     state.apartment = Some(apartment);
                     state.page_observer = Some(observer);
+                    state.last_error = startup_error;
                 }
                 Err(error) => {
-                    state.last_error = Some(format!("WebView2 unavailable: {error:?}"));
                     let _ = session.close();
+                    state.borrow_mut().last_error =
+                        Some(format!("WebView2 unavailable: {error:?}"));
                 }
             }
         }
-        Err(error) => state.last_error = Some(format!("COM STA unavailable: {error:?}")),
+        Err(error) => {
+            state.borrow_mut().last_error = Some(format!("COM STA unavailable: {error:?}"))
+        }
     }
     update_theme(hwnd);
-    reflow(hwnd, state.dpi);
+    reflow(hwnd, dpi);
     Ok(())
 }
 
@@ -365,9 +398,13 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_KEYDOWN if route_native_key(hwnd, wparam.0 as u16) => LRESULT(0),
+        WM_SELECT_TAB => {
+            select_tab_id(hwnd, wparam.0 as u64, false);
+            LRESULT(0)
+        }
         WM_DESTROY => {
-            if let Some(state) = unsafe { app_state_mut(hwnd) } {
-                state.close();
+            if let Some(state) = unsafe { app_state_handle(hwnd) } {
+                close_state(&state);
             }
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -377,11 +414,16 @@ unsafe extern "system" fn window_proc(
             let cleared = raw == 0
                 || (unsafe { set_user_data(hwnd, 0) }.is_ok()
                     && unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } == 0);
-            let result = unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
-            if raw != 0 && cleared {
-                let mut state = unsafe { Box::from_raw(raw as *mut AppState) };
-                state.close();
+            let owner = if raw != 0 && cleared {
+                Some(unsafe { Box::from_raw(raw as *mut Rc<RefCell<AppState>>) })
+            } else {
+                None
+            };
+            if let Some(state) = owner.as_ref() {
+                close_state(state);
             }
+            let result = unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+            drop(owner);
             result
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
@@ -400,15 +442,13 @@ unsafe extern "system" fn tab_proc(
             else {
                 return LRESULT(0);
             };
-            let Some(state) = (unsafe { app_state_mut(parent) }) else {
+            let Some(state) = (unsafe { app_state_handle(parent) }) else {
                 return LRESULT(0);
             };
-            state
-                .accessibility
-                .as_ref()
-                .map_or(LRESULT(0), |provider| unsafe {
-                    provider.return_provider(wparam, lparam)
-                })
+            let provider = state.borrow().accessibility.clone();
+            provider.as_ref().map_or(LRESULT(0), |provider| unsafe {
+                provider.return_provider(wparam, lparam)
+            })
         }
         WM_LBUTTONDOWN => {
             if let Ok(parent) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }
@@ -430,14 +470,25 @@ fn paint_tabs(hwnd: HWND) {
     let Ok(parent) = (unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }) else {
         return;
     };
-    let Some(state) = (unsafe { app_state_mut(parent) }) else {
+    let Some(state) = (unsafe { app_state_handle(parent) }) else {
         return;
     };
-    let tabs = state.portable.borrow();
-    let count = tabs.tabs().tabs().len();
-    let selected = tabs.active_tab();
-    let focus_visible = tabs.focus_is_visible();
-    let colors = palette(state.theme);
+    let (tabs, selected, focus_visible, colors, dpi) = {
+        let state = state.borrow();
+        let app = state.portable.borrow();
+        (
+            app.tabs()
+                .tabs()
+                .iter()
+                .map(|tab| (tab.id(), tab.title().to_owned()))
+                .collect::<Vec<_>>(),
+            app.active_tab(),
+            app.focus_is_visible(),
+            palette(state.theme),
+            state.dpi,
+        )
+    };
+    let count = tabs.len();
     let mut paint = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut paint) };
     let mut client = RECT::default();
@@ -445,7 +496,7 @@ fn paint_tabs(hwnd: HWND) {
         fill(dc, &client, native_color(colors.surface));
         if count > 0 {
             let width = (client.right - client.left).max(0) / count as i32;
-            for (index, tab) in tabs.tabs().tabs().iter().enumerate() {
+            for (index, (tab_id, title)) in tabs.iter().enumerate() {
                 let mut rect = RECT {
                     left: index as i32 * width,
                     top: 0,
@@ -456,7 +507,7 @@ fn paint_tabs(hwnd: HWND) {
                     },
                     bottom: client.bottom,
                 };
-                let active = selected == Some(tab.id());
+                let active = selected == Some(*tab_id);
                 fill(
                     dc,
                     &rect,
@@ -473,13 +524,13 @@ fn paint_tabs(hwnd: HWND) {
                     );
                     SetBkMode(dc, TRANSPARENT);
                 }
-                let text: Vec<u16> = tab.title().encode_utf16().collect();
+                let text: Vec<u16> = title.encode_utf16().collect();
                 let x = rect
                     .left
-                    .saturating_add((12_u32.saturating_mul(state.dpi) / 96) as i32);
+                    .saturating_add((12_u32.saturating_mul(dpi) / 96) as i32);
                 let y = rect
                     .top
-                    .saturating_add((12_u32.saturating_mul(state.dpi) / 96) as i32);
+                    .saturating_add((12_u32.saturating_mul(dpi) / 96) as i32);
                 let _ = unsafe { TextOutW(dc, x, y, &text) };
                 if active && focus_visible {
                     let _ = unsafe { DrawFocusRect(dc, &rect) };
@@ -520,95 +571,142 @@ fn native_color(spec: ColorSpec) -> COLORREF {
 fn route_native_key(hwnd: HWND, key: u16) -> bool {
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    if !ctrl && !shift && matches!(key, 0x25 | 0x27) {
+        let tab_strip = unsafe { app_state_handle(hwnd) }
+            .and_then(|state| state.borrow().controls.map(|controls| controls.tabs));
+        if tab_strip.is_none()
+            || unsafe { windows::Win32::UI::WindowsAndMessaging::GetFocus() } != tab_strip
+        {
+            return false;
+        }
+    }
     route_key(KeyChord::new(key, ctrl, shift, false))
         .is_some_and(|command| execute_command(hwnd, command))
 }
 
 fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
-    let Some(state) = (unsafe { app_state_mut(hwnd) }) else {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return false;
     };
-    state.portable.borrow_mut().note_keyboard_input();
+    let portable = Rc::clone(&state.borrow().portable);
+    portable.borrow_mut().note_keyboard_input();
     if command == ShellCommand::CloseTab {
-        let Some(active) = state.portable.borrow().active_tab() else {
+        let Some(active) = portable.borrow().active_tab() else {
             return false;
         };
-        if state
-            .webview
-            .as_mut()
-            .is_some_and(|session| session.remove_document(active.get()).is_err())
-        {
-            return false;
+        if let Some(mut session) = take_session(&state) {
+            let result = session.remove_document(active.get());
+            restore_session(&state, session);
+            if result.is_err() {
+                return false;
+            }
         }
     }
-    if !state.portable.borrow_mut().apply_command(command) {
+    if !portable.borrow_mut().apply_command(command) {
         return false;
     }
     if command == ShellCommand::CycleFocus {
-        focus_surface(state);
-    } else if let Some(active) = state.portable.borrow().active_tab() {
-        if let Some(session) = state.webview.as_mut() {
-            let _ = session.select_tab(active.get());
+        let (controls, focus) = {
+            let state = state.borrow();
+            (state.controls, portable.borrow().focused_surface())
+        };
+        if let Some(controls) = controls {
+            let target = focus_target(controls, focus);
+            let _ = unsafe { SetFocus(Some(target)) };
         }
+    } else if let Some(active) = portable.borrow().active_tab() {
+        select_webview(&state, active.get());
     }
-    refresh_tabs(state);
+    refresh_tabs(&state);
     true
 }
 
-fn focus_surface(state: &AppState) {
-    let Some(c) = state.controls else { return };
-    let hwnd = match state.portable.borrow().focused_surface() {
+fn focus_target(c: ShellControls, focus: FocusSurface) -> HWND {
+    match focus {
         FocusSurface::CommandBar => c.command,
         FocusSurface::TabStrip => c.tabs,
         FocusSurface::Repository => c.sidebar,
         FocusSurface::Document => c.tabs,
         FocusSurface::FindBar => c.find,
         FocusSurface::Status => c.status,
-    };
-    let _ = unsafe { SetFocus(Some(hwnd)) };
+    }
 }
 
 fn select_tab_at(hwnd: HWND, x: i32) {
-    let Some(state) = (unsafe { app_state_mut(hwnd) }) else {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    state.portable.borrow_mut().note_pointer_input();
-    let count = state.portable.borrow().tabs().tabs().len();
+    let (portable, width) = {
+        let state = state.borrow();
+        (
+            Rc::clone(&state.portable),
+            state
+                .accessibility
+                .as_ref()
+                .map_or(1, NativeAccessibility::tab_strip_width)
+                .max(1),
+        )
+    };
+    portable.borrow_mut().note_pointer_input();
+    let count = portable.borrow().tabs().tabs().len();
     if count == 0 {
         return;
     }
-    let width = state
-        .accessibility
-        .as_ref()
-        .map_or(1, NativeAccessibility::tab_strip_width)
-        .max(1);
     let index =
         ((x.max(0) as u32).saturating_mul(count as u32) / width).min(count as u32 - 1) as usize;
-    let id = state.portable.borrow().tabs().tabs()[index].id();
-    if state.portable.borrow_mut().select_tab(id) {
-        if let Some(session) = state.webview.as_mut() {
-            let _ = session.select_tab(id.get());
-        }
-        refresh_tabs(state);
+    let id = portable.borrow().tabs().tabs()[index].id();
+    select_tab_id(hwnd, id.get(), true);
+}
+
+fn select_tab_id(hwnd: HWND, raw_id: u64, pointer_input: bool) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let id = portable
+        .borrow()
+        .tabs()
+        .tabs()
+        .iter()
+        .find(|tab| tab.id().get() == raw_id)
+        .map(|tab| tab.id());
+    let Some(id) = id else { return };
+    if pointer_input {
+        portable.borrow_mut().note_pointer_input();
+    }
+    if portable.borrow_mut().select_tab(id) {
+        select_webview(&state, id.get());
+        refresh_tabs(&state);
     }
 }
 
-fn refresh_tabs(state: &mut AppState) {
-    if let Some(a11y) = state.accessibility.as_mut() {
+fn refresh_tabs(state: &Rc<RefCell<AppState>>) {
+    let (a11y, controls) = {
+        let state = state.borrow();
+        (state.accessibility.clone(), state.controls)
+    };
+    if let Some(a11y) = a11y.as_ref() {
         a11y.refresh();
     }
-    if let Some(c) = state.controls {
+    if let Some(c) = controls {
         let _ = unsafe { InvalidateRect(Some(c.tabs), None, true) };
     }
 }
 
 fn poll_webview(hwnd: HWND) {
-    if let Some(state) = unsafe { app_state_mut(hwnd) } {
-        if let Some(session) = state.webview.as_mut() {
-            if let Err(error) = session.poll() {
-                state.last_error = Some(format!("WebView2 poll: {error:?}"));
-            }
-        }
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let Some(mut session) = take_session(&state) else {
+        return;
+    };
+    let error = session
+        .poll()
+        .err()
+        .map(|error| format!("WebView2 poll: {error:?}"));
+    restore_session(&state, session);
+    if let Some(error) = error {
+        state.borrow_mut().last_error = Some(error);
     }
 }
 
@@ -617,22 +715,27 @@ fn reflow(hwnd: HWND, dpi: u32) {
     if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
         return;
     }
-    let Some(state) = (unsafe { app_state_mut(hwnd) }) else {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    state.dpi = dpi.max(96);
-    let app = state.portable.borrow();
+    let (portable, controls) = {
+        let state = state.borrow();
+        (Rc::clone(&state.portable), state.controls)
+    };
+    let actual_dpi = dpi.max(96);
+    state.borrow_mut().dpi = actual_dpi;
+    let app = portable.borrow();
     let layout = ShellLayout::compute(
         ShellLayoutRequest::new(
             client.right.max(0) as u32,
             client.bottom.max(0) as u32,
-            state.dpi,
+            actual_dpi,
         )
         .with_sidebar_visible(app.sidebar_visible())
         .with_find_bar_visible(app.find_bar_visible()),
     );
     drop(app);
-    if let Some(c) = state.controls {
+    if let Some(c) = controls {
         for (window, rect) in [
             (c.command, layout.command_bar),
             (c.tabs, layout.tab_strip),
@@ -663,7 +766,7 @@ fn reflow(hwnd: HWND, dpi: u32) {
             )
         };
     }
-    if let Some(session) = state.webview.as_mut() {
+    if let Some(mut session) = take_session(&state) {
         let b = layout.webview;
         let _ = session.set_viewport(ViewportBounds {
             left: b.x as i32,
@@ -671,8 +774,10 @@ fn reflow(hwnd: HWND, dpi: u32) {
             right: b.right() as i32,
             bottom: b.bottom() as i32,
         });
+        restore_session(&state, session);
     }
-    if let Some(a11y) = state.accessibility.as_mut() {
+    let a11y = state.borrow().accessibility.clone();
+    if let Some(a11y) = a11y.as_ref() {
         a11y.update_tab_strip_bounds(layout.tab_strip);
     }
 }
@@ -692,12 +797,84 @@ fn move_child(hwnd: HWND, b: PixelRect) {
 }
 
 fn update_theme(hwnd: HWND) {
-    if let Some(state) = unsafe { app_state_mut(hwnd) } {
-        state.theme = resolve_theme(state.portable.borrow().theme(), false, high_contrast());
-        if let Some(c) = state.controls {
-            for window in [c.command, c.tabs, c.sidebar, c.find, c.status] {
-                let _ = unsafe { InvalidateRect(Some(window), None, true) };
-            }
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let (preference, controls) = {
+        let state = state.borrow();
+        (state.portable.borrow().theme(), state.controls)
+    };
+    let theme = resolve_theme(preference, system_prefers_dark(), high_contrast());
+    state.borrow_mut().theme = theme;
+    apply_window_theme(hwnd, theme);
+    if let Some(mut session) = take_session(&state) {
+        let _ = session.set_background(webview_color(palette(theme).background));
+        restore_session(&state, session);
+    }
+    if let Some(c) = controls {
+        for window in [c.command, c.tabs, c.sidebar, c.find, c.status] {
+            let _ = unsafe { InvalidateRect(Some(window), None, true) };
+        }
+    }
+}
+
+fn system_prefers_dark() -> bool {
+    let mut light_theme = 1_u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut light_theme as *mut u32).cast::<c_void>()),
+            Some(&mut size),
+        )
+    };
+    status.is_ok() && size == std::mem::size_of::<u32>() as u32 && light_theme == 0
+}
+
+fn apply_window_theme(hwnd: HWND, theme: EffectiveTheme) {
+    let dark = i32::from(matches!(theme, EffectiveTheme::Dark));
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&dark as *const i32).cast::<c_void>(),
+            std::mem::size_of_val(&dark) as u32,
+        )
+    };
+}
+
+fn webview_color(spec: ColorSpec) -> HostColor {
+    let color = native_color(spec).0;
+    HostColor {
+        alpha: 255,
+        red: (color & 0xff) as u8,
+        green: ((color >> 8) & 0xff) as u8,
+        blue: ((color >> 16) & 0xff) as u8,
+    }
+}
+
+fn take_session(state: &Rc<RefCell<AppState>>) -> Option<WebViewSession> {
+    state.borrow_mut().webview.take()
+}
+fn restore_session(state: &Rc<RefCell<AppState>>, session: WebViewSession) {
+    let mut state = state.borrow_mut();
+    if !state.destroyed {
+        state.webview = Some(session);
+    }
+}
+fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) {
+    if let Some(mut session) = take_session(state) {
+        let error = session
+            .select_tab(tab_id)
+            .err()
+            .map(|error| format!("WebView2 select: {error:?}"));
+        restore_session(state, session);
+        if let Some(error) = error {
+            state.borrow_mut().last_error = Some(error);
         }
     }
 }
@@ -745,12 +922,17 @@ fn enable_dpi() -> Result<(), Error> {
     }
 }
 
-fn app_state_pointer(value: isize) -> Option<NonNull<AppState>> {
-    NonNull::new(value as *mut AppState)
-}
-unsafe fn app_state_mut(hwnd: HWND) -> Option<&'static mut AppState> {
-    let pointer = app_state_pointer(unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) })?;
-    Some(unsafe { pointer.as_ptr().as_mut().expect("NonNull") })
+unsafe fn app_state_handle(hwnd: HWND) -> Option<Rc<RefCell<AppState>>> {
+    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Rc<RefCell<AppState>>;
+    if pointer.is_null() {
+        None
+    } else {
+        // SAFETY: GWLP_USERDATA owns a boxed Rc from WM_NCCREATE until it is
+        // cleared in WM_NCDESTROY. Cloning creates a scoped strong handle, so
+        // nested dispatch cannot invalidate the allocation. No AppState
+        // reference or RefCell borrow is returned from this function.
+        Some(Rc::clone(unsafe { &*pointer }))
+    }
 }
 unsafe fn set_user_data(hwnd: HWND, value: isize) -> Result<(), Error> {
     unsafe { SetLastError(WIN32_ERROR(0)) };
@@ -760,4 +942,35 @@ unsafe fn set_user_data(hwnd: HWND, value: isize) -> Result<(), Error> {
     } else {
         Ok(())
     }
+}
+
+fn close_state(state: &Rc<RefCell<AppState>>) {
+    let (mut session, mut accessibility, apartment, observer, controls) = {
+        let mut state = state.borrow_mut();
+        if state.destroyed {
+            return;
+        }
+        state.destroyed = true;
+        state.uia_selection.take();
+        (
+            state.webview.take(),
+            state.accessibility.take(),
+            state.apartment.take(),
+            state.page_observer.take(),
+            state.controls.take(),
+        )
+    };
+    if let Some(accessibility) = accessibility.as_mut() {
+        accessibility.disconnect();
+    }
+    let error = session
+        .as_mut()
+        .and_then(|session| session.close().err())
+        .map(|error| format!("WebView2 close: {error:?}"));
+    drop(session);
+    drop(observer);
+    drop(apartment);
+    let mut state = state.borrow_mut();
+    state.last_error = error.or_else(|| state.last_error.take());
+    drop(controls);
 }

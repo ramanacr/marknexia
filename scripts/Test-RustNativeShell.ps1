@@ -58,12 +58,12 @@ public static class RustShellWindowProbe {
         }, IntPtr.Zero);
         return descriptions.ToString();
     }
-    public static bool HasChildText(IntPtr parent, string expected) {
+    public static bool HasChildClass(IntPtr parent, string expected) {
         bool found = false;
         EnumChildWindows(parent, (child, _) => {
-            var title = new StringBuilder(1024);
-            GetWindowText(child, title, title.Capacity);
-            if (title.ToString().Contains(expected, StringComparison.Ordinal)) {
+            var name = new StringBuilder(256);
+            GetClassName(child, name, name.Capacity);
+            if (name.ToString() == expected) {
                 found = true;
                 return false;
             }
@@ -84,7 +84,7 @@ try {
             throw "Rust shell exited before opening a window (exit $($process.ExitCode))."
         }
         $window = [RustShellWindowProbe]::FindVisibleWindowForProcess(
-            [uint32]$process.Id, 'MarknexiaRustPreviewWindow', 'Marknexia Rust Preview')
+            [uint32]$process.Id, 'MarknexiaRustWindow', 'Marknexia')
         [uint32]$owner = 0
         if ($window -ne [IntPtr]::Zero -and
             [RustShellWindowProbe]::GetWindowThreadProcessId($window, [ref]$owner) -ne 0 -and
@@ -101,8 +101,8 @@ try {
         $windows = [RustShellWindowProbe]::DescribeWindowsForProcess([uint32]$process.Id)
         throw "Rust shell window not verified within 10 seconds (PID $($process.Id), found HWND $window, owner $owner, visible $windowVisible, process MainWindowHandle $($process.MainWindowHandle), title '$($process.MainWindowTitle)', windows $windows)."
     }
-    if (-not [RustShellWindowProbe]::HasChildText($window, 'Document viewport not connected')) {
-        throw 'Rust shell preview did not expose its native development-status surface.'
+    if (-not [RustShellWindowProbe]::HasChildClass($window, 'MarknexiaRustTabStrip')) {
+        throw 'Rust shell did not expose its custom native tab strip.'
     }
     Write-Output "Rust shell visible: PID $($process.Id), HWND $window."
 }

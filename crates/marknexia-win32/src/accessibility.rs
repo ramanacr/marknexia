@@ -70,7 +70,11 @@ impl AccessibilityTree {
 
     #[must_use]
     pub fn children(&self) -> &[AccessibleElement] {
-        if self.connected { &self.children } else { &[] }
+        if self.connected {
+            &self.children
+        } else {
+            &[]
+        }
     }
 
     #[must_use]
@@ -121,34 +125,34 @@ pub mod native {
     };
 
     use windows::{
+        core::{implement, Error, IUnknown, Interface, Result, HRESULT, VARIANT},
         Win32::{
             Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM},
             System::{
                 Com::SAFEARRAY,
                 Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement},
-                Variant::VT_UNKNOWN,
+                Variant::{VT_I4, VT_UNKNOWN},
             },
             UI::{
                 Accessibility::{
-                    IRawElementProviderFragment, IRawElementProviderFragment_Impl,
-                    IRawElementProviderFragmentRoot, IRawElementProviderFragmentRoot_Impl,
+                    IRawElementProviderFragment, IRawElementProviderFragmentRoot,
+                    IRawElementProviderFragmentRoot_Impl, IRawElementProviderFragment_Impl,
                     IRawElementProviderSimple, IRawElementProviderSimple_Impl,
                     ISelectionItemProvider, ISelectionItemProvider_Impl, ISelectionProvider,
                     ISelectionProvider_Impl, NavigateDirection, NavigateDirection_FirstChild,
                     NavigateDirection_LastChild, NavigateDirection_NextSibling,
                     NavigateDirection_Parent, NavigateDirection_PreviousSibling, ProviderOptions,
                     ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
-                    UIA_E_ELEMENTNOTAVAILABLE, UIA_HasKeyboardFocusPropertyId,
-                    UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
-                    UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId, UIA_PATTERN_ID,
-                    UIA_PROPERTY_ID, UIA_SelectionItemPatternId, UIA_SelectionPatternId,
-                    UIA_TabControlTypeId, UIA_TabItemControlTypeId, UiaHostProviderFromHwnd,
-                    UiaRect, UiaReturnRawElementProvider, UiaRootObjectId,
+                    UIA_HasKeyboardFocusPropertyId, UIA_IsControlElementPropertyId,
+                    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId,
+                    UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_TabControlTypeId,
+                    UIA_TabItemControlTypeId, UiaAppendRuntimeId, UiaHostProviderFromHwnd, UiaRect,
+                    UiaReturnRawElementProvider, UiaRootObjectId, UIA_E_ELEMENTNOTAVAILABLE,
+                    UIA_PATTERN_ID, UIA_PROPERTY_ID,
                 },
                 WindowsAndMessaging::{GetFocus, GetWindowRect, SetFocus},
             },
         },
-        core::{IUnknown, Interface, Result, VARIANT, implement},
     };
 
     use crate::{app::AppState, layout::PixelRect, tabs::TabId};
@@ -160,6 +164,7 @@ pub mod native {
     struct ProviderState {
         hwnd: HWND,
         app: Weak<RefCell<AppState>>,
+        select: Weak<dyn Fn(TabId)>,
         bounds: Cell<PixelRect>,
         connected: Cell<bool>,
     }
@@ -191,8 +196,19 @@ pub mod native {
                 .collect())
         }
 
-        fn tab_rect(&self, index: usize) -> Result<UiaRect> {
+        fn tab_index(&self, id: TabId) -> Result<usize> {
+            self.tabs()?
+                .iter()
+                .position(|(candidate, _, _)| *candidate == id)
+                .ok_or_else(|| UIA_E_ELEMENTNOTAVAILABLE.into())
+        }
+
+        fn tab_rect(&self, id: TabId) -> Result<UiaRect> {
             let tabs = self.tabs()?;
+            let index = tabs
+                .iter()
+                .position(|(candidate, _, _)| *candidate == id)
+                .ok_or_else(|| Error::from(UIA_E_ELEMENTNOTAVAILABLE))?;
             let mut host = RECT::default();
             unsafe { GetWindowRect(self.hwnd, &mut host) }?;
             if tabs.is_empty() || index >= tabs.len() {
@@ -208,29 +224,31 @@ pub mod native {
         }
     }
 
+    #[derive(Clone)]
     pub struct NativeAccessibility {
         state: Rc<ProviderState>,
     }
 
     impl NativeAccessibility {
-        pub fn new(hwnd: HWND, app: Weak<RefCell<AppState>>) -> Self {
+        pub fn new(hwnd: HWND, app: Weak<RefCell<AppState>>, select: Weak<dyn Fn(TabId)>) -> Self {
             Self {
                 state: Rc::new(ProviderState {
                     hwnd,
                     app,
+                    select,
                     bounds: Cell::new(PixelRect::default()),
                     connected: Cell::new(true),
                 }),
             }
         }
 
-        pub fn refresh(&mut self) {}
+        pub fn refresh(&self) {}
 
         pub fn disconnect(&mut self) {
             self.state.connected.set(false);
         }
 
-        pub fn update_tab_strip_bounds(&mut self, bounds: PixelRect) {
+        pub fn update_tab_strip_bounds(&self, bounds: PixelRect) {
             self.state.bounds.set(bounds);
         }
 
@@ -249,6 +267,14 @@ pub mod native {
 
     fn unavailable<T>() -> Result<T> {
         Err(UIA_E_ELEMENTNOTAVAILABLE.into())
+    }
+
+    // The generated implementation trait models nullable COM out interfaces
+    // as Result<T>. Its vtable adapter initializes the out pointer to null;
+    // returning S_OK through this sentinel therefore represents the native
+    // contract's successful null without constructing an invalid Rust wrapper.
+    fn successful_null<T>() -> Result<T> {
+        Err(Error::from_hresult(HRESULT(0)))
     }
 
     fn root_simple(state: &Rc<ProviderState>) -> IRawElementProviderSimple {
@@ -272,18 +298,18 @@ pub mod native {
         .into()
     }
 
-    fn child_fragment(state: &Rc<ProviderState>, index: usize) -> IRawElementProviderFragment {
+    fn child_fragment(state: &Rc<ProviderState>, id: TabId) -> IRawElementProviderFragment {
         TabProvider {
             state: Rc::downgrade(state),
-            index,
+            id,
         }
         .into()
     }
 
-    fn child_simple(state: &Rc<ProviderState>, index: usize) -> IRawElementProviderSimple {
+    fn child_simple(state: &Rc<ProviderState>, id: TabId) -> IRawElementProviderSimple {
         TabProvider {
             state: Rc::downgrade(state),
-            index,
+            id,
         }
         .into()
     }
@@ -320,7 +346,7 @@ pub mod native {
                 .into();
                 Ok(provider.into())
             } else {
-                unavailable()
+                successful_null()
             }
         }
         fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> Result<VARIANT> {
@@ -351,11 +377,13 @@ pub mod native {
             let state = self.live()?;
             let tabs = state.tabs()?;
             match direction {
-                NavigateDirection_FirstChild if !tabs.is_empty() => Ok(child_fragment(&state, 0)),
-                NavigateDirection_LastChild if !tabs.is_empty() => {
-                    Ok(child_fragment(&state, tabs.len() - 1))
+                NavigateDirection_FirstChild if !tabs.is_empty() => {
+                    Ok(child_fragment(&state, tabs[0].0))
                 }
-                _ => unavailable(),
+                NavigateDirection_LastChild if !tabs.is_empty() => {
+                    Ok(child_fragment(&state, tabs[tabs.len() - 1].0))
+                }
+                _ => successful_null(),
             }
         }
         fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
@@ -391,9 +419,9 @@ pub mod native {
             let state = self.live()?;
             let tabs = state.tabs()?;
             for index in 0..tabs.len() {
-                let r = state.tab_rect(index)?;
+                let r = state.tab_rect(tabs[index].0)?;
                 if x >= r.left && x < r.left + r.width && y >= r.top && y < r.top + r.height {
-                    return Ok(child_fragment(&state, index));
+                    return Ok(child_fragment(&state, tabs[index].0));
                 }
             }
             Ok(root_fragment(&state))
@@ -408,7 +436,7 @@ pub mod native {
             if tabs.is_empty() {
                 Ok(root_fragment(&state))
             } else {
-                Ok(child_fragment(&state, index))
+                Ok(child_fragment(&state, tabs[index].0))
             }
         }
     }
@@ -420,7 +448,7 @@ pub mod native {
             let Some(index) = tabs.iter().position(|(_, _, selected)| *selected) else {
                 return Ok(ptr::null_mut());
             };
-            let child: IUnknown = child_simple(&state, index).into();
+            let child: IUnknown = child_simple(&state, tabs[index].0).into();
             let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, 1) };
             if array.is_null() {
                 return unavailable();
@@ -446,7 +474,7 @@ pub mod native {
     )]
     struct TabProvider {
         state: Weak<ProviderState>,
-        index: usize,
+        id: TabId,
     }
 
     impl TabProvider_Impl {
@@ -457,10 +485,10 @@ pub mod native {
                 .filter(|state| state.connected.get())
                 .ok_or_else(|| UIA_E_ELEMENTNOTAVAILABLE.into())?;
             let tabs = state.tabs()?;
-            if self.index >= tabs.len() {
-                unavailable()
-            } else {
+            if tabs.iter().any(|(id, _, _)| *id == self.id) {
                 Ok((state, tabs))
+            } else {
+                unavailable()
             }
         }
     }
@@ -474,17 +502,20 @@ pub mod native {
             if pattern == UIA_SelectionItemPatternId {
                 let provider: ISelectionItemProvider = TabProvider {
                     state: Rc::downgrade(&state),
-                    index: self.index,
+                    id: self.id,
                 }
                 .into();
                 Ok(provider.into())
             } else {
-                unavailable()
+                successful_null()
             }
         }
         fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> Result<VARIANT> {
             let (_, tabs) = self.live()?;
-            let (_, name, selected) = &tabs[self.index];
+            let (_, name, selected) = tabs
+                .iter()
+                .find(|(id, _, _)| *id == self.id)
+                .ok_or_else(|| Error::from(UIA_E_ELEMENTNOTAVAILABLE))?;
             if property == UIA_NamePropertyId {
                 Ok(VARIANT::from(name.as_str()))
             } else if property == UIA_ControlTypePropertyId {
@@ -501,30 +532,54 @@ pub mod native {
             }
         }
         fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
-            unavailable()
+            successful_null()
         }
     }
 
     impl IRawElementProviderFragment_Impl for TabProvider_Impl {
         fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
             let (state, tabs) = self.live()?;
+            let index = state.tab_index(self.id)?;
             match direction {
                 NavigateDirection_Parent => Ok(root_fragment(&state)),
-                NavigateDirection_NextSibling if self.index + 1 < tabs.len() => {
-                    Ok(child_fragment(&state, self.index + 1))
+                NavigateDirection_NextSibling if index + 1 < tabs.len() => {
+                    Ok(child_fragment(&state, tabs[index + 1].0))
                 }
-                NavigateDirection_PreviousSibling if self.index > 0 => {
-                    Ok(child_fragment(&state, self.index - 1))
+                NavigateDirection_PreviousSibling if index > 0 => {
+                    Ok(child_fragment(&state, tabs[index - 1].0))
                 }
-                _ => unavailable(),
+                _ => successful_null(),
             }
         }
         fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
-            Ok(ptr::null_mut())
+            let (state, _) = self.live()?;
+            let values = [
+                UiaAppendRuntimeId,
+                self.id.get() as i32,
+                (self.id.get() >> 32) as i32,
+            ];
+            let array = unsafe { SafeArrayCreateVector(VT_I4, 0, values.len() as u32) };
+            if array.is_null() {
+                return unavailable();
+            }
+            for (index, value) in values.iter().enumerate() {
+                if let Err(error) = unsafe {
+                    SafeArrayPutElement(
+                        array,
+                        &(index as i32),
+                        (value as *const i32).cast::<c_void>(),
+                    )
+                } {
+                    let _ = unsafe { SafeArrayDestroy(array) };
+                    return Err(error);
+                }
+            }
+            drop(state);
+            Ok(array)
         }
         fn BoundingRectangle(&self) -> Result<UiaRect> {
             let (state, _) = self.live()?;
-            state.tab_rect(self.index)
+            state.tab_rect(self.id)
         }
         fn GetEmbeddedFragmentRoots(&self) -> Result<*mut SAFEARRAY> {
             Ok(ptr::null_mut())
@@ -540,13 +595,14 @@ pub mod native {
 
     impl ISelectionItemProvider_Impl for TabProvider_Impl {
         fn Select(&self) -> Result<()> {
-            let (state, tabs) = self.live()?;
-            if state.app()?.borrow_mut().select_tab(tabs[self.index].0) {
-                unsafe { SetFocus(Some(state.hwnd)) };
-                Ok(())
-            } else {
-                unavailable()
-            }
+            let (state, _) = self.live()?;
+            let select = state
+                .select
+                .upgrade()
+                .ok_or_else(|| Error::from(UIA_E_ELEMENTNOTAVAILABLE))?;
+            select(self.id);
+            unsafe { SetFocus(Some(state.hwnd)) };
+            Ok(())
         }
         fn AddToSelection(&self) -> Result<()> {
             self.Select()
@@ -556,7 +612,11 @@ pub mod native {
         }
         fn IsSelected(&self) -> Result<BOOL> {
             let (_, tabs) = self.live()?;
-            Ok(tabs[self.index].2.into())
+            Ok(tabs
+                .iter()
+                .find(|(id, _, _)| *id == self.id)
+                .is_some_and(|(_, _, selected)| *selected)
+                .into())
         }
         fn SelectionContainer(&self) -> Result<IRawElementProviderSimple> {
             let (state, _) = self.live()?;

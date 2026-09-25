@@ -3,26 +3,29 @@
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{catch_unwind, AssertUnwindSafe},
     rc::{Rc, Weak},
 };
 
 use webview2_com::{
     Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
         COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
         COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, ICoreWebView2,
-        ICoreWebView2Controller,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
     },
     ProcessFailedEventHandler,
 };
-use windows::{Win32::Foundation::RECT, core::BOOL};
+use windows::{
+    core::{Interface, BOOL},
+    Win32::Foundation::RECT,
+};
 
 use crate::{
     callbacks::CallbackTokens,
     environment::WebViewEnvironment,
     policy::HostDocument,
-    protocol::{HostToPage, PageToHost, serialize_host_message},
+    protocol::{serialize_host_message, HostToPage, PageToHost},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +73,14 @@ pub struct ViewportBounds {
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostColor {
+    pub alpha: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
 }
 
 impl From<ViewportBounds> for RECT {
@@ -153,6 +164,20 @@ impl WebViewHost {
         // STA. The host retains no borrowed Rust state through this call.
         unsafe { controller.SetIsVisible(visible) }
             .map_err(|error| HostError::CallFailed(error.code().0))
+    }
+
+    pub fn set_default_background(&self, color: HostColor) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let controller = controller
+            .cast::<ICoreWebView2Controller2>()
+            .map_err(HostError::from_com)?;
+        let native = COREWEBVIEW2_COLOR {
+            A: color.alpha,
+            R: color.red,
+            G: color.green,
+            B: color.blue,
+        };
+        unsafe { controller.SetDefaultBackgroundColor(native) }.map_err(HostError::from_com)
     }
 
     pub fn is_visible(&self) -> Result<bool, HostError> {
