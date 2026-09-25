@@ -140,14 +140,17 @@ navigation. A normal response-construction or assignment failure retries
 uncompleted and owned by the host until `controller.Close` succeeds; the STA
 session closes the controller fleet and enters a terminal security-error
 state rather than retrying navigation. A failed `Complete` follows the same
-abort path. This is based on WebView2's documented behavior that a request
+abort path. Security abort attempts `controller.Close` even when callback-token
+removal fails; successful controller closure invalidates those registrations.
+This is based on WebView2's documented behavior that a request
 with no response continues to the network, while a deferred request remains
 blocked until completion:
 <https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested>,
 <https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2webresourcerequestedeventargs>.
 The rare joint failure of `GetDeferral` and immediate `SetResponse` cannot
-be proven fail-closed from these COM semantics alone; the callback signals
-terminal teardown, but whether WebView2 has already continued the request
+be proven fail-closed from these COM semantics alone; the callback now attempts
+synchronous controller closure before returning the COM error, but whether
+WebView2 has already continued the request
 requires native fault-injection evidence. The source-only gate does not claim
 that evidence or a complete security proof.
 

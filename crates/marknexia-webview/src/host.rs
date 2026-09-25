@@ -205,6 +205,7 @@ impl WebViewHost {
         self.callbacks = Some(CallbackTokens::new(&core));
         self.document = Some(Rc::clone(&document));
         if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
+            self.controller.as_ref().ok_or(HostError::Closed)?,
             self._environment.native_environment(),
             &document,
             Rc::downgrade(&self.page_messages),
@@ -280,6 +281,29 @@ impl WebViewHost {
             // An uncompleted resource deferral, if any, remains held inside
             // callbacks until Close succeeds. This prevents a request with no
             // explicit response from being released to network fallback.
+            unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        }
+        self.controller.take();
+        self.core.take();
+        self.callbacks.take();
+        self.document.take();
+        self.page_messages.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// A resource-boundary failure must close the controller even if event
+    /// token removal fails. Once Close succeeds, WebView2 can no longer issue
+    /// callbacks and failed removal tokens no longer need retry ownership.
+    pub(crate) fn abort_security_boundary(&mut self) -> Result<(), HostError> {
+        if let Some(callbacks) = self.callbacks.as_mut() {
+            let _ = callbacks.close();
+        }
+        if let Some(core) = self.core.as_ref() {
+            for token in self.process_failure_tokens.drain(..) {
+                let _ = unsafe { core.remove_ProcessFailed(token) };
+            }
+        }
+        if let Some(controller) = self.controller.as_ref() {
             unsafe { controller.Close() }.map_err(HostError::from_com)?;
         }
         self.controller.take();

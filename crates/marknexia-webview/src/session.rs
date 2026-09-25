@@ -63,7 +63,7 @@ pub struct WebViewSession {
     events: Rc<RefCell<VecDeque<SessionEvent>>>,
     documents: BTreeMap<u64, HostDocument>,
     hosts: BTreeMap<u64, WebViewHost>,
-    orphaned_hosts: BTreeMap<u64, WebViewHost>,
+    orphaned_hosts: BTreeMap<u64, Vec<WebViewHost>>,
     process_observers: BTreeMap<u64, Rc<dyn Fn(ProcessFailure)>>,
     browser_observer: Option<Rc<dyn Fn(BrowserExit)>>,
     browser_subscription: Option<BrowserExitSubscription>,
@@ -311,7 +311,9 @@ impl WebViewSession {
                     || self.closed
                 {
                     if let Ok(mut host) = result {
-                        let _ = host.close();
+                        if host.close().is_err() {
+                            self.orphaned_hosts.entry(tab_id).or_default().push(host);
+                        }
                     }
                     return Ok(());
                 }
@@ -324,7 +326,9 @@ impl WebViewSession {
                     }
                 };
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
-                    let _ = host.close();
+                    if host.close().is_err() {
+                        self.orphaned_hosts.entry(tab_id).or_default().push(host);
+                    }
                     self.controller_generations.remove(&tab_id);
                     return Ok(());
                 };
@@ -343,7 +347,7 @@ impl WebViewSession {
                 {
                     self.controller_generations.remove(&tab_id);
                     if host.close().is_err() {
-                        self.orphaned_hosts.insert(tab_id, host);
+                        self.orphaned_hosts.entry(tab_id).or_default().push(host);
                     }
                     return Err(SessionError::Host(error));
                 }
@@ -466,8 +470,10 @@ impl WebViewSession {
 
     fn close_orphaned_hosts(&mut self) -> Result<(), SessionError> {
         for tab_id in self.orphaned_hosts.keys().copied().collect::<Vec<_>>() {
-            if let Some(host) = self.orphaned_hosts.get_mut(&tab_id) {
-                host.close()?;
+            if let Some(hosts) = self.orphaned_hosts.get_mut(&tab_id) {
+                for host in hosts {
+                    host.close()?;
+                }
             }
             self.orphaned_hosts.remove(&tab_id);
         }
@@ -557,7 +563,7 @@ impl WebViewSession {
         let mut first_error = None;
         for tab_id in self.hosts.keys().copied().collect::<Vec<_>>() {
             if let Some(host) = self.hosts.get_mut(&tab_id) {
-                if let Err(error) = host.close() {
+                if let Err(error) = host.abort_security_boundary() {
                     first_error.get_or_insert(error);
                     continue;
                 }
@@ -585,9 +591,11 @@ impl WebViewSession {
                 first_error.get_or_insert(SessionError::Host(error));
             }
         }
-        for host in self.orphaned_hosts.values_mut() {
-            if let Err(error) = host.close() {
-                first_error.get_or_insert(SessionError::Host(error));
+        for hosts in self.orphaned_hosts.values_mut() {
+            for host in hosts {
+                if let Err(error) = host.close() {
+                    first_error.get_or_insert(SessionError::Host(error));
+                }
             }
         }
         if let Some(error) = first_error {
