@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::policy::{Asset, AssetType, HostDocument};
+use crate::policy::{AssetType, HostDocument, TrustedBundledAsset};
 
 #[must_use]
 pub fn document(tab_id: u64, document_epoch: u64) -> HostDocument {
@@ -13,30 +13,17 @@ pub fn document(tab_id: u64, document_epoch: u64) -> HostDocument {
     let assets = BTreeMap::from([
         (
             "probe.css".to_owned(),
-            Asset {
-                kind: AssetType::Css,
-                bytes: include_bytes!("../assets/probe.css").to_vec(),
-            },
+            TrustedBundledAsset::new(AssetType::Css, include_bytes!("../assets/probe.css")),
         ),
         (
             "probe.js".to_owned(),
-            Asset {
-                kind: AssetType::JavaScript,
-                bytes: include_bytes!("../assets/probe.js").to_vec(),
-            },
+            TrustedBundledAsset::new(AssetType::JavaScript, include_bytes!("../assets/probe.js")),
         ),
         (
             "probe-image.svg".to_owned(),
-            Asset {
-                kind: AssetType::Svg,
-                bytes: include_bytes!("../assets/probe-image.svg").to_vec(),
-            },
+            TrustedBundledAsset::new(AssetType::Svg, include_bytes!("../assets/probe-image.svg")),
         ),
     ]);
-    HostDocument {
-        tab_id,
-        document_epoch,
-        html,
-        assets,
-    }
+    HostDocument::from_trusted_bundle(tab_id, document_epoch, html, assets)
+        .expect("compile-time probe bundle must satisfy document policy")
 }

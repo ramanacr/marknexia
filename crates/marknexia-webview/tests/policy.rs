@@ -1,24 +1,26 @@
 use std::collections::BTreeMap;
 
+use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::{
     broker::{BrokerRequest, ResourceKind},
-    policy::{Asset, AssetType, DocumentError, HostDocument, MAX_ASSET_BYTES},
+    policy::{AssetType, DocumentError, GeneratedAsset, HostDocument, MAX_ASSET_BYTES},
     protocol::{MessageError, PageToHost},
 };
 
 fn document() -> HostDocument {
-    HostDocument {
-        tab_id: 7,
-        document_epoch: 3,
-        html: b"<p>probe</p>".to_vec(),
-        assets: BTreeMap::from([(
-            "probe.css".to_owned(),
-            Asset {
-                kind: AssetType::Css,
-                bytes: b"body{}".to_vec(),
-            },
+    let fragment = HtmlPolicy::new(ContentPolicy::default())
+        .encode_text("probe")
+        .unwrap();
+    HostDocument::new(
+        7,
+        3,
+        fragment,
+        BTreeMap::from([(
+            "probe.png".to_owned(),
+            GeneratedAsset::raster(AssetType::Png, vec![1, 2, 3]).unwrap(),
         )]),
-    }
+    )
+    .unwrap()
 }
 
 #[test]
@@ -31,7 +33,7 @@ fn immutable_document_serves_only_its_own_bounded_resources() {
         controller_tab_id: 7,
         kind: ResourceKind::Document,
     };
-    assert_eq!(document.resolve(&request).body, b"<p>probe</p>");
+    assert!(String::from_utf8_lossy(document.resolve(&request).body).contains("probe"));
     let denied = BrokerRequest {
         controller_tab_id: 8,
         ..request
@@ -41,18 +43,27 @@ fn immutable_document_serves_only_its_own_bounded_resources() {
 
 #[test]
 fn oversized_or_misnamed_assets_never_enter_the_host() {
-    let mut document = document();
-    document.assets.get_mut("probe.css").unwrap().bytes = vec![0; MAX_ASSET_BYTES + 1];
-    assert_eq!(document.validate(), Err(DocumentError::TooLarge));
-    document.assets.get_mut("probe.css").unwrap().bytes.clear();
-    document.assets.insert(
-        "probe.js".to_owned(),
-        Asset {
-            kind: AssetType::Png,
-            bytes: vec![1],
-        },
+    assert_eq!(
+        GeneratedAsset::raster(AssetType::Png, vec![0; MAX_ASSET_BYTES + 1]),
+        Err(DocumentError::TooLarge)
     );
-    assert_eq!(document.validate(), Err(DocumentError::WrongAssetType));
+    let fragment = HtmlPolicy::new(ContentPolicy::default())
+        .encode_text("x")
+        .unwrap();
+    let result = HostDocument::new(
+        7,
+        3,
+        fragment,
+        BTreeMap::from([(
+            "probe.js".to_owned(),
+            GeneratedAsset::raster(AssetType::Png, vec![1]).unwrap(),
+        )]),
+    );
+    assert_eq!(result, Err(DocumentError::WrongAssetType));
+    assert_eq!(
+        GeneratedAsset::raster(AssetType::JavaScript, b"alert(1)".to_vec()),
+        Err(DocumentError::UntrustedActiveAsset)
+    );
 }
 
 #[test]

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use marknexia_security::{SanitizedFragment, SanitizedSvg};
+
 use crate::{
     broker::{BrokerDecision, BrokerRequest, ResourceBroker, TabResourceBroker},
     protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message},
@@ -35,17 +37,74 @@ impl AssetType {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Asset {
-    pub kind: AssetType,
-    pub bytes: Vec<u8>,
+struct Asset {
+    kind: AssetType,
+    bytes: AssetBytes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AssetBytes {
+    TrustedBundled(&'static [u8]),
+    Generated(Vec<u8>),
+}
+
+impl Asset {
+    fn as_bytes(&self) -> &[u8] {
+        match &self.bytes {
+            AssetBytes::TrustedBundled(bytes) => bytes,
+            AssetBytes::Generated(bytes) => bytes,
+        }
+    }
+}
+
+/// An inert generated raster or sanitizer-owned SVG. Generated JavaScript and
+/// CSS have no public construction path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedAsset(Asset);
+
+impl GeneratedAsset {
+    pub fn raster(kind: AssetType, bytes: Vec<u8>) -> Result<Self, DocumentError> {
+        if !matches!(kind, AssetType::Png | AssetType::Jpeg | AssetType::Gif) {
+            return Err(DocumentError::UntrustedActiveAsset);
+        }
+        if bytes.len() > MAX_ASSET_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Ok(Self(Asset {
+            kind,
+            bytes: AssetBytes::Generated(bytes),
+        }))
+    }
+
+    pub fn sanitized_svg(svg: SanitizedSvg) -> Result<Self, DocumentError> {
+        if svg.as_str().len() > MAX_ASSET_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Ok(Self(Asset {
+            kind: AssetType::Svg,
+            bytes: AssetBytes::Generated(svg.as_str().as_bytes().to_vec()),
+        }))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedBundledAsset(Asset);
+
+impl TrustedBundledAsset {
+    pub(crate) const fn new(kind: AssetType, bytes: &'static [u8]) -> Self {
+        Self(Asset {
+            kind,
+            bytes: AssetBytes::TrustedBundled(bytes),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostDocument {
-    pub tab_id: u64,
-    pub document_epoch: u64,
-    pub html: Vec<u8>,
-    pub assets: BTreeMap<String, Asset>,
+    tab_id: u64,
+    document_epoch: u64,
+    html: Vec<u8>,
+    assets: BTreeMap<String, Asset>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,9 +114,89 @@ pub enum DocumentError {
     TooManyAssets,
     InvalidAssetPath,
     WrongAssetType,
+    UntrustedActiveAsset,
 }
 
 impl HostDocument {
+    pub fn new(
+        tab_id: u64,
+        document_epoch: u64,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        const PREFIX: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\"></head><body>";
+        const SUFFIX: &str = "</body></html>";
+        let required = PREFIX
+            .len()
+            .checked_add(fragment.as_str().len())
+            .and_then(|length| length.checked_add(SUFFIX.len()))
+            .ok_or(DocumentError::TooLarge)?;
+        if required > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let mut html = Vec::with_capacity(required);
+        html.extend_from_slice(PREFIX.as_bytes());
+        html.extend_from_slice(fragment.as_str().as_bytes());
+        html.extend_from_slice(SUFFIX.as_bytes());
+        Self::from_parts(
+            tab_id,
+            document_epoch,
+            html,
+            assets
+                .into_iter()
+                .map(|(path, asset)| (path, asset.0))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn from_trusted_bundle(
+        tab_id: u64,
+        document_epoch: u64,
+        html: Vec<u8>,
+        assets: BTreeMap<String, TrustedBundledAsset>,
+    ) -> Result<Self, DocumentError> {
+        Self::from_parts(
+            tab_id,
+            document_epoch,
+            html,
+            assets
+                .into_iter()
+                .map(|(path, asset)| (path, asset.0))
+                .collect(),
+        )
+    }
+
+    fn from_parts(
+        tab_id: u64,
+        document_epoch: u64,
+        html: Vec<u8>,
+        assets: BTreeMap<String, Asset>,
+    ) -> Result<Self, DocumentError> {
+        let document = Self {
+            tab_id,
+            document_epoch,
+            html,
+            assets,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    #[must_use]
+    pub const fn tab_id(&self) -> u64 {
+        self.tab_id
+    }
+
+    #[must_use]
+    pub const fn document_epoch(&self) -> u64 {
+        self.document_epoch
+    }
+
+    #[must_use]
+    pub fn html(&self) -> &[u8] {
+        &self.html
+    }
+
     pub fn validate(&self) -> Result<(), DocumentError> {
         if self.html.is_empty() {
             return Err(DocumentError::EmptyHtml);
@@ -70,7 +209,7 @@ impl HostDocument {
         }
         let broker = TabResourceBroker::for_tab(self.tab_id);
         for (path, asset) in &self.assets {
-            if asset.bytes.len() > MAX_ASSET_BYTES {
+            if asset.as_bytes().len() > MAX_ASSET_BYTES {
                 return Err(DocumentError::TooLarge);
             }
             let kind = match asset.kind {
@@ -117,7 +256,7 @@ impl HostDocument {
             BrokerDecision::LocalAsset { relative_path } => self
                 .assets
                 .get(&relative_path)
-                .map(|asset| ResponseSpec::ok(asset.kind.content_type(), &asset.bytes))
+                .map(|asset| ResponseSpec::ok(asset.kind.content_type(), asset.as_bytes()))
                 .unwrap_or_else(ResponseSpec::forbidden),
             BrokerDecision::Deny { status: 405 } => ResponseSpec::method_not_allowed(),
             BrokerDecision::Deny { .. } => ResponseSpec::forbidden(),

@@ -235,7 +235,7 @@ impl WebViewHost {
 
     pub fn document_identity(&self) -> Result<(u64, u64), HostError> {
         let document = self.document.as_ref().ok_or(HostError::Closed)?;
-        Ok((document.tab_id, document.document_epoch))
+        Ok((document.tab_id(), document.document_epoch()))
     }
 
     /// Only a typed, identity-bound message can cross into the page. The
@@ -243,7 +243,7 @@ impl WebViewHost {
     pub fn post_message(&self, message: &HostToPage) -> Result<(), HostError> {
         let core = self.core.as_ref().ok_or(HostError::Closed)?;
         let document = self.document.as_ref().ok_or(HostError::InvalidDocument)?;
-        if message.identity() != (1, document.tab_id, document.document_epoch) {
+        if message.identity() != (1, document.tab_id(), document.document_epoch()) {
             return Err(HostError::InvalidMessage);
         }
         let json = serialize_host_message(message).map_err(|_| HostError::InvalidMessage)?;

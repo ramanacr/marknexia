@@ -10,7 +10,7 @@ fn probe_snapshots_have_distinct_origins_and_valid_bundled_assets() {
     first.validate().unwrap();
     second.validate().unwrap();
     assert_ne!(first.document_uri(), second.document_uri());
-    assert!(String::from_utf8_lossy(&first.html).contains("Tab 7"));
+    assert!(String::from_utf8_lossy(first.html()).contains("Tab 7"));
     let request = BrokerRequest {
         method: "GET",
         uri: "https://tab-7.marknexia.invalid/assets/probe-image.svg",

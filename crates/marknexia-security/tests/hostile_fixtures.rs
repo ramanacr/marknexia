@@ -8,6 +8,13 @@ use serde::Deserialize;
 struct Fixture {
     name: String,
     input: FixtureInput,
+    expected: FixtureExpected,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixtureExpected {
+    sanitized_html: String,
 }
 
 #[derive(Deserialize)]
@@ -21,7 +28,7 @@ fn fixture(source: &str) -> Fixture {
 }
 
 #[test]
-fn all_frozen_hostile_fixtures_fail_closed_without_parser_backend() {
+fn all_frozen_hostile_fixtures_preserve_expected_parity_and_fail_closed() {
     let cases = [
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-html.case.json"),
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-uri.case.json"),
@@ -29,8 +36,19 @@ fn all_frozen_hostile_fixtures_fail_closed_without_parser_backend() {
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-svg.case.json"),
     ];
     let policy = ContentPolicy::default();
-    for source in cases {
+    let expected = [
+        ("unsafe-html", "<a href=\"#\">bad</a>"),
+        ("unsafe-uri", "<img src=\"#\">"),
+        (
+            "unsafe-css",
+            "<div style=\"background-position: initial; background-size: initial; background-repeat: initial; background-attachment: initial; background-origin: initial; background-clip: initial; background-color: initial\">text</div>",
+        ),
+        ("unsafe-svg", "<svg><path d=\"M0 0\"></path></svg>"),
+    ];
+    for (source, (expected_name, expected_output)) in cases.into_iter().zip(expected) {
         let case = fixture(source);
+        assert_eq!(case.name, expected_name);
+        assert_eq!(case.expected.sanitized_html, expected_output);
         let result = match case.input.mode.as_str() {
             "html" => HtmlPolicy::new(policy).sanitize_fragment(&case.input.html),
             "svg" => SvgPolicy::new(policy).sanitize(&case.input.html),
@@ -44,6 +62,17 @@ fn all_frozen_hostile_fixtures_fail_closed_without_parser_backend() {
             "{} must not bypass the unavailable parser boundary",
             case.name
         );
+        match expected_name {
+            "unsafe-uri" => assert_eq!(
+                UrlPolicy::new(policy).validate("vbscript:msgbox(1)", UrlContext::Image),
+                Err(SanitizeError::UnsafeUrl)
+            ),
+            "unsafe-css" => assert_eq!(
+                CssPolicy::new(policy).sanitize_inline_style("background:url(javascript:alert(1))"),
+                Err(SanitizeError::CssParserUnavailable)
+            ),
+            _ => {}
+        }
     }
 }
 
@@ -75,10 +104,9 @@ fn remote_images_require_explicit_https_policy() {
         Err(SanitizeError::UnsafeUrl)
     );
 
-    let allowed = UrlPolicy::new(ContentPolicy::new(
-        PolicyLimits::default(),
-        RemoteImagePolicy::AllowHttps,
-    ));
+    let allowed = UrlPolicy::new(
+        ContentPolicy::try_new(PolicyLimits::default(), RemoteImagePolicy::AllowHttps).unwrap(),
+    );
     assert_eq!(
         allowed
             .validate("https://example.test/image.png", UrlContext::Image)
@@ -99,6 +127,26 @@ fn remote_images_require_explicit_https_policy() {
 }
 
 #[test]
+fn approved_external_links_do_not_depend_on_remote_image_policy() {
+    let urls = UrlPolicy::new(ContentPolicy::default());
+    for value in [
+        "https://example.test/path",
+        "http://example.test/path",
+        "mailto:reader@example.test",
+        "tel:+1-555-0100",
+    ] {
+        assert_eq!(
+            urls.validate(value, UrlContext::Link).unwrap().as_str(),
+            value
+        );
+    }
+    assert_eq!(
+        urls.validate("https://example.test/image.png", UrlContext::Image),
+        Err(SanitizeError::UnsafeUrl)
+    );
+}
+
+#[test]
 fn html_css_svg_and_url_limits_are_enforced_before_parsing() {
     let limits = PolicyLimits {
         max_html_input_bytes: 4,
@@ -107,7 +155,7 @@ fn html_css_svg_and_url_limits_are_enforced_before_parsing() {
         max_css_input_bytes: 4,
         max_url_bytes: 4,
     };
-    let policy = ContentPolicy::new(limits, RemoteImagePolicy::Deny);
+    let policy = ContentPolicy::try_new(limits, RemoteImagePolicy::Deny).unwrap();
     assert!(matches!(
         HtmlPolicy::new(policy).sanitize_fragment("12345"),
         Err(SanitizeError::InputTooLarge { kind: "HTML", .. })
@@ -128,6 +176,21 @@ fn html_css_svg_and_url_limits_are_enforced_before_parsing() {
         HtmlPolicy::new(policy).encode_text("<<<<"),
         Err(SanitizeError::OutputTooLarge { limit: 4 })
     );
+}
+
+#[test]
+fn caller_limits_cannot_raise_absolute_caps() {
+    let limits = PolicyLimits {
+        max_html_input_bytes: marknexia_security::MAX_HTML_INPUT_BYTES + 1,
+        ..PolicyLimits::default()
+    };
+    assert!(matches!(
+        ContentPolicy::try_new(limits, RemoteImagePolicy::Deny),
+        Err(SanitizeError::LimitExceedsHardCap {
+            kind: "HTML input",
+            ..
+        })
+    ));
 }
 
 #[test]

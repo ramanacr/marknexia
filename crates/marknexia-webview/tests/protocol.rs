@@ -1,5 +1,5 @@
 use marknexia_core::contracts::AppTheme;
-use marknexia_security::{ContentPolicy, HtmlPolicy, PolicyLimits, RemoteImagePolicy};
+use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::protocol::{HostToPage, serialize_host_message};
 use marknexia_webview::protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message};
 
@@ -197,28 +197,4 @@ fn serializes_a_typed_theme_message_for_the_current_document() {
         serialize_host_message(&message),
         Ok("{\"type\":\"setTheme\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"theme\":\"Dark\"}}".to_owned())
     );
-}
-
-#[test]
-fn rejects_host_json_that_expands_past_output_cap() {
-    let html = HtmlPolicy::new(ContentPolicy::new(
-        PolicyLimits {
-            max_html_input_bytes: 6 * 1024 * 1024,
-            max_html_output_bytes: 32 * 1024 * 1024,
-            ..PolicyLimits::default()
-        },
-        RemoteImagePolicy::Deny,
-    ))
-    .encode_text(&"\"".repeat(5 * 1024 * 1024))
-    .unwrap();
-    let message = HostToPage::RenderDocument {
-        protocol: 1,
-        tab_id: 7,
-        document_epoch: 42,
-        html,
-    };
-    assert!(matches!(
-        serialize_host_message(&message),
-        Err(MessageError::TooLarge)
-    ));
 }

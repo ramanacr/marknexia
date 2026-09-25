@@ -1,5 +1,7 @@
 //! Strict page-to-host messages for a single WebView document and tab.
 
+use std::io::{self, Write};
+
 use marknexia_core::contracts::AppTheme;
 use marknexia_core::contracts::BoundedUrl;
 use marknexia_security::SanitizedFragment;
@@ -50,11 +52,63 @@ impl HostToPage {
 }
 
 pub fn serialize_host_message(message: &HostToPage) -> Result<String, MessageError> {
-    let json = serde_json::to_string(message).map_err(|_| MessageError::InvalidPayload)?;
-    if json.len() > MAX_HOST_MESSAGE_BYTES {
-        return Err(MessageError::TooLarge);
+    let mut writer = CappedWriter::new(MAX_HOST_MESSAGE_BYTES);
+    if serde_json::to_writer(&mut writer, message).is_err() {
+        return Err(if writer.exceeded {
+            MessageError::TooLarge
+        } else {
+            MessageError::InvalidPayload
+        });
     }
-    Ok(json)
+    String::from_utf8(writer.bytes).map_err(|_| MessageError::InvalidPayload)
+}
+
+struct CappedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl CappedWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(4096)),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for CappedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.bytes.len());
+        if buffer.len() > remaining {
+            self.exceeded = true;
+            return Err(io::Error::other("host message exceeds byte cap"));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod capped_writer_tests {
+    use std::io::Write;
+
+    use super::CappedWriter;
+
+    #[test]
+    fn rejects_before_extending_past_cap() {
+        let mut writer = CappedWriter::new(4);
+        writer.write_all(b"1234").unwrap();
+        assert!(writer.write_all(b"5").is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.bytes, b"1234");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

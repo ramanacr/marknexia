@@ -427,7 +427,7 @@ fn resource_decision<'a>(
     Ok(document.resolve(&BrokerRequest {
         method: &method,
         uri: &uri,
-        controller_tab_id: document.tab_id,
+        controller_tab_id: document.tab_id(),
         kind,
     }))
 }

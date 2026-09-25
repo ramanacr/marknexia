@@ -12,6 +12,12 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 
+pub const MAX_HTML_INPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_HTML_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SVG_INPUT_BYTES: usize = 512 * 1024;
+pub const MAX_CSS_INPUT_BYTES: usize = 64 * 1024;
+pub const MAX_URL_BYTES: usize = 8 * 1024;
+
 /// Explicit byte budgets applied before and during each policy operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
@@ -25,11 +31,11 @@ pub struct PolicyLimits {
 impl Default for PolicyLimits {
     fn default() -> Self {
         Self {
-            max_html_input_bytes: 4 * 1024 * 1024,
-            max_html_output_bytes: 8 * 1024 * 1024,
-            max_svg_input_bytes: 512 * 1024,
-            max_css_input_bytes: 64 * 1024,
-            max_url_bytes: 8 * 1024,
+            max_html_input_bytes: MAX_HTML_INPUT_BYTES,
+            max_html_output_bytes: MAX_HTML_OUTPUT_BYTES,
+            max_svg_input_bytes: MAX_SVG_INPUT_BYTES,
+            max_css_input_bytes: MAX_CSS_INPUT_BYTES,
+            max_url_bytes: MAX_URL_BYTES,
         }
     }
 }
@@ -47,12 +53,33 @@ pub struct ContentPolicy {
 }
 
 impl ContentPolicy {
-    #[must_use]
-    pub const fn new(limits: PolicyLimits, remote_images: RemoteImagePolicy) -> Self {
-        Self {
+    pub fn try_new(
+        limits: PolicyLimits,
+        remote_images: RemoteImagePolicy,
+    ) -> Result<Self, SanitizeError> {
+        for (kind, requested, cap) in [
+            (
+                "HTML input",
+                limits.max_html_input_bytes,
+                MAX_HTML_INPUT_BYTES,
+            ),
+            (
+                "HTML output",
+                limits.max_html_output_bytes,
+                MAX_HTML_OUTPUT_BYTES,
+            ),
+            ("SVG input", limits.max_svg_input_bytes, MAX_SVG_INPUT_BYTES),
+            ("CSS input", limits.max_css_input_bytes, MAX_CSS_INPUT_BYTES),
+            ("URL", limits.max_url_bytes, MAX_URL_BYTES),
+        ] {
+            if requested > cap {
+                return Err(SanitizeError::LimitExceedsHardCap { kind, cap });
+            }
+        }
+        Ok(Self {
             limits,
             remote_images,
-        }
+        })
     }
 
     #[must_use]
@@ -68,12 +95,16 @@ impl ContentPolicy {
 
 impl Default for ContentPolicy {
     fn default() -> Self {
-        Self::new(PolicyLimits::default(), RemoteImagePolicy::Deny)
+        Self {
+            limits: PolicyLimits::default(),
+            remote_images: RemoteImagePolicy::Deny,
+        }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SanitizeError {
+    LimitExceedsHardCap { kind: &'static str, cap: usize },
     InputTooLarge { kind: &'static str, limit: usize },
     OutputTooLarge { limit: usize },
     ParserUnavailable,
@@ -85,6 +116,9 @@ pub enum SanitizeError {
 impl fmt::Display for SanitizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LimitExceedsHardCap { kind, cap } => {
+                write!(f, "{kind} limit exceeds the absolute {cap}-byte cap")
+            }
             Self::InputTooLarge { kind, limit } => {
                 write!(f, "{kind} input exceeds the {limit}-byte policy limit")
             }
@@ -116,6 +150,18 @@ impl SanitizedFragment {
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
+    }
+}
+
+/// SVG emitted by the parser-backed SVG policy. It is deliberately distinct
+/// from HTML and cannot be constructed by WebView or rendering callers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SanitizedSvg(String);
+
+impl SanitizedSvg {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -176,7 +222,7 @@ impl SvgPolicy {
         Self { policy }
     }
 
-    pub fn sanitize(&self, svg: &str) -> Result<SanitizedFragment, SanitizeError> {
+    pub fn sanitize(&self, svg: &str) -> Result<SanitizedSvg, SanitizeError> {
         enforce_input_limit(svg, "SVG", self.policy.limits.max_svg_input_bytes)?;
         Err(SanitizeError::SvgParserUnavailable)
     }
@@ -229,9 +275,10 @@ impl UrlPolicy {
         Self { policy }
     }
 
-    /// Validate an already entity-decoded attribute value. Only fragments,
-    /// conservative relative references, and explicitly permitted HTTPS image
-    /// URLs are accepted. Protocol-relative URLs and active schemes fail.
+    /// Validate an already entity-decoded attribute value. Links permit the
+    /// approved HTTP(S), mailto, and tel schemes independently of the remote
+    /// image setting. Images require explicit HTTPS permission. Protocol-
+    /// relative URLs and all other active schemes fail.
     pub fn validate(&self, value: &str, context: UrlContext) -> Result<SafeUrl, SanitizeError> {
         if value.len() > self.policy.limits.max_url_bytes
             || value.is_empty()
@@ -245,13 +292,30 @@ impl UrlPolicy {
             return Ok(SafeUrl(value.to_owned()));
         }
         let lower = value.to_ascii_lowercase();
-        if lower.starts_with("https://") {
-            if context != UrlContext::Image
-                || self.policy.remote_images != RemoteImagePolicy::AllowHttps
-                || !valid_https_authority(&value[8..])
+        if let Some(authority_tail) = lower.strip_prefix("https://") {
+            if !valid_web_authority(authority_tail) {
+                return Err(SanitizeError::UnsafeUrl);
+            }
+            if context == UrlContext::Image
+                && self.policy.remote_images != RemoteImagePolicy::AllowHttps
             {
                 return Err(SanitizeError::UnsafeUrl);
             }
+            if matches!(context, UrlContext::Link | UrlContext::Image) {
+                return Ok(SafeUrl(value.to_owned()));
+            }
+            return Err(SanitizeError::UnsafeUrl);
+        }
+        if let Some(authority_tail) = lower.strip_prefix("http://") {
+            if context == UrlContext::Link && valid_web_authority(authority_tail) {
+                return Ok(SafeUrl(value.to_owned()));
+            }
+            return Err(SanitizeError::UnsafeUrl);
+        }
+        if context == UrlContext::Link
+            && ((lower.starts_with("mailto:") && valid_mailto(&value[7..]))
+                || (lower.starts_with("tel:") && valid_tel(&value[4..])))
+        {
             return Ok(SafeUrl(value.to_owned()));
         }
         let first_separator = value.find(['/', '?', '#']).unwrap_or(value.len());
@@ -265,7 +329,7 @@ impl UrlPolicy {
     }
 }
 
-fn valid_https_authority(after_scheme: &str) -> bool {
+fn valid_web_authority(after_scheme: &str) -> bool {
     let authority = after_scheme
         .split(['/', '?', '#'])
         .next()
@@ -280,6 +344,21 @@ fn valid_https_authority(after_scheme: &str) -> bool {
                 && label
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn valid_mailto(value: &str) -> bool {
+    !value.is_empty()
+        && value.contains('@')
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
+fn valid_tel(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_digit() || matches!(character, '+' | '-' | '(' | ')' | '.' | ' ')
         })
 }
 

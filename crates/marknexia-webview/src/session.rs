@@ -131,7 +131,7 @@ impl WebViewSession {
             return Err(SessionError::ResourceBoundaryFailed);
         }
         document.validate().map_err(SessionError::Document)?;
-        let tab_id = document.tab_id;
+        let tab_id = document.tab_id();
         if self.documents.contains_key(&tab_id) {
             return Err(SessionError::DuplicateTab);
         }
