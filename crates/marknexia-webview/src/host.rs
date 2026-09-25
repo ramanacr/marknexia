@@ -101,6 +101,7 @@ pub struct WebViewHost {
     controller: Option<ICoreWebView2Controller>,
     process_failure_tokens: Vec<i64>,
     callbacks: Option<CallbackTokens>,
+    security_abort: Option<Rc<dyn Fn() -> windows::core::Result<()>>>,
     document: Option<Rc<HostDocument>>,
     page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
     _environment: WebViewEnvironment,
@@ -121,6 +122,7 @@ impl WebViewHost {
             controller: Some(controller),
             process_failure_tokens: Vec::new(),
             callbacks: None,
+            security_abort: None,
             document: None,
             page_messages: Rc::new(RefCell::new(VecDeque::new())),
             _environment: environment,
@@ -201,11 +203,15 @@ impl WebViewHost {
             .validate()
             .map_err(|_| HostError::InvalidDocument)?;
         let core = self.core.as_ref().ok_or(HostError::Closed)?.clone();
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?.clone();
+        let security_abort: Rc<dyn Fn() -> windows::core::Result<()>> =
+            Rc::new(move || unsafe { controller.Close() });
         let document = Rc::new(document);
         self.callbacks = Some(CallbackTokens::new(&core));
+        self.security_abort = Some(Rc::clone(&security_abort));
         self.document = Some(Rc::clone(&document));
         if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
-            self.controller.as_ref().ok_or(HostError::Closed)?,
+            Rc::downgrade(&security_abort),
             self._environment.native_environment(),
             &document,
             Rc::downgrade(&self.page_messages),
@@ -286,6 +292,7 @@ impl WebViewHost {
         self.controller.take();
         self.core.take();
         self.callbacks.take();
+        self.security_abort.take();
         self.document.take();
         self.page_messages.borrow_mut().clear();
         Ok(())
@@ -309,6 +316,7 @@ impl WebViewHost {
         self.controller.take();
         self.core.take();
         self.callbacks.take();
+        self.security_abort.take();
         self.document.take();
         self.page_messages.borrow_mut().clear();
         Ok(())

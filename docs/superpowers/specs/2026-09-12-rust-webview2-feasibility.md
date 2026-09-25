@@ -154,6 +154,12 @@ WebView2 has already continued the request
 requires native fault-injection evidence. The source-only gate does not claim
 that evidence or a complete security proof.
 
+The callback now holds only a weak reference to a host-owned controller-close
+closure, avoiding a handler/controller COM reference cycle. Any stale host that
+cannot close remains retained, and replacement for that tab is intentionally
+blocked rather than allowing two live controllers. Persistent COM cleanup or
+Close failure is therefore a fail-closed native gate, not a recovered state.
+
 ## Reference behavior
 
 Microsoft documents that `ProcessFailed` and `BrowserProcessExited` can arrive

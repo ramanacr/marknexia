@@ -13,7 +13,7 @@ use webview2_com::{
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE,
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET,
-        ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Deferral, ICoreWebView2Environment,
+        ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
         ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2WebResourceResponse,
     },
     NavigationStartingEventHandler, NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
@@ -61,7 +61,7 @@ impl CallbackTokens {
 
     pub(crate) fn register(
         &mut self,
-        controller: &ICoreWebView2Controller,
+        security_abort: Weak<dyn Fn() -> windows::core::Result<()>>,
         environment: &ICoreWebView2Environment,
         document: &Rc<HostDocument>,
         messages: Weak<RefCell<VecDeque<PageToHost>>>,
@@ -102,7 +102,6 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         let resource_failed = Rc::clone(&self.resource_failed);
         let pending_deferrals = Rc::clone(&self.pending_deferrals);
-        let security_controller = controller.clone();
         let resource_handler =
             WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else {
@@ -121,7 +120,12 @@ impl CallbackTokens {
                                 // No deferral exists to hold this request. Close
                                 // the controller synchronously so an unset
                                 // response cannot fall through to the network.
-                                let _ = unsafe { security_controller.Close() };
+                                if security_abort
+                                    .upgrade()
+                                    .is_none_or(|abort| abort().is_err())
+                                {
+                                    resource_failed.set(true);
+                                }
                                 Err(error)
                             }
                         };
@@ -141,13 +145,23 @@ impl CallbackTokens {
                     resource_failed.set(true);
                     // Keep the deferral alive and close immediately. The STA
                     // poll will subsequently release the closed host state.
-                    let _ = unsafe { security_controller.Close() };
+                    if security_abort
+                        .upgrade()
+                        .is_none_or(|abort| abort().is_err())
+                    {
+                        resource_failed.set(true);
+                    }
                 }
                 let completion =
                     gate.complete_if_responded(|deferral| unsafe { deferral.Complete() });
                 if completion.is_err() {
                     resource_failed.set(true);
-                    let _ = unsafe { security_controller.Close() };
+                    if security_abort
+                        .upgrade()
+                        .is_none_or(|abort| abort().is_err())
+                    {
+                        resource_failed.set(true);
+                    }
                 }
                 if let Some(deferral) = gate.take_pending() {
                     // WebView2 documents that an outstanding deferral blocks
