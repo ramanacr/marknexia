@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

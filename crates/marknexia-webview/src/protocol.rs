@@ -1,7 +1,8 @@
 //! Strict page-to-host messages for a single WebView document and tab.
 
+use marknexia_core::contracts::AppTheme;
 use marknexia_core::contracts::BoundedUrl;
-use marknexia_core::contracts::{AppTheme, RenderedHtml};
+use marknexia_security::SanitizedFragment;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -19,7 +20,7 @@ pub enum HostToPage {
         protocol: u16,
         tab_id: u64,
         document_epoch: u64,
-        html: RenderedHtml,
+        html: SanitizedFragment,
     },
     SetTheme {
         protocol: u16,

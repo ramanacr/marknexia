@@ -1,4 +1,5 @@
-use marknexia_core::contracts::{AppTheme, RenderedHtml};
+use marknexia_core::contracts::AppTheme;
+use marknexia_security::{ContentPolicy, HtmlPolicy, PolicyLimits, RemoteImagePolicy};
 use marknexia_webview::protocol::{HostToPage, serialize_host_message};
 use marknexia_webview::protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message};
 
@@ -168,7 +169,9 @@ fn rejects_link_destination_beyond_core_url_contract() {
 
 #[test]
 fn serializes_render_content_as_json_data_not_interpolated_script() {
-    let html = RenderedHtml::try_new("<p title=\"x\">a</p>").unwrap();
+    let html = HtmlPolicy::new(ContentPolicy::default())
+        .encode_text("<p title=\"x\">a</p>")
+        .unwrap();
     let message = HostToPage::RenderDocument {
         protocol: 1,
         tab_id: 7,
@@ -178,7 +181,7 @@ fn serializes_render_content_as_json_data_not_interpolated_script() {
     assert_eq!(message.identity(), (1, 7, 42));
     assert_eq!(
         serialize_host_message(&message),
-        Ok("{\"type\":\"renderDocument\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"html\":\"<p title=\\\"x\\\">a</p>\"}}".to_owned())
+        Ok("{\"type\":\"renderDocument\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"html\":\"&lt;p title=&quot;x&quot;&gt;a&lt;/p&gt;\"}}".to_owned())
     );
 }
 
@@ -198,7 +201,16 @@ fn serializes_a_typed_theme_message_for_the_current_document() {
 
 #[test]
 fn rejects_host_json_that_expands_past_output_cap() {
-    let html = RenderedHtml::try_new("\"".repeat(5 * 1024 * 1024)).unwrap();
+    let html = HtmlPolicy::new(ContentPolicy::new(
+        PolicyLimits {
+            max_html_input_bytes: 6 * 1024 * 1024,
+            max_html_output_bytes: 32 * 1024 * 1024,
+            ..PolicyLimits::default()
+        },
+        RemoteImagePolicy::Deny,
+    ))
+    .encode_text(&"\"".repeat(5 * 1024 * 1024))
+    .unwrap();
     let message = HostToPage::RenderDocument {
         protocol: 1,
         tab_id: 7,
