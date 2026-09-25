@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+pub mod accessibility;
+pub mod app;
 pub mod keyboard;
 pub mod layout;
 pub mod tabs;

@@ -3,6 +3,8 @@
 const VK_TAB: u16 = 0x09;
 const VK_W: u16 = 0x57;
 const VK_F6: u16 = 0x75;
+const VK_LEFT: u16 = 0x25;
+const VK_RIGHT: u16 = 0x27;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyChord {
@@ -59,6 +61,18 @@ pub fn route_key(chord: KeyChord) -> Option<ShellCommand> {
             shift: false,
             alt: false,
         } => Some(ShellCommand::CycleFocus),
+        KeyChord {
+            virtual_key: VK_LEFT,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        } => Some(ShellCommand::PreviousTab),
+        KeyChord {
+            virtual_key: VK_RIGHT,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        } => Some(ShellCommand::NextTab),
         _ => None,
     }
 }

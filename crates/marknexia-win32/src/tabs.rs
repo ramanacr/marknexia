@@ -11,8 +11,20 @@ pub struct Tab {
 
 impl Tab {
     #[must_use]
+    pub fn id(&self) -> TabId {
+        self.id
+    }
+
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+}
+
+impl TabId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
     }
 }
 

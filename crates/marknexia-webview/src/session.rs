@@ -13,7 +13,7 @@ use crate::{
     environment::{
         BrowserExit, BrowserExitSubscription, EnvironmentError, StaApartment, WebViewEnvironment,
     },
-    host::{HostError, ProcessFailure, WebViewHost},
+    host::{HostError, ProcessFailure, ViewportBounds, WebViewHost},
     policy::{DocumentError, HostDocument},
     protocol::PageToHost,
     recovery::{RecoveryAction, RecoveryCoordinator},
@@ -83,6 +83,7 @@ pub struct WebViewSession {
     browser_recovering: bool,
     recovery_generation: Option<u64>,
     closed: bool,
+    viewport: ViewportBounds,
 }
 
 impl WebViewSession {
@@ -120,6 +121,12 @@ impl WebViewSession {
             browser_recovering: false,
             recovery_generation: None,
             closed: false,
+            viewport: ViewportBounds {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
         }
     }
 
@@ -155,6 +162,42 @@ impl WebViewSession {
         self.recovery.set_active_tab(Some(tab_id));
         self.visibility_pending = true;
         self.apply_selected_visibility()?;
+        Ok(())
+    }
+
+    /// Apply shell-owned client bounds to every live controller and remember
+    /// them for controllers that complete asynchronously after a DPI/layout
+    /// change.
+    pub fn set_viewport(&mut self, bounds: ViewportBounds) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        self.viewport = bounds;
+        for host in self.hosts.values() {
+            host.set_bounds(bounds)?;
+        }
+        Ok(())
+    }
+
+    /// Remove a tab's immutable document and close its controller before the
+    /// shell discards the corresponding portable tab identity.
+    pub fn remove_document(&mut self, tab_id: u64) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        if self.documents.remove(&tab_id).is_none() {
+            return Err(SessionError::MissingTab);
+        }
+        self.pending_hosts.remove(&tab_id);
+        self.recreating_tabs.remove(&tab_id);
+        self.controller_generations.remove(&tab_id);
+        self.process_observers.remove(&tab_id);
+        if let Some(mut host) = self.hosts.remove(&tab_id) {
+            if let Err(error) = host.close() {
+                self.orphaned_hosts.entry(tab_id).or_default().push(host);
+                return Err(SessionError::Host(error));
+            }
+        }
         Ok(())
     }
 
@@ -325,6 +368,7 @@ impl WebViewSession {
                         return Err(SessionError::Host(error));
                     }
                 };
+                host.set_bounds(self.viewport)?;
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
                     if host.close().is_err() {
                         self.orphaned_hosts.entry(tab_id).or_default().push(host);
