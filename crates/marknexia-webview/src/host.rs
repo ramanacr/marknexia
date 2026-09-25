@@ -1,6 +1,8 @@
 //! One native controller and its CoreWebView2 interface on the owning STA.
 
 use std::{
+    cell::RefCell,
+    collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
@@ -100,6 +102,7 @@ pub struct WebViewHost {
     process_failure_tokens: Vec<i64>,
     callbacks: Option<CallbackTokens>,
     document: Option<Rc<HostDocument>>,
+    page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
     _environment: WebViewEnvironment,
 }
 
@@ -119,6 +122,7 @@ impl WebViewHost {
             process_failure_tokens: Vec::new(),
             callbacks: None,
             document: None,
+            page_messages: Rc::new(RefCell::new(VecDeque::new())),
             _environment: environment,
         })
     }
@@ -189,11 +193,7 @@ impl WebViewHost {
     /// The immutable document is retained for the full controller lifetime.
     /// Every event sink receives a weak reference and has no path to raw COM
     /// from the application observer. A failed binding closes this controller.
-    pub fn bind_document(
-        &mut self,
-        document: HostDocument,
-        observer: Weak<dyn Fn(PageToHost)>,
-    ) -> Result<(), HostError> {
+    pub fn bind_document(&mut self, document: HostDocument) -> Result<(), HostError> {
         if self.callbacks.is_some() {
             return Err(HostError::AlreadyBound);
         }
@@ -207,7 +207,7 @@ impl WebViewHost {
         if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
             self._environment.native_environment(),
             &document,
-            observer,
+            Rc::downgrade(&self.page_messages),
         ) {
             // Retain failed removal tokens in the host if cleanup itself
             // fails. The session can retry `close` before releasing COM.
@@ -245,13 +245,22 @@ impl WebViewHost {
             .map_err(HostError::from_com)
     }
 
+    pub(crate) fn resource_boundary_failed(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::resource_failed)
+    }
+
+    /// Drain validated page messages after Windows dispatch, outside COM.
+    pub fn drain_page_messages(&self) -> Vec<PageToHost> {
+        self.page_messages.borrow_mut().drain(..).collect()
+    }
+
     pub fn close(&mut self) -> Result<(), HostError> {
         let mut first_error = None;
         if let Some(callbacks) = self.callbacks.as_mut() {
             callbacks.close()?;
         }
-        self.callbacks.take();
-        self.document.take();
         if let Some(core) = self.core.as_ref() {
             let mut failed_tokens = Vec::new();
             for token in self.process_failure_tokens.drain(..) {
@@ -267,15 +276,17 @@ impl WebViewHost {
         if let Some(error) = first_error {
             return Err(error);
         }
-        self.core.take();
-        let Some(controller) = self.controller.as_ref() else {
-            return Ok(());
-        };
-        // SAFETY: release the page interface first, then explicitly close the
-        // controller on its STA before the owning Win32 shell destroys HWND.
-        // Event registrations must be removed here before they are added later.
-        unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        if let Some(controller) = self.controller.as_ref() {
+            // An uncompleted resource deferral, if any, remains held inside
+            // callbacks until Close succeeds. This prevents a request with no
+            // explicit response from being released to network fallback.
+            unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        }
         self.controller.take();
+        self.core.take();
+        self.callbacks.take();
+        self.document.take();
+        self.page_messages.borrow_mut().clear();
         Ok(())
     }
 }

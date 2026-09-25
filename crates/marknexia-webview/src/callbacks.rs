@@ -1,6 +1,8 @@
 //! WebView2 event sinks. Every callback uses immutable policy and weak app state.
 
 use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
@@ -11,7 +13,8 @@ use webview2_com::{
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE,
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET,
-        ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
+        ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
+        ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2WebResourceResponse,
     },
     NavigationStartingEventHandler, NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
@@ -38,6 +41,8 @@ pub(crate) struct CallbackTokens {
     message: Option<i64>,
     new_window: Option<i64>,
     filter: bool,
+    resource_failed: Rc<Cell<bool>>,
+    pending_deferrals: Rc<RefCell<Vec<ICoreWebView2Deferral>>>,
 }
 
 impl CallbackTokens {
@@ -49,6 +54,8 @@ impl CallbackTokens {
             message: None,
             new_window: None,
             filter: false,
+            resource_failed: Rc::new(Cell::new(false)),
+            pending_deferrals: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -56,7 +63,7 @@ impl CallbackTokens {
         &mut self,
         environment: &ICoreWebView2Environment,
         document: &Rc<HostDocument>,
-        observer: Weak<dyn Fn(PageToHost)>,
+        messages: Weak<RefCell<VecDeque<PageToHost>>>,
     ) -> Result<(), HostError> {
         let settings = unsafe { self.core.Settings() }.map_err(HostError::from_com)?;
         for operation in [
@@ -81,21 +88,64 @@ impl CallbackTokens {
 
         let weak_document = Rc::downgrade(document);
         let response_environment = environment.clone();
+        // Allocate a controller-owned fallback before the first navigation.
+        // If allocation fails, registration fails and this controller must
+        // never navigate. The empty body remains safe to reuse.
+        let deny_response = create_response(
+            environment,
+            ResponseSpec {
+                body: b"",
+                ..ResponseSpec::forbidden()
+            },
+        )
+        .map_err(HostError::from_com)?;
+        let resource_failed = Rc::clone(&self.resource_failed);
+        let pending_deferrals = Rc::clone(&self.pending_deferrals);
         let resource_handler =
             WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else {
                     return Ok(());
                 };
-                // Always complete a deferral, including the deny/error path. The
-                // policy and response stream are bounded before WebView receives it.
-                let deferral = unsafe { args.GetDeferral() }?;
-                let result = respond_to_resource(
-                    &response_environment,
-                    &args,
-                    weak_document.upgrade().as_deref(),
+                let deferral = match unsafe { args.GetDeferral() } {
+                    Ok(deferral) => deferral,
+                    Err(_) => {
+                        // No deferral exists to hold. Try an immediate explicit
+                        // deny, then force controller teardown if that also
+                        // fails; this edge requires native verification.
+                        return match unsafe { args.SetResponse(&deny_response) } {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                resource_failed.set(true);
+                                Err(error)
+                            }
+                        };
+                    }
+                };
+                let mut gate = ResourceGate::new(deferral);
+                let assignment = install_response(
+                    &mut gate,
+                    || {
+                        response_decision(&args, weak_document.upgrade().as_deref())
+                            .and_then(|response| create_response(&response_environment, response))
+                            .and_then(|response| unsafe { args.SetResponse(&response) })
+                    },
+                    || unsafe { args.SetResponse(&deny_response) },
                 );
-                let completion = unsafe { deferral.Complete() };
-                result.and(completion)
+                if assignment.is_err() {
+                    resource_failed.set(true);
+                }
+                let completion =
+                    gate.complete_if_responded(|deferral| unsafe { deferral.Complete() });
+                if completion.is_err() {
+                    resource_failed.set(true);
+                }
+                if let Some(deferral) = gate.take_pending() {
+                    // WebView2 documents that an outstanding deferral blocks
+                    // this request. Keep it live until controller.Close has
+                    // succeeded; never complete it with no explicit response.
+                    pending_deferrals.borrow_mut().push(deferral);
+                }
+                completion
             }));
         let mut token = 0;
         unsafe {
@@ -137,13 +187,15 @@ impl CallbackTokens {
                 let json_result = unsafe { args.WebMessageAsJson(&mut json) };
                 let json = webview2_com::take_pwstr(json);
                 json_result?;
-                if let (Ok(message), Some(observer)) = (
+                if let (Ok(message), Some(messages)) = (
                     document.parse_message(json.as_bytes(), &source),
-                    observer.upgrade(),
+                    messages.upgrade(),
                 ) {
-                    // Application callbacks are untrusted from the COM ABI's
-                    // perspective. A panic must never unwind into WebView2.
-                    let _ = catch_unwind(AssertUnwindSafe(|| observer(message)));
+                    // The COM callback only enqueues into host-owned state.
+                    // Application code is invoked later by session.poll.
+                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                        messages.borrow_mut().push_back(message);
+                    }));
                 }
             }
             Ok(())
@@ -215,6 +267,10 @@ impl CallbackTokens {
         }
         first_error.map_or(Ok(()), Err)
     }
+
+    pub(crate) fn resource_failed(&self) -> bool {
+        self.resource_failed.get()
+    }
 }
 
 impl Drop for CallbackTokens {
@@ -223,26 +279,84 @@ impl Drop for CallbackTokens {
     }
 }
 
-fn respond_to_resource(
-    environment: &ICoreWebView2Environment,
-    args: &ICoreWebView2WebResourceRequestedEventArgs,
-    document: Option<&HostDocument>,
-) -> windows::core::Result<()> {
-    let response = document
-        .and_then(|document| resource_decision(args, document).ok())
-        .unwrap_or_else(ResponseSpec::forbidden);
-    let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }?;
-    let mut written = 0;
-    unsafe {
-        stream.Write(
-            response.body.as_ptr().cast::<c_void>(),
-            response.body.len() as u32,
-            Some(&mut written),
-        )
+/// The guard is the only path to `Complete`. It retains the deferral on
+/// failed response assignment or failed completion so teardown can abort the
+/// controller before the deferral is released.
+struct ResourceGate<D> {
+    deferral: Option<D>,
+    responded: bool,
+}
+
+impl<D> ResourceGate<D> {
+    fn new(deferral: D) -> Self {
+        Self {
+            deferral: Some(deferral),
+            responded: false,
+        }
     }
-    .ok()?;
-    if written != response.body.len() as u32 {
-        return windows::core::HRESULT(0x8000_4005u32 as i32).ok();
+
+    fn response_installed(&mut self) {
+        self.responded = true;
+    }
+
+    fn complete_if_responded<E>(
+        &mut self,
+        complete: impl FnOnce(&D) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.responded {
+            complete(self.deferral.as_ref().expect("deferral retained"))?;
+            self.deferral.take();
+        }
+        Ok(())
+    }
+
+    fn take_pending(&mut self) -> Option<D> {
+        self.deferral.take()
+    }
+}
+
+fn install_response<D, E>(
+    gate: &mut ResourceGate<D>,
+    primary: impl FnOnce() -> Result<(), E>,
+    deny: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    if primary().is_ok() {
+        gate.response_installed();
+        return Ok(());
+    }
+    deny()?;
+    gate.response_installed();
+    Ok(())
+}
+
+fn response_decision<'a>(
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+    document: Option<&'a HostDocument>,
+) -> windows::core::Result<ResponseSpec<'a>> {
+    match document {
+        Some(document) => resource_decision(args, document),
+        None => Ok(ResponseSpec::forbidden()),
+    }
+}
+
+fn create_response(
+    environment: &ICoreWebView2Environment,
+    response: ResponseSpec<'_>,
+) -> windows::core::Result<ICoreWebView2WebResourceResponse> {
+    let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }?;
+    if !response.body.is_empty() {
+        let mut written = 0;
+        unsafe {
+            stream.Write(
+                response.body.as_ptr().cast::<c_void>(),
+                response.body.len() as u32,
+                Some(&mut written),
+            )
+        }
+        .ok()?;
+        if written != response.body.len() as u32 {
+            return windows::core::HRESULT(0x8000_4005u32 as i32).ok();
+        }
     }
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }?;
     let reason = wide(response.reason);
@@ -250,15 +364,14 @@ fn respond_to_resource(
         "Content-Type: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n",
         response.content_type,
     ));
-    let response = unsafe {
+    unsafe {
         environment.CreateWebResourceResponse(
             &stream,
             response.status,
             PCWSTR::from_raw(reason.as_ptr()),
             PCWSTR::from_raw(headers.as_ptr()),
         )
-    }?;
-    unsafe { args.SetResponse(&response) }
+    }
 }
 
 fn resource_decision<'a>(
@@ -297,4 +410,59 @@ fn resource_decision<'a>(
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod resource_gate_tests {
+    use std::cell::Cell;
+
+    use super::{ResourceGate, install_response};
+
+    #[test]
+    fn a_failed_primary_and_deny_assignment_never_completes_the_deferral() {
+        let completed = Cell::new(false);
+        let deny_attempted = Cell::new(false);
+        let mut gate = ResourceGate::new(7_u8);
+        assert!(
+            install_response(
+                &mut gate,
+                || Err::<(), _>(()),
+                || {
+                    deny_attempted.set(true);
+                    Err::<(), _>(())
+                },
+            )
+            .is_err()
+        );
+        assert!(deny_attempted.get());
+        gate.complete_if_responded(|_| {
+            completed.set(true);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert!(!completed.get());
+        assert_eq!(gate.take_pending(), Some(7));
+    }
+
+    #[test]
+    fn a_successfully_installed_deny_response_can_complete_the_deferral() {
+        let completed = Cell::new(false);
+        let mut gate = ResourceGate::new(9_u8);
+        install_response(&mut gate, || Err::<(), _>(()), || Ok(())).unwrap();
+        gate.complete_if_responded(|_| {
+            completed.set(true);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert!(completed.get());
+        assert_eq!(gate.take_pending(), None);
+    }
+
+    #[test]
+    fn a_failed_complete_retains_the_deferral_for_controller_abort() {
+        let mut gate = ResourceGate::new(11_u8);
+        gate.response_installed();
+        assert!(gate.complete_if_responded(|_| Err::<(), _>(())).is_err());
+        assert_eq!(gate.take_pending(), Some(11));
+    }
 }

@@ -30,6 +30,10 @@ pub struct RecoveryCoordinator {
 }
 
 impl RecoveryCoordinator {
+    pub fn active_tab_id(&self) -> Option<u64> {
+        self.active_tab_id
+    }
+
     pub fn is_healthy(&self) -> bool {
         self.browser_stage == BrowserStage::Healthy
     }

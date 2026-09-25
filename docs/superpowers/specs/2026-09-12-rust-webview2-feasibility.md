@@ -89,7 +89,7 @@ commit or release.
 ## Task 5 source-only implementation, 2026-09-24
 
 The current source now connects the broker to a WebView2 resource-request
-handler. The handler obtains and completes a deferral, maps the request's
+handler. The handler obtains a deferral, maps the request's
 method/URI/resource context through an immutable per-controller document,
 and supplies bounded in-memory 200/403/405 responses with fixed content-type,
 nosniff, no-store, and CSP headers. Navigation permits only the exact virtual
@@ -120,6 +120,36 @@ exercise every planned focus/resize/link/copy/bootstrap path automatically;
 native x64 and ARM64 lifecycle/security/recovery runs and portable lockfile
 regeneration remain integration gates. The historical observations above do
 not verify this new source.
+
+## Source-only review fix round 1, 2026-09-24
+
+The session now reapplies active-tab visibility immediately after each new
+controller is installed and retries a failed visibility call on the next
+poll. A parsed page message is queued with both environment and controller
+generation; only `poll` invokes the application's weak observer, outside
+the COM callback. Each replacement controller receives a distinct generation,
+so queued process-failure and page-message events from its predecessor are
+discarded. Ignored native test source covers active visibility, restoration,
+deferred observer delivery, and stale-event rejection; those tests were not
+executed.
+
+The resource callback preconstructs a reusable empty-body 403 response before
+navigation. A normal response-construction or assignment failure retries
+`SetResponse` with this explicit deny. `Complete` is invoked only after one
+`SetResponse` succeeds. If both assignments fail, the deferral remains
+uncompleted and owned by the host until `controller.Close` succeeds; the STA
+session closes the controller fleet and enters a terminal security-error
+state rather than retrying navigation. A failed `Complete` follows the same
+abort path. This is based on WebView2's documented behavior that a request
+with no response continues to the network, while a deferred request remains
+blocked until completion:
+<https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested>,
+<https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2webresourcerequestedeventargs>.
+The rare joint failure of `GetDeferral` and immediate `SetResponse` cannot
+be proven fail-closed from these COM semantics alone; the callback signals
+terminal teardown, but whether WebView2 has already continued the request
+requires native fault-injection evidence. The source-only gate does not claim
+that evidence or a complete security proof.
 
 ## Reference behavior
 

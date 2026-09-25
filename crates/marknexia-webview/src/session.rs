@@ -21,8 +21,9 @@ use crate::{
 
 enum SessionEvent {
     EnvironmentCreated(u64, Result<WebViewEnvironment, EnvironmentError>),
-    HostCreated(u64, u64, Result<WebViewHost, HostError>),
-    ProcessFailure(u64, u64, ProcessFailure),
+    HostCreated(u64, u64, u64, Result<WebViewHost, HostError>),
+    ProcessFailure(u64, u64, u64, ProcessFailure),
+    PageMessage(u64, u64, u64, PageToHost),
     BrowserExited(u64, BrowserExit),
 }
 
@@ -36,6 +37,7 @@ pub enum SessionError {
     Document(DocumentError),
     Environment(EnvironmentError),
     Host(HostError),
+    ResourceBoundaryFailed,
 }
 
 impl From<EnvironmentError> for SessionError {
@@ -68,7 +70,11 @@ pub struct WebViewSession {
     environment: Option<WebViewEnvironment>,
     recovery: RecoveryCoordinator,
     pending_hosts: BTreeSet<u64>,
+    controller_generations: BTreeMap<u64, u64>,
+    next_controller_generation: u64,
     recreating_tabs: BTreeSet<u64>,
+    visibility_pending: bool,
+    security_failed: bool,
     generation: u64,
     creating_environment: bool,
     teardown_pending: bool,
@@ -101,7 +107,11 @@ impl WebViewSession {
             environment: None,
             recovery: RecoveryCoordinator::new(None),
             pending_hosts: BTreeSet::new(),
+            controller_generations: BTreeMap::new(),
+            next_controller_generation: 0,
             recreating_tabs: BTreeSet::new(),
+            visibility_pending: false,
+            security_failed: false,
             generation: 0,
             creating_environment: false,
             teardown_pending: false,
@@ -117,6 +127,9 @@ impl WebViewSession {
         if self.closed {
             return Err(SessionError::Closed);
         }
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
+        }
         document.validate().map_err(SessionError::Document)?;
         let tab_id = document.tab_id;
         if self.documents.contains_key(&tab_id) {
@@ -130,6 +143,9 @@ impl WebViewSession {
     }
 
     pub fn select_tab(&mut self, tab_id: u64) -> Result<(), SessionError> {
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
+        }
         if self.browser_recovering {
             return Err(SessionError::Recovering);
         }
@@ -137,13 +153,17 @@ impl WebViewSession {
             return Err(SessionError::MissingTab);
         }
         self.recovery.set_active_tab(Some(tab_id));
-        self.apply_visibility(tab_id)?;
+        self.visibility_pending = true;
+        self.apply_selected_visibility()?;
         Ok(())
     }
 
     pub fn start(&mut self) -> Result<(), SessionError> {
         if self.closed {
             return Err(SessionError::Closed);
+        }
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
         }
         if self.environment.is_some() || self.creating_environment || self.browser_recovering {
             return Err(SessionError::AlreadyStarted);
@@ -184,16 +204,24 @@ impl WebViewSession {
         };
         let events = Rc::clone(&self.events);
         let generation = self.generation;
+        self.next_controller_generation = self.next_controller_generation.wrapping_add(1);
+        let controller_generation = self.next_controller_generation;
+        self.controller_generations
+            .insert(tab_id, controller_generation);
         let result = environment.create_host_async(
             self.parent,
             Box::new(move |result| {
-                events
-                    .borrow_mut()
-                    .push_back(SessionEvent::HostCreated(generation, tab_id, result));
+                events.borrow_mut().push_back(SessionEvent::HostCreated(
+                    generation,
+                    controller_generation,
+                    tab_id,
+                    result,
+                ));
             }),
         );
         if let Err(error) = result {
             self.pending_hosts.remove(&tab_id);
+            self.controller_generations.remove(&tab_id);
             return Err(SessionError::Host(error));
         }
         Ok(())
@@ -204,12 +232,21 @@ impl WebViewSession {
         if self.closed {
             return Err(SessionError::Closed);
         }
+        self.abort_failed_resources()?;
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
+        }
         loop {
+            self.enqueue_page_messages();
             let next = { self.events.borrow_mut().pop_front() };
             let Some(event) = next else {
                 break;
             };
             self.apply_event(event)?;
+            self.abort_failed_resources()?;
+            if self.security_failed {
+                return Err(SessionError::ResourceBoundaryFailed);
+            }
         }
         if self.teardown_pending {
             self.finish_teardown()?;
@@ -238,6 +275,9 @@ impl WebViewSession {
         if let Some(tab_id) = self.active_tab_restore_pending {
             self.restore_active_tab(tab_id)?;
         }
+        if self.visibility_pending {
+            self.apply_selected_visibility()?;
+        }
         Ok(())
     }
 
@@ -264,8 +304,9 @@ impl WebViewSession {
                 }
                 self.finish_environment_restore()?;
             }
-            SessionEvent::HostCreated(generation, tab_id, result) => {
+            SessionEvent::HostCreated(generation, controller_generation, tab_id, result) => {
                 if generation != self.generation
+                    || self.controller_generations.get(&tab_id) != Some(&controller_generation)
                     || (self.browser_recovering && self.recovery_generation != Some(generation))
                     || self.closed
                 {
@@ -275,22 +316,32 @@ impl WebViewSession {
                     return Ok(());
                 }
                 self.pending_hosts.remove(&tab_id);
-                let mut host = result?;
+                let mut host = match result {
+                    Ok(host) => host,
+                    Err(error) => {
+                        self.controller_generations.remove(&tab_id);
+                        return Err(SessionError::Host(error));
+                    }
+                };
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
                     let _ = host.close();
+                    self.controller_generations.remove(&tab_id);
                     return Ok(());
                 };
                 let events = Rc::clone(&self.events);
-                let generation = self.generation;
                 let observer: Rc<dyn Fn(ProcessFailure)> = Rc::new(move |failure| {
-                    events
-                        .borrow_mut()
-                        .push_back(SessionEvent::ProcessFailure(generation, tab_id, failure));
+                    events.borrow_mut().push_back(SessionEvent::ProcessFailure(
+                        generation,
+                        controller_generation,
+                        tab_id,
+                        failure,
+                    ));
                 });
                 if let Err(error) = host
                     .observe_process_failures(Rc::downgrade(&observer))
-                    .and_then(|()| host.bind_document(document, self.page_observer.clone()))
+                    .and_then(|()| host.bind_document(document))
                 {
+                    self.controller_generations.remove(&tab_id);
                     if host.close().is_err() {
                         self.orphaned_hosts.insert(tab_id, host);
                     }
@@ -298,11 +349,18 @@ impl WebViewSession {
                 }
                 self.process_observers.insert(tab_id, observer);
                 self.hosts.insert(tab_id, host);
+                self.visibility_pending = true;
+                self.apply_selected_visibility()?;
                 self.recovery.renderer_restored(tab_id);
                 self.finish_environment_restore()?;
             }
-            SessionEvent::ProcessFailure(generation, tab_id, ProcessFailure::BrowserExited)
-                if generation == self.generation =>
+            SessionEvent::ProcessFailure(
+                generation,
+                controller_generation,
+                tab_id,
+                ProcessFailure::BrowserExited,
+            ) if generation == self.generation
+                && self.controller_generations.get(&tab_id) == Some(&controller_generation) =>
             {
                 let action = self.recovery.record_browser_exit();
                 self.apply_recovery_action(action)?;
@@ -310,13 +368,26 @@ impl WebViewSession {
             }
             SessionEvent::ProcessFailure(
                 generation,
+                controller_generation,
                 tab_id,
                 ProcessFailure::RendererExited | ProcessFailure::RendererUnresponsive,
-            ) if generation == self.generation => {
+            ) if generation == self.generation
+                && self.controller_generations.get(&tab_id) == Some(&controller_generation) =>
+            {
                 let action = self.recovery.record_renderer_failure(tab_id);
                 self.apply_recovery_action(action)?;
             }
-            SessionEvent::ProcessFailure(_, _, _) => {}
+            SessionEvent::ProcessFailure(_, _, _, _) => {}
+            SessionEvent::PageMessage(generation, controller_generation, tab_id, message)
+                if generation == self.generation
+                    && self.controller_generations.get(&tab_id) == Some(&controller_generation)
+                    && self.hosts.contains_key(&tab_id) =>
+            {
+                if let Some(observer) = self.page_observer.upgrade() {
+                    observer(message);
+                }
+            }
+            SessionEvent::PageMessage(_, _, _, _) => {}
             SessionEvent::BrowserExited(generation, _exit) if generation == self.generation => {
                 let action = self.recovery.browser_process_exited();
                 self.apply_recovery_action(action)?;
@@ -330,6 +401,7 @@ impl WebViewSession {
         match action {
             RecoveryAction::None => {}
             RecoveryAction::RecreateController { tab_id } => {
+                self.controller_generations.remove(&tab_id);
                 self.recreating_tabs.insert(tab_id);
                 self.retry_renderer_recreation()?;
             }
@@ -337,6 +409,7 @@ impl WebViewSession {
                 self.browser_recovering = true;
                 self.teardown_pending = true;
                 self.recreating_tabs.clear();
+                self.controller_generations.clear();
                 self.finish_teardown()?;
             }
             RecoveryAction::RecreateEnvironment => {
@@ -409,6 +482,7 @@ impl WebViewSession {
         self.browser_observer.take();
         self.environment.take();
         self.pending_hosts.clear();
+        self.controller_generations.clear();
         self.begin_environment()?;
         self.recovery_generation = Some(self.generation);
         self.environment_recreate_pending = false;
@@ -416,7 +490,8 @@ impl WebViewSession {
     }
 
     fn restore_active_tab(&mut self, tab_id: u64) -> Result<(), SessionError> {
-        self.apply_visibility(tab_id)?;
+        self.visibility_pending = true;
+        self.apply_selected_visibility()?;
         self.recovery.active_tab_restored(tab_id);
         self.active_tab_restore_pending = None;
         self.browser_recovering = false;
@@ -440,9 +515,58 @@ impl WebViewSession {
         Ok(())
     }
 
-    fn apply_visibility(&self, active: u64) -> Result<(), SessionError> {
+    fn apply_selected_visibility(&mut self) -> Result<(), SessionError> {
+        let active = self.recovery.active_tab_id();
         for (tab_id, host) in &self.hosts {
-            host.set_visible(*tab_id == active)?;
+            host.set_visible(Some(*tab_id) == active)?;
+        }
+        self.visibility_pending = false;
+        Ok(())
+    }
+
+    fn enqueue_page_messages(&self) {
+        let mut queued = Vec::new();
+        for (tab_id, host) in &self.hosts {
+            if let Some(controller_generation) = self.controller_generations.get(tab_id) {
+                queued.extend(host.drain_page_messages().into_iter().map(|message| {
+                    SessionEvent::PageMessage(
+                        self.generation,
+                        *controller_generation,
+                        *tab_id,
+                        message,
+                    )
+                }));
+            }
+        }
+        self.events.borrow_mut().extend(queued);
+    }
+
+    fn abort_failed_resources(&mut self) -> Result<(), SessionError> {
+        if !self.security_failed
+            && !self
+                .hosts
+                .values()
+                .any(WebViewHost::resource_boundary_failed)
+        {
+            return Ok(());
+        }
+        self.security_failed = true;
+        self.controller_generations.clear();
+        // Close the entire controller fleet. No new page message or resource
+        // may be accepted after one controller loses its security boundary.
+        let mut first_error = None;
+        for tab_id in self.hosts.keys().copied().collect::<Vec<_>>() {
+            if let Some(host) = self.hosts.get_mut(&tab_id) {
+                if let Err(error) = host.close() {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            }
+            self.hosts.remove(&tab_id);
+            self.process_observers.remove(&tab_id);
+        }
+        if let Some(error) = first_error {
+            return Err(SessionError::Host(error));
         }
         Ok(())
     }
@@ -479,6 +603,7 @@ impl WebViewSession {
         self.browser_observer.take();
         self.environment.take();
         self.pending_hosts.clear();
+        self.controller_generations.clear();
         Ok(())
     }
 }
@@ -594,6 +719,9 @@ mod native_tests {
             session.host(8).unwrap().document_identity().unwrap(),
             (8, 1)
         );
+        assert!(session.host(7).unwrap().is_visible().unwrap());
+        assert!(!session.host(8).unwrap().is_visible().unwrap());
+        let stale_controller_generation = session.controller_generations[&7];
         // Simulate the callback signal after the real native resource/message
         // path is installed; the adapter must close and recreate only tab 7.
         session
@@ -601,6 +729,7 @@ mod native_tests {
             .borrow_mut()
             .push_back(SessionEvent::ProcessFailure(
                 session.generation,
+                stale_controller_generation,
                 7,
                 ProcessFailure::RendererExited,
             ));
@@ -608,8 +737,68 @@ mod native_tests {
         pump_until(&mut session, Duration::from_secs(30), |session| {
             session.host(7).is_some() && session.host(8).is_some()
         });
+        assert!(session.host(7).unwrap().is_visible().unwrap());
+        assert!(!session.host(8).unwrap().is_visible().unwrap());
+        let replacement_generation = session.controller_generations[&7];
+        assert_ne!(replacement_generation, stale_controller_generation);
+        session
+            .events
+            .borrow_mut()
+            .push_back(SessionEvent::ProcessFailure(
+                session.generation,
+                stale_controller_generation,
+                7,
+                ProcessFailure::RendererExited,
+            ));
+        session.poll().unwrap();
+        assert_eq!(session.controller_generations[&7], replacement_generation);
+        assert!(session.host(7).is_some());
+        messages.borrow_mut().clear();
+        session
+            .events
+            .borrow_mut()
+            .push_back(SessionEvent::PageMessage(
+                session.generation,
+                stale_controller_generation,
+                7,
+                PageToHost::Ready {
+                    protocol: 1,
+                    document_epoch: 1,
+                    tab_id: 7,
+                },
+            ));
+        session.poll().unwrap();
+        assert!(messages.borrow().is_empty());
         session.close().unwrap();
         assert!(session.host(7).is_none() && session.host(8).is_none());
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_page_message_is_delivered_only_after_session_poll() {
+        let (parent, mut session, messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some()
+        });
+        messages.borrow_mut().clear();
+        session
+            .events
+            .borrow_mut()
+            .push_back(SessionEvent::PageMessage(
+                session.generation,
+                session.controller_generations[&7],
+                7,
+                PageToHost::Ready {
+                    protocol: 1,
+                    document_epoch: 1,
+                    tab_id: 7,
+                },
+            ));
+        assert!(messages.borrow().is_empty());
+        session.poll().unwrap();
+        assert_eq!(messages.borrow().len(), 1);
+        session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
 
