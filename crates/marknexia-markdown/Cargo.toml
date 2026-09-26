@@ -14,5 +14,8 @@ pulldown-cmark = { version = "=0.13.4", optional = true, default-features = fals
 serde_json = { workspace = true }
 
 [features]
+# pulldown-cmark is the recommended candidate (pending Task 8 review), so a
+# plain `cargo test` always runs the mandatory parity gate against it.
+default = ["candidate-pulldown"]
 candidate-comrak = ["dep:comrak"]
 candidate-pulldown = ["dep:pulldown-cmark"]
