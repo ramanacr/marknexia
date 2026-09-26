@@ -42,14 +42,32 @@ Ganss keeps `<use href="https://…">`. Rust accepts only same-document `#fragme
 
 Ganss removes a disallowed element together with its children. Rust lists every known HTML, SVG and MathML element outside the allowlist in ammonia's `clean_content_tags`, so those elements are removed with their content, as in .NET. An **unknown or custom** element (for example `<x-widget>text<b>b</b></x-widget>`) is unwrapped: the element goes, and its allowlisted children and text stay. What survives is still sanitized by the same policy.
 
-## SAN-7 — SVG output budget
+## SAN-7 — SVG output budget and inline-only SVG
 
 .NET has no separate SVG output bound. Rust bounds `SvgPolicy::sanitize` input with `max_svg_input_bytes` and its output with `max_html_output_bytes`, while serializing.
 
-## SAN-8 — Nesting depth budget
+Like .NET's `SanitizeSvg`, the result is HTML-serialized fragment markup, not a standalone `image/svg+xml` document. It has no `xmlns`, it may contain several roots or HTML siblings, and it follows HTML serialization rules. `SanitizedSvg` is therefore **inline-only**: it enters a document through `SanitizedSvg::into_fragment`. The WebView path that served it as a generated `image/svg+xml` asset (`GeneratedAsset::sanitized_svg`) has been removed. Only trusted bundled SVG assets remain.
 
-AngleSharp has no nesting limit. html5ever's tree builder scans the open-element stack on many tags, so 20,000 nested `<div>`s (100 KiB) cost tens of seconds. Rust runs a depth probe first, using the same html5ever fragment parse. It rejects the whole input with `SanitizeError::NestingTooDeep` once the tree depth exceeds `MAX_NESTING_DEPTH` (256), and returns no partial output. Browsers cap parser nesting at 512.
+SVG `fill` and `stroke` are tokenized as CSS. `url()` there may only name a same-document fragment (`url(#id)`); any other `url()` or non-allowlisted function removes the attribute. Ganss keeps these values verbatim.
+
+## SAN-8 — Nesting depth and tree-construction work budget
+
+AngleSharp has no nesting or work limit. html5ever's tree builder scans the open-element stack on many tags, so 20,000 nested `<div>`s (100 KiB) cost tens of seconds, and flat content under deep nesting is linear but slow. Before sanitizing, Rust runs a probe using the same html5ever fragment parse. The probe keeps the exact tree shape and re-measures every subtree that the adoption agency or foster parenting moves. It rejects the whole input, returning no partial output, when any of these limits is hit:
+
+* tree depth exceeds `MAX_NESTING_DEPTH` (256): `SanitizeError::NestingTooDeep`;
+* tree-construction work (each placement is charged its depth, plus re-measurement and child-scan steps) exceeds `8 × input bytes + 262,144`: `SanitizeError::TooComplex`;
+* more than 4,096 adoption-agency reparent operations occur: `SanitizeError::TooComplex`.
+
+Browsers cap parser nesting at 512. Ordinary Markdown output uses well under 3 work units per byte.
 
 ## SAN-9 — Attribute value escaping
 
 AngleSharp's formatter escapes only `&`, U+00A0 and `"` in attribute values. html5ever also escapes `<` and `>`, so `alt="<b>"` is emitted as `alt="&lt;b&gt;"`. Both parse back to the same value.
+
+## Note — attacker-controlled attributes kept for parity
+
+These are not differences. Markdown source controls these values, and they survive sanitization in both editions:
+
+* `id` and `name` are kept, so DOM clobbering of named globals and `document` properties is possible. Page scripts must not look up globals by id or name.
+* `data-marknexia-action`, `data-copy-text` and `data-marknexia-zoom-status` are kept verbatim. They are inert metadata, but their values are **untrusted**. The delegated bridge must validate `data-marknexia-action` against its fixed command set, and treat `data-copy-text` only as clipboard text (bounded, never evaluated or navigated to).
+* `target` and `rel` are kept, so `target="_blank" rel="opener"` survives, as it does with Ganss. The host's navigation interception has to enforce link handling; the markup does not.

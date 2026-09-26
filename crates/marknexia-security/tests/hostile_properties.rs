@@ -751,6 +751,10 @@ fn deep_nesting_is_rejected_before_quadratic_tree_construction() {
         format!("<table>{}", "<div>".repeat(5_000)),
         "<math><mrow>".repeat(5_000),
         "<b><i><u><s>".repeat(5_000),
+        // Adoption agency: the furthest block is filled into a detached
+        // formatting clone that is inserted afterwards.
+        "<b><i><div></b>".repeat(300),
+        "<a><b><div></a>".repeat(300),
     ] {
         let started = std::time::Instant::now();
         assert_eq!(
@@ -766,6 +770,92 @@ fn deep_nesting_is_rejected_before_quadratic_tree_construction() {
     assert_eq!(
         svg_policy.sanitize(&format!("<svg>{}</svg>", "<g>".repeat(1_000))),
         Err(SanitizeError::NestingTooDeep { limit })
+    );
+}
+
+/// Wall-clock bound for the rejection paths; generous in debug builds, tight
+/// under `cargo test --release`.
+fn rejection_bound() -> std::time::Duration {
+    if cfg!(debug_assertions) {
+        std::time::Duration::from_secs(20)
+    } else {
+        std::time::Duration::from_secs(1)
+    }
+}
+
+#[test]
+fn adoption_agency_nesting_is_rejected_within_a_time_bound() {
+    // compat/decisions/sanitizer-ammonia-differences.md SAN-8.
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    for pattern in ["<b><i><div></b>", "<a><b><div></a>"] {
+        let input = pattern.repeat(20_000);
+        let started = std::time::Instant::now();
+        let result = html_policy.sanitize_fragment(&input);
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(
+                result,
+                Err(SanitizeError::NestingTooDeep { .. } | SanitizeError::TooComplex)
+            ),
+            "{pattern} x 20000 -> {result:?}"
+        );
+        assert!(
+            elapsed < rejection_bound(),
+            "{pattern} x 20000 took {elapsed:?}"
+        );
+    }
+}
+
+#[test]
+fn flat_content_under_maximum_nesting_exhausts_the_work_budget() {
+    // SAN-8: 250 levels of nesting followed by ~4 MiB of flat siblings.
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let input = format!("{}{}", "<div>".repeat(250), "<div></div>".repeat(370_000));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        html_policy.sanitize_fragment(&input),
+        Err(SanitizeError::TooComplex)
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed < rejection_bound(), "flat 4 MiB took {elapsed:?}");
+    // Repeated misnesting that never deepens the tree hits the reparent cap.
+    assert_eq!(
+        html_policy.sanitize_fragment(&"<b><p>x</b></p>".repeat(5_000)),
+        Err(SanitizeError::TooComplex)
+    );
+}
+
+#[test]
+fn svg_paint_accepts_only_fragment_urls() {
+    // SAN-7.
+    assert_eq!(
+        svg("<svg><rect fill=\"url(#grad)\" stroke=\"red\"/></svg>"),
+        "<svg><rect fill=\"url(#grad)\" stroke=\"red\"></rect></svg>"
+    );
+    assert_eq!(
+        svg(
+            "<svg><rect fill=\"url(https://evil.example/x.svg#p)\" stroke=\"url('//evil.example/y')\"/></svg>"
+        ),
+        "<svg><rect></rect></svg>"
+    );
+}
+
+#[test]
+fn sanitized_svg_is_inline_only_and_embeds_as_a_fragment() {
+    let svg = SvgPolicy::new(ContentPolicy::default())
+        .sanitize("<svg><path d=\"M0 0\"/></svg><p>after</p>")
+        .unwrap();
+    // HTML siblings and no xmlns: this is not a standalone SVG document.
+    assert_eq!(
+        svg.as_str(),
+        "<svg><path d=\"M0 0\"></path></svg><p>after</p>"
+    );
+    let fragment = svg.into_fragment();
+    assert_eq!(
+        HtmlPolicy::new(ContentPolicy::default())
+            .sanitize_fragment(fragment.as_str())
+            .unwrap(),
+        fragment
     );
 }
 

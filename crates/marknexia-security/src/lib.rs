@@ -115,6 +115,7 @@ pub enum SanitizeError {
     InputTooLarge { kind: &'static str, limit: usize },
     OutputTooLarge { limit: usize },
     NestingTooDeep { limit: usize },
+    TooComplex,
     Serialization,
     UnsafeUrl,
 }
@@ -134,6 +135,7 @@ impl fmt::Display for SanitizeError {
             Self::NestingTooDeep { limit } => {
                 write!(f, "markup nests deeper than the {limit}-level policy limit")
             }
+            Self::TooComplex => f.write_str("markup exceeds the tree-construction work budget"),
             Self::Serialization => f.write_str("sanitized output could not be serialized"),
             Self::UnsafeUrl => f.write_str("URL rejected by content policy"),
         }
@@ -160,8 +162,15 @@ impl SanitizedFragment {
     }
 }
 
-/// SVG emitted by the parser-backed SVG policy. It is deliberately distinct
-/// from HTML and cannot be constructed by WebView or rendering callers.
+/// Inline SVG emitted by the parser-backed SVG policy. It is deliberately
+/// distinct from HTML and cannot be constructed by WebView or rendering
+/// callers.
+///
+/// This is **inline-only** markup: HTML-serialized foreign content meant to
+/// be embedded in an HTML document. It is not a standalone
+/// `image/svg+xml` document. It has no `xmlns`, it can contain several roots
+/// or HTML siblings, and it uses HTML serialization rules. Never serve it as
+/// an SVG file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SanitizedSvg(String);
 
@@ -169,6 +178,14 @@ impl SanitizedSvg {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Embed the sanitized SVG as an HTML fragment. The same policy and the
+    /// same `<div>`-context fragment parse produced it, so it is a sanitized
+    /// fragment as-is.
+    #[must_use]
+    pub fn into_fragment(self) -> SanitizedFragment {
+        SanitizedFragment(self.0)
     }
 }
 

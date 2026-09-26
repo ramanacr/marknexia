@@ -400,10 +400,14 @@ pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, San
     if input.trim().is_empty() {
         return Ok(String::new());
     }
-    if !depth::within_depth(input, depth::MAX_NESTING_DEPTH) {
-        return Err(SanitizeError::NestingTooDeep {
-            limit: depth::MAX_NESTING_DEPTH,
-        });
+    match depth::probe(input, depth::MAX_NESTING_DEPTH) {
+        depth::Verdict::Within => {}
+        depth::Verdict::TooDeep => {
+            return Err(SanitizeError::NestingTooDeep {
+                limit: depth::MAX_NESTING_DEPTH,
+            });
+        }
+        depth::Verdict::TooMuchWork => return Err(SanitizeError::TooComplex),
     }
     let mut builder = Builder::empty();
     builder
@@ -466,6 +470,9 @@ fn filter_attribute<'u>(
                 Some(Cow::Owned(sanitized))
             }
         }
+        // SVG paint may reference a same-document paint server only:
+        // `url(#id)` is kept, any other `url()` removes the attribute.
+        "fill" | "stroke" => css::is_safe_paint(value).then_some(Cow::Borrowed(value)),
         _ => Some(Cow::Borrowed(value)),
     }
 }

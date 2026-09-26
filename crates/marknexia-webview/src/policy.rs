@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use marknexia_security::{ContentPolicy, HtmlPolicy, SanitizedFragment, SanitizedSvg};
+use marknexia_security::{ContentPolicy, HtmlPolicy, SanitizedFragment};
 
 use crate::{
     broker::{BrokerDecision, BrokerRequest, ResourceBroker, TabResourceBroker},
@@ -57,8 +57,10 @@ impl Asset {
     }
 }
 
-/// An inert generated raster or sanitizer-owned SVG. Generated JavaScript and
-/// CSS have no public construction path.
+/// An inert generated raster. Generated SVG, JavaScript and CSS have no public
+/// construction path: `SanitizedSvg` is inline-only HTML-serialized markup,
+/// not a standalone `image/svg+xml` document, so it is embedded through
+/// `SanitizedSvg::into_fragment` rather than served as an asset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedAsset(Asset);
 
@@ -73,16 +75,6 @@ impl GeneratedAsset {
         Ok(Self(Asset {
             kind,
             bytes: AssetBytes::Generated(bytes),
-        }))
-    }
-
-    pub fn sanitized_svg(svg: SanitizedSvg) -> Result<Self, DocumentError> {
-        if svg.as_str().len() > MAX_ASSET_BYTES {
-            return Err(DocumentError::TooLarge);
-        }
-        Ok(Self(Asset {
-            kind: AssetType::Svg,
-            bytes: AssetBytes::Generated(svg.as_str().as_bytes().to_vec()),
         }))
     }
 }

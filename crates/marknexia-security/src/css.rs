@@ -106,6 +106,61 @@ fn serialize_value(parser: &mut Parser<'_>, out: &mut String) -> Result<(), CssE
     }
 }
 
+/// Whether an SVG `fill`/`stroke` presentation value is inert. The value is
+/// tokenized as CSS. `url()` may only name a same-document fragment
+/// (`url(#id)` or `url("#id")`), and every other function must be on the
+/// value allowlist.
+pub(crate) fn is_safe_paint(value: &str) -> bool {
+    let mut parser = Parser::new(value);
+    parser.set_nested_block_limit(MAX_VALUE_NESTING);
+    paint_tokens_are_safe(&mut parser).is_ok()
+}
+
+fn paint_tokens_are_safe(parser: &mut Parser<'_>) -> Result<(), CssError> {
+    loop {
+        let token = match parser.next() {
+            Ok(token) => token.clone(),
+            Err(_) => return Ok(()),
+        };
+        match &token {
+            Token::UnquotedUrl(url) if is_fragment_reference(url) => {}
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                parser.parse_nested_block(|nested| {
+                    let url = nested.expect_string()?.clone();
+                    if !is_fragment_reference(&url) {
+                        return Err(CssError::custom(()));
+                    }
+                    nested.expect_exhausted()?;
+                    Ok(())
+                })?;
+            }
+            Token::Function(name) if is_allowed_function(&name.to_ascii_lowercase()) => {
+                parser.parse_nested_block(paint_tokens_are_safe)?;
+            }
+            Token::ParenthesisBlock | Token::SquareBracketBlock => {
+                parser.parse_nested_block(paint_tokens_are_safe)?;
+            }
+            Token::Ident(_)
+            | Token::Hash(_)
+            | Token::IDHash(_)
+            | Token::Number { .. }
+            | Token::Percentage { .. }
+            | Token::Dimension { .. }
+            | Token::Comma
+            | Token::Delim('!' | '+' | '-' | '*' | '/' | '.' | '%') => {}
+            _ => return Err(CssError::custom(())),
+        }
+    }
+}
+
+fn is_fragment_reference(url: &str) -> bool {
+    url.len() > 1
+        && url.starts_with('#')
+        && url[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 fn is_allowed_function(name: &str) -> bool {
     matches!(
         name,
@@ -461,5 +516,34 @@ mod tests {
         assert_eq!(sanitize_declarations("--x: url(y)"), "");
         assert_eq!(sanitize_declarations("color: var(--x)"), "");
         assert_eq!(sanitize_declarations("a{color:red}"), "");
+    }
+
+    #[test]
+    fn paint_allows_only_fragment_urls() {
+        for safe in [
+            "red",
+            "#fff",
+            "none",
+            "url(#grad)",
+            "url('#grad') red",
+            "rgb(1, 2, 3)",
+            "currentColor",
+        ] {
+            assert!(is_safe_paint(safe), "{safe}");
+        }
+        for unsafe_value in [
+            "url(https://evil.example/x.svg#p)",
+            "URL(\"https://evil.example/x.svg#p\")",
+            "url(x.svg#p)",
+            "url(#)",
+            "url(#a) url(https://evil.example/)",
+            r"u\72l(https://evil.example/)",
+            "url(javascript:alert(1))",
+            "var(--x)",
+            "image(x.png)",
+            "url(#a b)",
+        ] {
+            assert!(!is_safe_paint(unsafe_value), "{unsafe_value}");
+        }
     }
 }
