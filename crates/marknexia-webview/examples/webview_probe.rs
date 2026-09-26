@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut laid_out = false;
     let mut should_close = false;
-    while !should_close && unsafe { IsWindow(parent) }.as_bool() {
+    while !should_close && unsafe { IsWindow(Some(parent)) }.as_bool() {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
             if message.hwnd == parent
@@ -88,40 +88,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session
             .poll()
             .map_err(|error| probe_error("session", error))?;
-        if !laid_out {
-            if let (Some(first), Some(second)) = (session.host(7), session.host(8)) {
-                first
-                    .set_bounds(ViewportBounds {
-                        left: 0,
-                        top: 0,
-                        right: 880,
-                        bottom: 600,
-                    })
-                    .map_err(|error| probe_error("first bounds", error))?;
-                second
-                    .set_bounds(ViewportBounds {
-                        left: 0,
-                        top: 0,
-                        right: 880,
-                        bottom: 600,
-                    })
-                    .map_err(|error| probe_error("second bounds", error))?;
-                first
-                    .set_visible(true)
-                    .map_err(|error| probe_error("first visibility", error))?;
-                second
-                    .set_visible(false)
-                    .map_err(|error| probe_error("second visibility", error))?;
-                laid_out = true;
-            }
+        if !laid_out && let (Some(first), Some(second)) = (session.host(7), session.host(8)) {
+            first
+                .set_bounds(ViewportBounds {
+                    left: 0,
+                    top: 0,
+                    right: 880,
+                    bottom: 600,
+                })
+                .map_err(|error| probe_error("first bounds", error))?;
+            second
+                .set_bounds(ViewportBounds {
+                    left: 0,
+                    top: 0,
+                    right: 880,
+                    bottom: 600,
+                })
+                .map_err(|error| probe_error("second bounds", error))?;
+            first
+                .set_visible(true)
+                .map_err(|error| probe_error("first visibility", error))?;
+            second
+                .set_visible(false)
+                .map_err(|error| probe_error("second visibility", error))?;
+            laid_out = true;
         }
+
         std::thread::sleep(Duration::from_millis(10));
     }
     session
         .close()
         .map_err(|error| probe_error("close", error))?;
     // SAFETY: IsWindow is false if the user already destroyed this HWND.
-    if unsafe { IsWindow(parent) }.as_bool() {
+    if unsafe { IsWindow(Some(parent)) }.as_bool() {
         unsafe { DestroyWindow(parent) }?;
     }
     drop(session);

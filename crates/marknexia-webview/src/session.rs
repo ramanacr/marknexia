@@ -210,11 +210,11 @@ impl WebViewSession {
         self.recreating_tabs.remove(&tab_id);
         self.controller_generations.remove(&tab_id);
         self.process_observers.remove(&tab_id);
-        if let Some(mut host) = self.hosts.remove(&tab_id) {
-            if let Err(error) = host.close() {
-                self.orphaned_hosts.entry(tab_id).or_default().push(host);
-                return Err(SessionError::Host(error));
-            }
+        if let Some(mut host) = self.hosts.remove(&tab_id)
+            && let Err(error) = host.close()
+        {
+            self.orphaned_hosts.entry(tab_id).or_default().push(host);
+            return Err(SessionError::Host(error));
         }
         Ok(())
     }
@@ -371,10 +371,10 @@ impl WebViewSession {
                     || (self.browser_recovering && self.recovery_generation != Some(generation))
                     || self.closed
                 {
-                    if let Ok(mut host) = result {
-                        if host.close().is_err() {
-                            self.orphaned_hosts.entry(tab_id).or_default().push(host);
-                        }
+                    if let Ok(mut host) = result
+                        && host.close().is_err()
+                    {
+                        self.orphaned_hosts.entry(tab_id).or_default().push(host);
                     }
                     return Ok(());
                 }
@@ -625,11 +625,11 @@ impl WebViewSession {
         // may be accepted after one controller loses its security boundary.
         let mut first_error = None;
         for tab_id in self.hosts.keys().copied().collect::<Vec<_>>() {
-            if let Some(host) = self.hosts.get_mut(&tab_id) {
-                if let Err(error) = host.abort_security_boundary() {
-                    first_error.get_or_insert(error);
-                    continue;
-                }
+            if let Some(host) = self.hosts.get_mut(&tab_id)
+                && let Err(error) = host.abort_security_boundary()
+            {
+                first_error.get_or_insert(error);
+                continue;
             }
             self.hosts.remove(&tab_id);
             self.process_observers.remove(&tab_id);
@@ -695,25 +695,27 @@ mod native_tests {
     };
 
     use windows::{
-        core::w,
         Win32::{
             Foundation::HWND,
             UI::WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
+                CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
                 WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
             },
         },
+        core::w,
     };
 
     use super::{ProcessFailure, SessionEvent, WebViewSession};
     use crate::{environment::StaApartment, probe, protocol::PageToHost};
 
-    fn open_probe() -> (
+    type ProbeSession = (
         HWND,
         WebViewSession,
         Rc<RefCell<Vec<PageToHost>>>,
         Rc<dyn Fn(PageToHost)>,
-    ) {
+    );
+
+    fn open_probe() -> ProbeSession {
         let apartment = Rc::new(StaApartment::enter().unwrap());
         let parent = unsafe {
             CreateWindowExW(

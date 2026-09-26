@@ -3,29 +3,30 @@
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
 
 use webview2_com::{
     Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
-        COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+        COREWEBVIEW2_COLOR, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
         COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, ICoreWebView2,
+        ICoreWebView2Controller, ICoreWebView2Controller2,
     },
     ProcessFailedEventHandler,
 };
 use windows::{
-    core::{Interface, BOOL},
     Win32::Foundation::RECT,
+    core::{BOOL, Interface},
 };
 
 use crate::{
     callbacks::CallbackTokens,
     environment::WebViewEnvironment,
     policy::HostDocument,
-    protocol::{serialize_host_message, HostToPage, PageToHost},
+    protocol::{HostToPage, PageToHost, serialize_host_message},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

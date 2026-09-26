@@ -379,7 +379,7 @@ fn create_response(
         }
         .ok()?;
         if written != response.body.len() as u32 {
-            return windows::core::HRESULT(0x8000_4005u32 as i32).ok();
+            return Err(windows::core::HRESULT(0x8000_4005u32 as i32).into());
         }
     }
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }?;
