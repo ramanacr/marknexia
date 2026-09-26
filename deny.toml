@@ -8,7 +8,9 @@ ignore = []
 
 [licenses]
 version = 2
-allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+# MPL-2.0 (file-level copyleft) approved by the project owner on 2026-09-26
+# for cssparser/dtoa-short, required by the ammonia sanitizer base.
+allow = ["Apache-2.0", "MIT", "MPL-2.0", "Unicode-3.0"]
 
 [bans]
 multiple-versions = "warn"
