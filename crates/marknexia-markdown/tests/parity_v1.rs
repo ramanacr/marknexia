@@ -170,12 +170,26 @@ fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String
             actual: value("actual")?,
         });
     }
-    if !allowances.is_empty() && !text.contains(PROPOSED_STATUS) {
+    if !allowances.is_empty() && status_line(text) != Some(PROPOSED_STATUS) {
         return Err(format!(
-            "{decision}: parity allowances require status `{PROPOSED_STATUS}`"
+            "{decision}: parity allowances require the line `Status: **{PROPOSED_STATUS}**`"
         ));
     }
     Ok(allowances)
+}
+
+/// The value of the single `Status: **...**` line; anything else, including a
+/// second status line or prose merely mentioning the status, yields `None`.
+fn status_line(text: &str) -> Option<&str> {
+    let mut statuses = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("Status:"));
+    let status = statuses
+        .next()?
+        .trim()
+        .strip_prefix("Status: **")?
+        .strip_suffix("**")?;
+    statuses.next().is_none().then_some(status)
 }
 
 fn decision_allowances() -> Vec<Allowance> {
@@ -316,6 +330,18 @@ fn pulldown_passes_mandatory_parity_suite() {
     run_mandatory_suite("pulldown", &marknexia_markdown::PulldownAdapter);
 }
 
+/// Without a candidate feature the gate above compiles to nothing, which would
+/// let `cargo test` pass without checking parity. Fail loudly instead. CI must
+/// run `--all-features` so both candidates and their allowances are checked.
+#[cfg(not(any(feature = "candidate-comrak", feature = "candidate-pulldown")))]
+#[test]
+fn parity_gate_requires_a_candidate_feature() {
+    panic!(
+        "no Markdown candidate enabled: run `cargo test -p marknexia-markdown --all-features`; \
+         the mandatory parity suite and stale-allowance checks were not run"
+    );
+}
+
 #[test]
 fn fixture_manifest_exactly_matches_directory_membership() {
     let expected = manifest_case_paths();
@@ -429,8 +455,16 @@ fn allowances_require_proposed_status_and_complete_fields() {
     assert!(
         parse_allowances("d.md", &unapproved)
             .unwrap_err()
-            .contains("require status")
+            .contains("require the line")
     );
+    // Mentioning the status in prose is not the status line.
+    let prose = sample_decision("\"x\"").replace(
+        &format!("Status: **{PROPOSED_STATUS}**"),
+        &format!("Status: **approved**\n\nWas {PROPOSED_STATUS}."),
+    );
+    assert!(parse_allowances("d.md", &prose).is_err());
+    let doubled = format!("Status: **approved**\n{}", sample_decision("\"x\""));
+    assert!(parse_allowances("d.md", &doubled).is_err());
     let incomplete = sample_decision("\"x\"").replace("path: expected.renderedBodyHtml\n", "");
     assert!(
         parse_allowances("d.md", &incomplete)

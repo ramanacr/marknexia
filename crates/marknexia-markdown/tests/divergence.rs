@@ -45,6 +45,16 @@ const PROBES: &[(&str, &str)] = &[
     ("task-variants", "- [X] upper\n- [ ]\n* [x] star\n"),
     ("setext-multiline", "Line one\nline two\n---\n"),
     ("link-in-heading", "## [Docs](d.md) `code` *em*\n"),
+    // Review I2: escaped `=` must never become a mark delimiter.
+    ("escaped-mark", "\\==a\\== and \\=\\=b\\=\\=\n"),
+    ("plus-mark-plus", "+==+==+\n"),
+    ("escaped-backslash-mark", "\\\\==a== x\\\\\\==b==\n"),
+    // Review I3: non-ASCII grid tables (Markdig measures UTF-16 code units).
+    (
+        "grid-non-ascii",
+        "+--+--+\n|é |😀|\n+==+==+\n|a |b |\n+--+--+\n",
+    ),
+    ("grid-astral-width", "+----+\n|😀|\n+----+\n"),
 ];
 
 fn render(engine: &dyn MarkdownEngine, source: &str) -> String {

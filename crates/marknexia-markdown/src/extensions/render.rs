@@ -12,26 +12,33 @@ use crate::{Diagram, Heading, MarkdownOptions, ParsedDocument};
 use marknexia_core::slug::{SlugSet, generate_heading_slug};
 use std::collections::HashMap;
 
+/// Renders `document`, or returns `None` as soon as the output exceeds
+/// `options.max_rendered_body_bytes`. Recursion depth is bounded by the
+/// adapters' `MAX_BLOCK_DEPTH`/`MAX_INLINE_DEPTH` caps.
 pub(crate) fn render(
     document: &Document,
     options: &MarkdownOptions,
     capacity: usize,
-) -> ParsedDocument {
+) -> Option<ParsedDocument> {
     let footnotes = FootnotePlan::new(document);
     let mut renderer = Renderer {
         out: String::with_capacity(capacity),
         result: ParsedDocument::default(),
         slugs: SlugSet::default(),
         options,
+        limit: options.max_rendered_body_bytes,
         references_seen: vec![0; footnotes.ordered.len()],
         footnotes: &footnotes,
         pending_task: None,
     };
     renderer.blocks(&document.blocks, false);
     renderer.footnote_group();
+    if renderer.over_limit() {
+        return None;
+    }
     let mut result = renderer.result;
     result.rendered_body_html = renderer.out;
-    result
+    Some(result)
 }
 
 /// Markdig numbers footnotes by first reference in document order (footnote
@@ -145,6 +152,7 @@ struct Renderer<'a> {
     result: ParsedDocument,
     slugs: SlugSet,
     options: &'a MarkdownOptions,
+    limit: usize,
     footnotes: &'a FootnotePlan<'a>,
     references_seen: Vec<usize>,
     pending_task: Option<bool>,
@@ -157,8 +165,15 @@ impl Renderer<'_> {
         }
     }
 
+    fn over_limit(&self) -> bool {
+        self.out.len() > self.limit
+    }
+
     fn blocks(&mut self, blocks: &[Block], implicit: bool) {
         for (index, block) in blocks.iter().enumerate() {
+            if self.over_limit() {
+                return;
+            }
             self.block(block, index == 0, implicit);
         }
     }
@@ -382,10 +397,18 @@ impl Renderer<'_> {
         self.out
             .push_str("<div class=\"footnotes\">\n<hr />\n<ol>\n");
         for (index, definition) in plan.ordered.iter().enumerate() {
+            if self.over_limit() {
+                return;
+            }
             let order = index + 1;
             self.out.push_str(&format!("<li id=\"fn:{order}\">\n"));
             let mut backlinks = String::new();
             for link in 1..=plan.reference_counts[index] {
+                if self.out.len() + backlinks.len() > self.limit {
+                    // Leave `out` over the limit so `render` reports it.
+                    self.out.push_str(&backlinks);
+                    return;
+                }
                 let link_index = plan.link_base[index] + link;
                 backlinks.push_str(&format!(
                     "<a href=\"#fnref:{link_index}\" class=\"footnote-back-ref\">&#8617;</a>"
@@ -442,6 +465,9 @@ impl Renderer<'_> {
 
     fn inlines(&mut self, inlines: &[Inline], plain: bool) {
         for inline in inlines {
+            if self.over_limit() {
+                return;
+            }
             self.inline(inline, plain);
         }
     }
@@ -462,7 +488,7 @@ impl Renderer<'_> {
 
     fn inline(&mut self, inline: &Inline, plain: bool) {
         match inline {
-            Inline::Text(text) => escape_html(text, &mut self.out),
+            Inline::Text(text) | Inline::Escaped(text) => escape_html(text, &mut self.out),
             Inline::Code(code) => {
                 if plain {
                     escape_html(code, &mut self.out);
@@ -566,7 +592,7 @@ impl Renderer<'_> {
 fn heading_text(inlines: &[Inline], out: &mut String) {
     for inline in inlines {
         match inline {
-            Inline::Text(text) | Inline::Code(text) => out.push_str(text),
+            Inline::Text(text) | Inline::Escaped(text) | Inline::Code(text) => out.push_str(text),
             Inline::Link {
                 kind: LinkKind::Autolink,
                 ..
@@ -685,8 +711,11 @@ mod tests {
                 reference("B"),
             ])],
             footnotes: vec![definition("a", "A"), definition("b", "B")],
+            diagnostics: Vec::new(),
         };
-        let html = render(&document, &MarkdownOptions::default(), 0).rendered_body_html;
+        let html = render(&document, &MarkdownOptions::default(), 0)
+            .unwrap()
+            .rendered_body_html;
         assert_eq!(
             html,
             "<p><a id=\"fnref:1\" href=\"#fn:1\" class=\"footnote-ref\"><sup>1</sup></a>\

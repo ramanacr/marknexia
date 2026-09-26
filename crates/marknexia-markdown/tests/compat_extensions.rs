@@ -30,6 +30,7 @@ fn check_mermaid_isolation_and_limits(engine: &dyn MarkdownEngine) {
             &MarkdownOptions {
                 max_diagram_count: 1,
                 max_diagram_source_bytes: 8,
+                ..MarkdownOptions::default()
             },
         )
         .unwrap();

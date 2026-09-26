@@ -2,7 +2,7 @@
 //! support. Uses CommonMark delimiter-run flanking rules for a run of exactly
 //! two `=` characters, pairing each closer with the nearest opener.
 
-use super::model::{Block, Document, Inline};
+use super::model::{Block, Document, Inline, MAX_INLINE_DEPTH};
 
 pub(crate) fn apply(document: &mut Document) {
     blocks(&mut document.blocks);
@@ -39,10 +39,17 @@ enum Token {
     Delimiter,
 }
 
-pub(crate) fn inlines(items: &mut Vec<Inline>) {
+fn inlines(items: &mut Vec<Inline>) {
+    apply_at_depth(items, 0);
+}
+
+/// `depth` counts inline containers above `items`. New marks may nest at most
+/// `MAX_INLINE_DEPTH - depth` deep, so the pass can at most double the
+/// adapter-bounded inline depth.
+fn apply_at_depth(items: &mut Vec<Inline>, depth: usize) {
     for item in items.iter_mut() {
         if let Some(children) = item.children_mut() {
-            inlines(children);
+            apply_at_depth(children, depth + 1);
         }
     }
     if !items
@@ -52,22 +59,29 @@ pub(crate) fn inlines(items: &mut Vec<Inline>) {
         return;
     }
     let merged = merge_text(std::mem::take(items));
+    let bounds: Vec<(char, char)> = (0..merged.len())
+        .map(|index| {
+            (
+                boundary(
+                    index
+                        .checked_sub(1)
+                        .and_then(|previous| merged.get(previous)),
+                    true,
+                ),
+                boundary(merged.get(index + 1), false),
+            )
+        })
+        .collect();
+    let nesting_budget = MAX_INLINE_DEPTH.saturating_sub(depth);
     let mut output: Vec<Token> = Vec::with_capacity(merged.len());
     let mut openers: Vec<usize> = Vec::new();
-    for (index, item) in merged.iter().enumerate() {
+    for (item, (before, after)) in merged.into_iter().zip(bounds) {
         let Inline::Text(text) = item else {
-            output.push(Token::Node(item.clone()));
+            output.push(Token::Node(item));
             continue;
         };
-        let before = boundary(
-            index
-                .checked_sub(1)
-                .and_then(|previous| merged.get(previous)),
-            true,
-        );
-        let after = boundary(merged.get(index + 1), false);
         let mut literal_start = 0;
-        for run in delimiter_runs(text) {
+        for run in delimiter_runs(&text) {
             let previous = text[..run].chars().next_back().unwrap_or(before);
             let next = text[run + 2..].chars().next().unwrap_or(after);
             let left = !next.is_whitespace()
@@ -89,7 +103,7 @@ pub(crate) fn inlines(items: &mut Vec<Inline>) {
                 output.push(Token::Node(Inline::Mark(merge_text(children))));
                 continue;
             }
-            if left {
+            if left && openers.len() < nesting_budget {
                 openers.push(output.len());
                 output.push(Token::Delimiter);
             } else {
@@ -136,7 +150,7 @@ fn delimiter_runs(text: &str) -> Vec<usize> {
 fn boundary(neighbor: Option<&Inline>, before: bool) -> char {
     match neighbor {
         None | Some(Inline::SoftBreak | Inline::HardBreak) => ' ',
-        Some(Inline::Text(text)) => {
+        Some(Inline::Text(text) | Inline::Escaped(text)) => {
             let ch = if before {
                 text.chars().next_back()
             } else {

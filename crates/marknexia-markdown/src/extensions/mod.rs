@@ -17,7 +17,9 @@ pub(crate) mod model;
 mod render;
 
 use crate::{MarkdownOptions, ParsedDocument};
+use marknexia_core::contracts::{Diagnostic, DiagnosticSeverity};
 use model::{Document, normalize_line_endings};
+use std::borrow::Cow;
 
 /// A third-party parser translated into the Marknexia document model.
 pub(crate) trait Frontend {
@@ -28,13 +30,16 @@ pub(crate) trait Frontend {
     fn parse_document(&self, source: &str) -> Document;
 }
 
+/// Parses and renders `source`. Fails only when the rendered body would exceed
+/// `MarkdownOptions::max_rendered_body_bytes`; rendering stops as soon as the
+/// limit is crossed, so output memory stays bounded by the limit.
 pub(crate) fn parse<F: Frontend>(
     frontend: &F,
     source: &str,
     options: &MarkdownOptions,
-) -> ParsedDocument {
+) -> Result<ParsedDocument, Vec<Diagnostic>> {
     if source.is_empty() {
-        return ParsedDocument::default();
+        return Ok(ParsedDocument::default());
     }
     let source = normalize_line_endings(source);
     let parse_fragment = |fragment: &str| {
@@ -47,10 +52,23 @@ pub(crate) fn parse<F: Frontend>(
     let mut document = parse_fragment(&source);
     let lines: Vec<&str> = source.split('\n').collect();
     grid_table::apply(&mut document, &lines, &parse_fragment);
-    let mut result = render::render(&document, options, source.len().saturating_mul(2));
-    if let std::borrow::Cow::Owned(html) = alerts::transform_gfm_alerts(&result.rendered_body_html)
-    {
-        result.rendered_body_html = html;
+    let limit = options.max_rendered_body_bytes;
+    let capacity = source.len().saturating_mul(2).min(limit);
+    let too_large = || {
+        vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!("rendered HTML exceeds its {limit} byte limit"),
+            source_line: None,
+        }]
+    };
+    let mut result = render::render(&document, options, capacity).ok_or_else(too_large)?;
+    match alerts::transform_gfm_alerts(&result.rendered_body_html, limit) {
+        Some(Cow::Owned(html)) => result.rendered_body_html = html,
+        Some(Cow::Borrowed(_)) => {}
+        None => return Err(too_large()),
     }
-    result
+    let mut diagnostics = std::mem::take(&mut document.diagnostics);
+    diagnostics.append(&mut result.diagnostics);
+    result.diagnostics = diagnostics;
+    Ok(result)
 }

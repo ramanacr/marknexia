@@ -6,48 +6,60 @@ use std::borrow::Cow;
 
 const KINDS: [&str; 5] = ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"];
 
-pub(crate) fn transform_gfm_alerts(html: &str) -> Cow<'_, str> {
+/// Applies the alert transform, or returns `None` once the output would exceed
+/// `limit` bytes.
+pub(crate) fn transform_gfm_alerts(html: &str, limit: usize) -> Option<Cow<'_, str>> {
     if html.trim().is_empty() {
-        return Cow::Borrowed(html);
+        return Some(Cow::Borrowed(html));
     }
     let mut out = String::new();
     let mut copied = 0;
     let mut search = 0;
     while let Some(start) = find_ci(html, search, "<blockquote>") {
         match match_alert(html, start) {
-            Some((end, replacement)) => {
+            Outcome::Match(end, replacement) => {
                 out.push_str(&html[copied..start]);
                 out.push_str(&replacement);
+                if out.len() > limit {
+                    return None;
+                }
                 copied = end;
                 search = end;
             }
-            None => search = start + 1,
+            Outcome::NoMatch => search = start + 1,
+            Outcome::Stop => break,
         }
     }
     if copied == 0 {
-        return Cow::Borrowed(html);
+        return Some(Cow::Borrowed(html));
     }
     out.push_str(&html[copied..]);
-    Cow::Owned(out)
+    (out.len() <= limit).then_some(Cow::Owned(out))
 }
 
-fn match_alert(html: &str, start: usize) -> Option<(usize, String)> {
-    let mut index = skip_whitespace(html, start + "<blockquote>".len());
-    index = expect_ci(html, index, "<p>")?;
-    index = skip_whitespace(html, index);
-    index = expect_ci(html, index, "[!")?;
-    let kind = KINDS
-        .iter()
-        .find(|kind| expect_ci(html, index, kind).is_some())?;
-    let title = &html[index..index + kind.len()];
-    index = expect_ci(html, index + kind.len(), "]")?;
-    if let Some(after_break) = match_break(html, skip_whitespace(html, index)) {
-        index = after_break;
-    }
-    let paragraph_end = find_ci(html, index, "</p>")?;
+enum Outcome {
+    Match(usize, String),
+    /// This `<blockquote>` cannot start a match; later ones still might.
+    NoMatch,
+    /// No `</p>` or `</blockquote>` remains where one is required. Every later
+    /// `<blockquote>` starts at or after this candidate's alert marker and
+    /// would search from the same point or later, so none can match: stopping
+    /// keeps the scan linear without changing output.
+    Stop,
+}
+
+fn match_alert(html: &str, start: usize) -> Outcome {
+    let Some((index, kind, title)) = alert_head(html, start) else {
+        return Outcome::NoMatch;
+    };
+    let Some(paragraph_end) = find_ci(html, index, "</p>") else {
+        return Outcome::Stop;
+    };
     let first_line = html[index..paragraph_end].trim();
     let remainder_start = skip_whitespace(html, paragraph_end + "</p>".len());
-    let quote_end = find_ci(html, remainder_start, "</blockquote>")?;
+    let Some(quote_end) = find_ci(html, remainder_start, "</blockquote>") else {
+        return Outcome::Stop;
+    };
     let remainder = html[remainder_start..quote_end].trim();
 
     let kind = kind.to_ascii_lowercase();
@@ -66,7 +78,26 @@ fn match_alert(html: &str, start: usize) -> Option<(usize, String)> {
     }
     replacement.push_str(remainder);
     replacement.push_str("</div>");
-    Some((quote_end + "</blockquote>".len(), replacement))
+    Outcome::Match(quote_end + "</blockquote>".len(), replacement)
+}
+
+/// `<blockquote>\s*<p>\s*\[!KIND\]` plus the optional `\s*<br\s*/?>`. Returns
+/// the offset where the first-line capture starts, the kind, and the title as
+/// written.
+fn alert_head(html: &str, start: usize) -> Option<(usize, &'static str, &str)> {
+    let mut index = skip_whitespace(html, start + "<blockquote>".len());
+    index = expect_ci(html, index, "<p>")?;
+    index = skip_whitespace(html, index);
+    index = expect_ci(html, index, "[!")?;
+    let kind = KINDS
+        .iter()
+        .find(|kind| expect_ci(html, index, kind).is_some())?;
+    let title = &html[index..index + kind.len()];
+    index = expect_ci(html, index + kind.len(), "]")?;
+    if let Some(after_break) = match_break(html, skip_whitespace(html, index)) {
+        index = after_break;
+    }
+    Some((index, kind, title))
 }
 
 /// `<br\s*/?>`
@@ -130,11 +161,30 @@ fn icon(kind: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    fn run(html: &str) -> Cow<'_, str> {
+        transform_gfm_alerts(html, usize::MAX).unwrap()
+    }
+
+    /// The pre-review scan: retries every `<blockquote>` (quadratic).
+    fn exhaustive(html: &str) -> String {
+        let mut out = String::new();
+        let (mut copied, mut search) = (0, 0);
+        while let Some(start) = find_ci(html, search, "<blockquote>") {
+            if let Outcome::Match(end, replacement) = match_alert(html, start) {
+                out.push_str(&html[copied..start]);
+                out.push_str(&replacement);
+                (copied, search) = (end, end);
+            } else {
+                search = start + 1;
+            }
+        }
+        out.push_str(&html[copied..]);
+        out
+    }
+
     #[test]
     fn lowercase_marker_keeps_written_title() {
-        let html = transform_gfm_alerts(
-            "<blockquote>\n<p>[!note]<br />\nText</p>\n<p>More</p>\n</blockquote>\n",
-        );
+        let html = run("<blockquote>\n<p>[!note]<br />\nText</p>\n<p>More</p>\n</blockquote>\n");
         assert!(html.starts_with("<div class=\"markdown-alert markdown-alert-note\">"));
         assert!(html.ends_with("<span>note</span></div><p>Text</p><p>More</p></div>\n"));
     }
@@ -146,13 +196,48 @@ mod tests {
             "<blockquote>\n<p>[!DANGER]\nx</p>\n</blockquote>\n",
             "<blockquote>\n<p>[!NOTE]\nunterminated</p>\n",
         ] {
-            assert!(matches!(transform_gfm_alerts(html), Cow::Borrowed(text) if text == html));
+            assert!(matches!(run(html), Cow::Borrowed(text) if text == html));
         }
     }
 
     #[test]
     fn empty_alert_body_omits_paragraph() {
-        let html = transform_gfm_alerts("<blockquote>\n<p>[!TIP]</p>\n</blockquote>\n");
+        let html = run("<blockquote>\n<p>[!TIP]</p>\n</blockquote>\n");
         assert!(html.ends_with("<span>TIP</span></div></div>\n"), "{html}");
+    }
+
+    #[test]
+    fn early_stop_matches_exhaustive_scan() {
+        for html in [
+            "<blockquote><p>[!NOTE]</p>".repeat(20),
+            "<blockquote><p>[!NOTE]<blockquote><p>[!TIP] x</p>".to_owned(),
+            "<blockquote><p>[!NOTE] a</p></blockquote><blockquote><p>[!TIP] b".to_owned(),
+            "<blockquote>\n<p>[!NOTE]\n<blockquote>\n<p>[!TIP] inner</p>\n</blockquote>\n</blockquote>\n"
+                .to_owned(),
+            "<blockquote><p>x</p><blockquote><p>[!WARNING] y</p></blockquote></blockquote>".to_owned(),
+        ] {
+            assert_eq!(run(&html), exhaustive(&html), "{html}");
+        }
+    }
+
+    #[test]
+    fn nested_quote_splice_is_parity_required_broken_nesting() {
+        // .NET's lazy regex closes the alert at the inner `</blockquote>`,
+        // leaving a stray outer close tag. The sanitizer's HTML5 parser must
+        // repair it; a regex sanitizer must never be used downstream.
+        let html = run(
+            "<blockquote>\n<p>[!NOTE] a</p>\n<blockquote>\n<p>b</p>\n</blockquote>\n</blockquote>\n",
+        );
+        assert!(
+            html.ends_with("<p>a</p><blockquote>\n<p>b</p></div>\n</blockquote>\n"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn output_limit_is_enforced() {
+        let html = "<blockquote><p>[!NOTE] x</p></blockquote>";
+        assert!(transform_gfm_alerts(html, 100).is_none());
+        assert!(transform_gfm_alerts(html, 10_000).is_some());
     }
 }

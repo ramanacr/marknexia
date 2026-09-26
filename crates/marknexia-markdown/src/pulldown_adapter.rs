@@ -7,8 +7,9 @@ use crate::{
     extensions::{
         self, Frontend,
         model::{
-            Alignment, Block, Document, FootnoteDefinition, Inline, LineIndex, LinkKind, List,
-            ListItem, Paragraph, Table, TableRow,
+            Alignment, Block, DepthLimits, Document, FootnoteDefinition, Inline, LineIndex,
+            LinkKind, List, ListItem, MAX_BLOCK_DEPTH, MAX_INLINE_DEPTH, Paragraph, Table,
+            TableRow,
         },
     },
 };
@@ -18,8 +19,8 @@ use pulldown_cmark::{
 };
 use std::ops::Range;
 
-/// Exploratory candidate. Output is content-unsafe/unbounded; never pass it to
-/// WebView without sanitization and output limits.
+/// Exploratory candidate. Output is content-unsafe; never pass it to WebView
+/// without sanitization.
 pub struct PulldownAdapter;
 
 impl MarkdownEngine for PulldownAdapter {
@@ -28,7 +29,7 @@ impl MarkdownEngine for PulldownAdapter {
         source: &str,
         options: &MarkdownOptions,
     ) -> Result<ParsedDocument, Vec<Diagnostic>> {
-        Ok(extensions::parse(self, source, options))
+        extensions::parse(self, source, options)
     }
 }
 
@@ -44,9 +45,15 @@ impl Frontend for PulldownAdapter {
             | Options::ENABLE_SUPERSCRIPT
             | Options::ENABLE_SUBSCRIPT;
         let mut builder = Builder {
+            source,
             lines: LineIndex::new(source),
             stack: vec![Frame::container(Container::Document)],
             footnotes: Vec::new(),
+            markers: Vec::new(),
+            block_depth: 0,
+            span_depth: 0,
+            suppressed_items: 0,
+            limits: DepthLimits::default(),
         };
         for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
             builder.event(event, range);
@@ -58,6 +65,7 @@ impl Frontend for PulldownAdapter {
         Document {
             blocks,
             footnotes: builder.footnotes,
+            diagnostics: builder.limits.diagnostics,
         }
     }
 }
@@ -153,13 +161,73 @@ impl Frame {
     }
 }
 
-struct Builder {
+/// One entry per open `Start` event, so each `End` knows whether its `Start`
+/// was kept or suppressed by the depth limits.
+enum Marker {
+    Kept,
+    Suppressed { item: bool },
+}
+
+struct Builder<'s> {
+    source: &'s str,
     lines: LineIndex,
     stack: Vec<Frame>,
     footnotes: Vec<FootnoteDefinition>,
+    markers: Vec<Marker>,
+    /// Open quote, list, item, and footnote frames.
+    block_depth: usize,
+    /// Open span frames.
+    span_depth: usize,
+    /// Open items whose list was suppressed.
+    suppressed_items: usize,
+    limits: DepthLimits,
 }
 
-impl Builder {
+fn is_span(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Superscript
+            | Tag::Subscript
+            | Tag::Link { .. }
+            | Tag::Image { .. }
+    )
+}
+
+impl Builder<'_> {
+    /// Whether a `Start` must be suppressed to keep the model within
+    /// `MAX_BLOCK_DEPTH`/`MAX_INLINE_DEPTH`. Content of a suppressed container
+    /// flows into the nearest kept container; a suppressed span's content
+    /// flows into its parent inline list.
+    fn suppress(&mut self, tag: &Tag<'_>, range: &Range<usize>) -> Option<Marker> {
+        let suppressed = match tag {
+            Tag::BlockQuote(_) | Tag::FootnoteDefinition(_) => self.block_depth >= MAX_BLOCK_DEPTH,
+            // A kept list needs room for its items.
+            Tag::List(_) => self.block_depth + 1 >= MAX_BLOCK_DEPTH,
+            Tag::Item => matches!(self.markers.last(), Some(Marker::Suppressed { .. })),
+            _ if is_span(tag) => {
+                if self.span_depth >= MAX_INLINE_DEPTH {
+                    self.limits
+                        .inline_flattened(self.lines.line_of(range.start));
+                    return Some(Marker::Suppressed { item: false });
+                }
+                false
+            }
+            _ => false,
+        };
+        if !suppressed {
+            return None;
+        }
+        self.limits.block_flattened(self.lines.line_of(range.start));
+        let item = matches!(tag, Tag::Item);
+        if item {
+            self.suppressed_items += 1;
+        }
+        Some(Marker::Suppressed { item })
+    }
+
     fn line(&self, range: &Range<usize>) -> usize {
         self.lines.line_of(range.start)
     }
@@ -346,6 +414,11 @@ impl Builder {
         let Some(frame) = self.stack.pop() else {
             return;
         };
+        match &frame {
+            Frame::Container { .. } | Frame::List { .. } => self.block_depth -= 1,
+            Frame::Span { .. } => self.span_depth -= 1,
+            _ => {}
+        }
         match frame {
             Frame::Leaf {
                 heading,
@@ -462,24 +535,55 @@ impl Builder {
     fn event(&mut self, event: Event<'_>, range: Range<usize>) {
         match event {
             Event::Start(tag) => {
+                if let Some(marker) = self.suppress(&tag, &range) {
+                    self.markers.push(marker);
+                    return;
+                }
+                self.markers.push(Marker::Kept);
                 // Spans directly in a tight item must open the implicit paragraph.
-                if matches!(
-                    tag,
-                    Tag::Emphasis
-                        | Tag::Strong
-                        | Tag::Strikethrough
-                        | Tag::Superscript
-                        | Tag::Subscript
-                        | Tag::Link { .. }
-                        | Tag::Image { .. }
-                ) {
+                if is_span(&tag) {
                     self.open_implicit(&range);
                 }
+                let depth = self.stack.len();
                 self.start(tag, &range);
+                if self.stack.len() > depth {
+                    match self.stack.last() {
+                        Some(Frame::Container { .. } | Frame::List { .. }) => self.block_depth += 1,
+                        Some(Frame::Span { .. }) => self.span_depth += 1,
+                        _ => {}
+                    }
+                }
             }
-            Event::End(tag) => self.end(tag),
+            Event::End(tag) => match self.markers.pop() {
+                Some(Marker::Suppressed { item }) => {
+                    if item {
+                        self.suppressed_items -= 1;
+                    }
+                }
+                _ => self.end(tag),
+            },
             Event::Text(text) => {
-                if !self.push_literal(&text) {
+                if self.push_literal(&text) {
+                    return;
+                }
+                // An escaped character starts its own event right after the
+                // backslash, and an entity's event starts at `&`. Keep such an
+                // `=` out of `==mark==` delimiter runs, as Markdig does.
+                let escaped = text.starts_with('=')
+                    && (!self.source[range.start..].starts_with('=')
+                        || self.source.as_bytes()[..range.start]
+                            .iter()
+                            .rev()
+                            .take_while(|byte| **byte == b'\\')
+                            .count()
+                            % 2
+                            == 1);
+                if escaped {
+                    self.push_inline(Inline::Escaped("=".to_owned()), &range);
+                    if text.len() > 1 {
+                        self.push_inline(Inline::Text(text[1..].to_owned()), &range);
+                    }
+                } else {
                     self.push_inline(Inline::Text(text.into_string()), &range);
                 }
             }
@@ -498,6 +602,8 @@ impl Builder {
             Event::SoftBreak => self.push_inline(Inline::SoftBreak, &range),
             Event::HardBreak => self.push_inline(Inline::HardBreak, &range),
             Event::Rule => self.push_block(Block::ThematicBreak),
+            // A suppressed item's marker must not mark its kept ancestor.
+            Event::TaskListMarker(_) if self.suppressed_items > 0 => {}
             Event::TaskListMarker(checked) => {
                 let item = self.stack.iter_mut().rev().find_map(|frame| match frame {
                     Frame::Container {

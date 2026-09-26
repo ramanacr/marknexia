@@ -2,12 +2,57 @@
 //! trees into this model so that Markdig-compatible rendering, metadata
 //! extraction, and compatibility extensions never depend on one library.
 
+use marknexia_core::contracts::{Diagnostic, DiagnosticSeverity};
+
+/// Deepest container nesting (quotes, lists, items, footnotes) an adapter
+/// builds. Deeper containers are flattened into their nearest kept ancestor so
+/// every recursive walk over the model, including `Drop`, stays within a small
+/// fixed stack budget. Markdig has no equivalent limit; see the decision doc.
+pub(crate) const MAX_BLOCK_DEPTH: usize = 32;
+
+/// Deepest inline container nesting (emphasis, links, images, marks, ...).
+/// Deeper spans keep their content but lose the span.
+pub(crate) const MAX_INLINE_DEPTH: usize = 32;
+
 /// A parsed document before Marknexia extensions and rendering run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Document {
     pub blocks: Vec<Block>,
     /// Footnote definitions keyed by their label as written.
     pub footnotes: Vec<FootnoteDefinition>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Records at most one flattening diagnostic per kind for a document.
+#[derive(Default)]
+pub(crate) struct DepthLimits {
+    block_reported: bool,
+    inline_reported: bool,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl DepthLimits {
+    pub(crate) fn block_flattened(&mut self, line: usize) {
+        if !std::mem::replace(&mut self.block_reported, true) {
+            self.diagnostics
+                .push(depth_diagnostic("block", MAX_BLOCK_DEPTH, line));
+        }
+    }
+
+    pub(crate) fn inline_flattened(&mut self, line: usize) {
+        if !std::mem::replace(&mut self.inline_reported, true) {
+            self.diagnostics
+                .push(depth_diagnostic("inline", MAX_INLINE_DEPTH, line));
+        }
+    }
+}
+
+fn depth_diagnostic(kind: &str, limit: usize, line: usize) -> Diagnostic {
+    Diagnostic {
+        severity: DiagnosticSeverity::Warning,
+        message: format!("{kind} nesting deeper than {limit} levels was flattened"),
+        source_line: Some(line),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +143,10 @@ pub(crate) enum LinkKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Inline {
     Text(String),
+    /// Backslash-escaped text: renders like `Text` but never forms or merges
+    /// into an extension delimiter run (for example `\=` next to `==`).
+    #[cfg_attr(not(feature = "candidate-pulldown"), allow(dead_code))]
+    Escaped(String),
     Code(String),
     SoftBreak,
     HardBreak,

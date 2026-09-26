@@ -4,9 +4,11 @@
 //!
 //! Candidate adapters translate third-party syntax trees into a
 //! Marknexia-owned model; `extensions` reproduces the .NET Markdig 0.40
-//! pipeline on top of it. Output is content-unsafe and unbounded: it includes
-//! unsanitized raw HTML and must never be sent to WebView before sanitization
-//! and output limits.
+//! pipeline on top of it. Output is content-unsafe: it includes unsanitized
+//! raw HTML (including parity-required mis-nested alert markup) and must never
+//! reach WebView before an HTML5-parser-based sanitizer. Nesting depth and
+//! rendered size are bounded (`MarkdownOptions`, see
+//! `compat/decisions/markdown-resource-limits.md`).
 
 mod engine;
 #[cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]

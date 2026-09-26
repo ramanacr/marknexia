@@ -9,7 +9,15 @@ Scope: feasibility plan Task 4, Steps 1, 2, and 4, for the Markdown parser only.
 **pulldown-cmark 0.13.4**, if two conditions are met before Task 8 approval:
 
 1. Add a Marknexia-owned bare-URL autolink extension. The .NET pipeline enables Markdig `UseAutoLinks`; pulldown-cmark has no GFM autolink extension.
-2. Extend the frozen corpus through the Task 1 .NET exporter with cases for bare URLs, `++inserted++`, and intraword `~sub~`/`^sup^`. The current corpus exercises none of these, so today they are unverified against the oracle.
+2. Extend the frozen corpus through the Task 1 .NET exporter. The current corpus exercises none of the following, so today they are unverified against the oracle:
+   * bare URLs
+   * `++inserted++`
+   * intraword `~sub~`/`^sup^`
+   * escaped `\==a\==` and `\=\=b\=\=`
+   * `+==+==+` (see [Hostile-input hardening](#hostile-input-hardening-review-of-d8f0767))
+   * non-ASCII grid tables `+--+--+\n|é |😀|\n+==+==+\n|a |b |\n+--+--+` and `+----+\n|😀|\n+----+`
+   * nesting deeper than 32 levels
+   * the items listed under [Known gaps](#known-gaps-and-unverified-markdig-assumptions)
 
 Reasons:
 
@@ -56,7 +64,12 @@ comrak's advantage is breadth: native bare-URL autolinks, `++ins++`, and Markdig
 
 For comparison, before this work the permissive bake-off reported 10 differing fields for comrak and 9 for pulldown. No parity allowance exists, so no library difference is being blessed.
 
-The one decision file, `compat/decisions/markdown-source-diagnostics.md`, covers an additive target-only field. That field is not part of the parity schema, and the suite asserts it is empty for all 19 cases.
+Two decision files cover target-only behavior. Neither carries a parity allowance, because neither changes any frozen field:
+
+* `compat/decisions/markdown-source-diagnostics.md`: an additive diagnostics field. It is not part of the parity schema, and the suite asserts it is empty for all 19 cases.
+* `compat/decisions/markdown-resource-limits.md`: nesting-depth flattening at 32 levels and the rendered-body size limit.
+
+The suite parses decision files strictly. It requires the exact line `Status: **proposed — requires Task 8 approval**`, and exactly one `Status:` line per file. Without a candidate feature, `cargo test -p marknexia-markdown` fails on purpose (`parity_gate_requires_a_candidate_feature`) rather than passing with no gate. CI must run `--all-features` so both candidates and their allowances are checked.
 
 ### Extension contract and divergence probe (no oracle)
 
@@ -69,13 +82,22 @@ The one decision file, `compat/decisions/markdown-source-diagnostics.md`, covers
 * Unicode and duplicate heading IDs
 * setext heading lines
 
-The ignored test `candidate_divergence_probe` renders 21 syntax probes outside the corpus. **3 of 21 diverge, and all are pulldown feature gaps:**
+The ignored test `candidate_divergence_probe` renders 26 syntax probes outside the corpus. **4 of 26 diverge.** Three are pulldown feature gaps:
 
 * bare-URL autolinks (comrak links them; pulldown leaves text)
 * `++inserted++`
 * intraword `H~2~O` / `x^2^`
 
-The other 18 render identically, including block math, entities in headings, HTML blocks, reference links, pipe-table edges, multi-paragraph footnotes, unclosed fences, hard breaks, emphasis edge cases, tabs, and setext headings.
+The fourth is `+==+==+`. The shared mark pass applies CommonMark flanking rules and gives `+<mark>+</mark>+`; comrak's native highlight renders it literally. Markdig's result is unknown, so it is a fixture request and is not being fixed toward either candidate.
+
+The other 22 render identically, including:
+
+* block math and entities in headings
+* HTML blocks and reference links
+* pipe-table edges and multi-paragraph footnotes
+* unclosed fences, hard breaks, emphasis edge cases, tabs, and setext headings
+* escaped `\=` next to `==` (fixed in pulldown after review)
+* both non-ASCII grid tables (fixed after review)
 
 ### Performance (release, `candidate_parse_render_timing`)
 
@@ -92,8 +114,12 @@ Setup:
 | comrak (Marknexia path), run 2 | 165.9 / 316.1 µs | 205.6 / 283.1 ms |
 | pulldown (Marknexia path), run 1 | 76.2 / 100.9 µs | 88.5 / 119.1 ms |
 | pulldown (Marknexia path), run 2 | 42.7 / 78.5 µs | 60.3 / 72.5 ms |
+| comrak (Marknexia path), run 3, after review fixes | 99.0 / 183.0 µs | 97.1 / 110.2 ms |
+| pulldown (Marknexia path), run 3, after review fixes | 39.7 / 73.4 µs | 56.3 / 67.4 ms |
 | comrak native `markdown_to_html` (baseline), run 1 | 70.2 / 112.1 µs | 86.3 / 106.4 ms |
+| comrak native `markdown_to_html` (baseline), run 3 | 49.3 / 85.5 µs | 57.5 / 68.7 ms |
 | pulldown native `push_html` (baseline), run 1 | 23.0 / 29.5 µs | 22.7 / 37.0 ms |
+| pulldown native `push_html` (baseline), run 3 | 11.7 / 23.0 µs | 14.3 / 17.5 ms |
 
 The shared Marknexia layer costs roughly 40–60 ms per MiB on this machine. Phase profiling showed where it goes:
 
@@ -102,6 +128,23 @@ The shared Marknexia layer costs roughly 40–60 ms per MiB on this machine. Pha
 * about 7 ms for the alert post-transform
 
 The layer is the same for both candidates. Optimizing it, for example by borrowing text from the source instead of copying it, is possible later work and does not change the ranking.
+
+### Hostile-input hardening (review of d8f0767)
+
+`tests/hostile_inputs.rs` runs every case on both candidates.
+
+| Finding | Before | Fix | After (release, 1 MiB input unless noted) |
+| --- | --- | --- | --- |
+| C1: recursive walks and `Drop` overflowed a 1 MiB stack (`STATUS_STACK_OVERFLOW`) | Crashed on `">"×2000`, nested `*a `, `==`, `![`, `~~` (10k–50k), and nested `- ` lists | Adapters cap nesting at 32 block and 32 inline levels and flatten deeper content with one warning per kind. The comrak translator flattens iteratively via `descendants()`. The pulldown builder suppresses frames through a start/end marker stack. The mark pass bounds its own nesting. See `markdown-resource-limits.md`. | 12 hostile inputs (20k-deep quotes, emphasis, strong, strikethrough, mark, images, links, `- ` and `> - ` lists, 400-level indented lists, a footnote holding deep quotes, ordered lists in quotes) pass on a 1 MiB thread in both debug and release. Caps of 128 still pass in debug; caps of 512 overflow. |
+| C2: anchor regex emulation was cubic | 32 KiB 6.6 s, 64 KiB 55 s, 128 KiB 437 s (reviewer) | Stop once no `>` remains. Skip every start that shares a failed start's first `>`. Compare keys as bytes with no per-start allocation. Search past a `>` at most once per start. Regex semantics are unchanged, and unit tests cover them. | no `>`: 5.1–5.7 ms; one shared `>`: 11–14 ms; valid anchors: 25–34 ms |
+| I1: alert transform rescanned to the end per candidate | 79 s (pulldown) / 66 s (comrak) | Stop when a required `</p>` or `</blockquote>` is absent. The output is identical: a unit test compares against the exhaustive scan. | unclosed: 6–10 ms; valid alerts (about 45× output amplification): 240–457 ms |
+| I2: pulldown turned escaped `\=` into `<mark>` | `\==a\==` → `<mark>a</mark>` | An `=` that is backslash-escaped (odd run of preceding `\`) or comes from an entity becomes `Inline::Escaped`, which never forms a delimiter run | Matches comrak on both repros |
+| I3: grid columns measured in UTF-8 bytes | `é`/`😀` grid rejected; `|😀|` in a 4-wide grid accepted | Columns are UTF-16 code units, as explained below | Both repros behave as .NET does; unit tests cover them |
+| M1: unbounded output | none | `max_rendered_body_bytes`, default 128 MiB, the .NET `MaxRenderedHtmlBytes`. Rendering, back-links, and alerts stop at the limit. | The fixture shape `# bounded output` with a 1-byte limit is rejected. Alert and footnote amplification is rejected at 64 KiB. |
+
+**Grid tables and UTF-16.** Markdig's grid-table parser slices .NET `string`/`StringSlice` values, whose positions are UTF-16 code-unit indices. Column boundaries and widths therefore count `é` as 1 unit and `😀` as 2. This is recalled from Markdig's source, not verified against its code in this environment. Separator lines are all ASCII, so their byte and unit offsets agree. Content lines are measured in units, and a column that lands inside a surrogate pair rejects the table. A non-ASCII grid fixture is requested.
+
+**Alert splicing.** Parity requires copying .NET's lazy-regex alert transform, and that transform can produce broken nesting. With a nested quote, the alert `<div>` closes at the inner `</blockquote>` and leaves a stray outer `</blockquote>`; the test `nested_quote_splice_is_parity_required_broken_nesting` pins this. Downstream code must therefore sanitize with an HTML5-parser-based sanitizer, which repairs the tree. A regex- or string-based sanitizer must never be used on this output.
 
 ### Dependencies, licenses, advisories
 
@@ -135,13 +178,34 @@ These do not affect the frozen corpus but must be closed or covered by fixtures 
 
 * **Bare-URL autolinks.** pulldown lacks them and they need an extension. comrak's GFM rules may also differ from Markdig `AutoLinks` details.
 * **`++ins++` and intraword sub/superscript.** pulldown lacks them.
-* **Markdig renderings reproduced from source knowledge, not fixtures:**
+* **Markdig renderings reproduced from source knowledge, not fixtures.** Each needs a frozen .NET case before cutover:
   * URL escaping. Only `'` → `%27` is fixture-verified.
-  * Footnote reference numbering when there are several references.
-  * Unreferenced footnotes, which are omitted.
+  * Footnotes:
+    * reference numbering when there are several references
+    * unreferenced footnotes, which are omitted
+    * footnote bodies that do not end in a paragraph, where back-links go in a new `<p>`
+    * case-insensitive, whitespace-collapsed footnote labels
   * `id=""` for blank headings.
   * Block math `$$…$$` as `<div class="math">`. Both candidates currently render it inline.
   * Heading text excluding HTML entities. Markdig `HtmlEntityInline` is not a literal. Both parsers merge entities into text.
+  * Lists:
+    * loose, tight, and nested lists; implicit-paragraph placement and `EnsureLine` newlines
+    * the ordered-list `start` attribute
+    * task-marker placement in loose items and in items whose first block is not a paragraph
+  * Block quotes with several paragraphs, and alerts that contain nested quotes. The latter produce parity-required broken nesting, described above.
+  * Hard breaks (`<br />\n`) and a lone `\r` as a line ending.
+  * Links and images:
+    * image alt text flattening (plain text, markup dropped)
+    * link and image `title` attributes
+    * angle and email autolinks excluded from `links` and from heading text
+  * Indented code blocks (no language class).
+  * Mermaid detection by the first word of the info string, case-insensitive.
+  * Tables:
+    * header-only tables and body rows with extra or missing cells
+    * grid width formatting (`Math.Round` to 2 places, `0.##`)
+  * Line numbers of setext headings and of blocks nested in containers.
+  * `==mark==` details: flanking rules, runs longer than two `=`, and precedence against other delimiters.
+  * Whitespace in the alert and anchor emulation. .NET `\s` and `Trim()` are approximated with Rust `char::is_whitespace`/`trim`. Both follow the Unicode White_Space set but may differ on rare code points.
 * **Grid tables.** Only the subset the fixtures exercise is supported: top-level, uniform columns, optional `=` header. Alignment markers, row and column spans, and nested containers stay paragraphs.
 * **Not measured:** release binary size delta and fuzzing. The allowed command set for this step had no binary build or `cargo fuzz`, so they remain for Step 6.
 
@@ -151,6 +215,7 @@ These do not affect the frozen corpus but must be closed or covered by fixtures 
 cargo test -p marknexia-markdown --all-features
 cargo test -p marknexia-markdown --features candidate-comrak
 cargo test -p marknexia-markdown --features candidate-pulldown
+cargo test --release -p marknexia-markdown --all-features --test hostile_inputs -- --nocapture
 cargo test --release -p marknexia-markdown --all-features -- --ignored candidate_parse_render_timing --nocapture
 cargo test -p marknexia-markdown --all-features -- --ignored candidate_divergence_probe --nocapture
 cargo tree -p marknexia-markdown --features candidate-pulldown -e normal

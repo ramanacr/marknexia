@@ -6,8 +6,9 @@ use crate::{
     extensions::{
         self, Frontend,
         model::{
-            Alignment, Block, Document, FootnoteDefinition, Inline, LineIndex, LinkKind, List,
-            ListItem, Paragraph, Table, TableRow,
+            Alignment, Block, DepthLimits, Document, FootnoteDefinition, Inline, LineIndex,
+            LinkKind, List, ListItem, MAX_BLOCK_DEPTH, MAX_INLINE_DEPTH, Paragraph, Table,
+            TableRow,
         },
     },
 };
@@ -17,8 +18,8 @@ use comrak::{
 };
 use marknexia_core::contracts::Diagnostic;
 
-/// Exploratory candidate. Output is content-unsafe/unbounded; never pass it to
-/// WebView without sanitization and output limits.
+/// Exploratory candidate. Output is content-unsafe; never pass it to WebView
+/// without sanitization.
 pub struct ComrakAdapter;
 
 impl MarkdownEngine for ComrakAdapter {
@@ -27,7 +28,7 @@ impl MarkdownEngine for ComrakAdapter {
         source: &str,
         options: &MarkdownOptions,
     ) -> Result<ParsedDocument, Vec<Diagnostic>> {
-        Ok(extensions::parse(self, source, options))
+        extensions::parse(self, source, options)
     }
 }
 
@@ -53,11 +54,13 @@ impl Frontend for ComrakAdapter {
             source,
             lines: LineIndex::new(source),
             footnotes: Vec::new(),
+            limits: DepthLimits::default(),
         };
-        let blocks = translator.blocks(root);
+        let blocks = translator.blocks(root, 0);
         Document {
             blocks,
             footnotes: translator.footnotes,
+            diagnostics: translator.limits.diagnostics,
         }
     }
 }
@@ -66,28 +69,74 @@ struct Translator<'s> {
     source: &'s str,
     lines: LineIndex,
     footnotes: Vec<FootnoteDefinition>,
+    limits: DepthLimits,
+}
+
+fn start_line<'a>(node: &'a AstNode<'a>) -> usize {
+    node.data.borrow().sourcepos.start.line.saturating_sub(1)
 }
 
 impl Translator<'_> {
-    fn blocks<'a>(&mut self, parent: &'a AstNode<'a>) -> Vec<Block> {
+    /// Leaf blocks, which never contain block containers.
+    fn leaf<'a>(&mut self, node: &'a AstNode<'a>) -> Option<Block> {
+        let data = node.data.borrow();
+        let line = data.sourcepos.start.line.saturating_sub(1);
+        Some(match &data.value {
+            NodeValue::Paragraph => Block::Paragraph(Paragraph {
+                line,
+                end_line: data.sourcepos.end.line.saturating_sub(1).max(line),
+                inlines: self.inlines(node, 0),
+            }),
+            NodeValue::Heading(heading) => Block::Heading {
+                level: heading.level,
+                line,
+                inlines: self.inlines(node, 0),
+            },
+            NodeValue::ThematicBreak => Block::ThematicBreak,
+            NodeValue::CodeBlock(code) => Block::Code {
+                info: code.fenced.then(|| code.info.clone()),
+                literal: code.literal.clone(),
+                line,
+            },
+            NodeValue::HtmlBlock(html) => Block::Html {
+                literal: html.literal.clone(),
+                line,
+            },
+            NodeValue::Table(table) => Block::Table(Table {
+                alignments: table
+                    .alignments
+                    .iter()
+                    .map(|alignment| match alignment {
+                        TableAlignment::None => Alignment::None,
+                        TableAlignment::Left => Alignment::Left,
+                        TableAlignment::Center => Alignment::Center,
+                        TableAlignment::Right => Alignment::Right,
+                    })
+                    .collect(),
+                widths: Vec::new(),
+                rows: node.children().map(|row| self.row(row)).collect(),
+            }),
+            _ => return None,
+        })
+    }
+
+    /// `depth` counts kept block containers above `parent`'s children. A
+    /// container that would exceed `MAX_BLOCK_DEPTH` is flattened: its leaf
+    /// blocks are lifted into `parent`.
+    fn blocks<'a>(&mut self, parent: &'a AstNode<'a>, depth: usize) -> Vec<Block> {
         let mut blocks = Vec::new();
         for node in parent.children() {
-            let data = node.data.borrow();
-            let line = data.sourcepos.start.line.saturating_sub(1);
-            let block = match &data.value {
-                NodeValue::Paragraph => Block::Paragraph(Paragraph {
-                    line,
-                    end_line: data.sourcepos.end.line.saturating_sub(1).max(line),
-                    inlines: self.inlines(node),
-                }),
-                NodeValue::Heading(heading) => Block::Heading {
-                    level: heading.level,
-                    line,
-                    inlines: self.inlines(node),
-                },
-                NodeValue::ThematicBreak => Block::ThematicBreak,
-                NodeValue::BlockQuote => Block::Quote(self.blocks(node)),
-                NodeValue::List(list) => {
+            if let Some(block) = self.leaf(node) {
+                blocks.push(block);
+                continue;
+            }
+            let value = node.data.borrow().value.clone();
+            match value {
+                NodeValue::BlockQuote if depth < MAX_BLOCK_DEPTH => {
+                    blocks.push(Block::Quote(self.blocks(node, depth + 1)));
+                }
+                // A kept list needs room for its items.
+                NodeValue::List(list) if depth + 1 < MAX_BLOCK_DEPTH => {
                     let items = node
                         .children()
                         .map(|item| {
@@ -97,97 +146,140 @@ impl Translator<'_> {
                             };
                             ListItem {
                                 task,
-                                blocks: self.blocks(item),
+                                blocks: self.blocks(item, depth + 2),
                             }
                         })
                         .collect();
-                    Block::List(List {
+                    blocks.push(Block::List(List {
                         start: (list.list_type == ListType::Ordered).then_some(list.start as u64),
                         tight: list.tight,
                         items,
-                    })
+                    }));
                 }
-                NodeValue::CodeBlock(code) => Block::Code {
-                    info: code.fenced.then(|| code.info.clone()),
-                    literal: code.literal.clone(),
-                    line,
-                },
-                NodeValue::HtmlBlock(html) => Block::Html {
-                    literal: html.literal.clone(),
-                    line,
-                },
-                NodeValue::Table(table) => Block::Table(Table {
-                    alignments: table
-                        .alignments
-                        .iter()
-                        .map(|alignment| match alignment {
-                            TableAlignment::None => Alignment::None,
-                            TableAlignment::Left => Alignment::Left,
-                            TableAlignment::Center => Alignment::Center,
-                            TableAlignment::Right => Alignment::Right,
-                        })
-                        .collect(),
-                    widths: Vec::new(),
-                    rows: node.children().map(|row| self.row(row)).collect(),
-                }),
-                NodeValue::FootnoteDefinition(definition) => {
-                    let label = definition.name.clone();
-                    let blocks = self.blocks(node);
-                    self.footnotes.push(FootnoteDefinition { label, blocks });
-                    continue;
+                NodeValue::FootnoteDefinition(definition) if depth < MAX_BLOCK_DEPTH => {
+                    let blocks = self.blocks(node, depth + 1);
+                    self.footnotes.push(FootnoteDefinition {
+                        label: definition.name,
+                        blocks,
+                    });
                 }
+                // Unenabled or container-only syntax: keep its block children.
+                NodeValue::BlockQuote | NodeValue::List(_) | NodeValue::FootnoteDefinition(_) => {
+                    self.limits.block_flattened(start_line(node));
+                    self.flatten_blocks(node, &mut blocks);
+                }
+                _ if depth < MAX_BLOCK_DEPTH => blocks.extend(self.blocks(node, depth + 1)),
                 _ => {
-                    // Unenabled or container-only syntax: keep its block children.
-                    drop(data);
-                    blocks.extend(self.blocks(node));
-                    continue;
+                    self.limits.block_flattened(start_line(node));
+                    self.flatten_blocks(node, &mut blocks);
                 }
-            };
-            blocks.push(block);
+            }
         }
         blocks
     }
 
+    /// Iteratively lifts every leaf block below `node` into `blocks`.
+    fn flatten_blocks<'a>(&mut self, node: &'a AstNode<'a>, blocks: &mut Vec<Block>) {
+        for descendant in node.descendants().skip(1) {
+            let is_leaf = matches!(
+                descendant.data.borrow().value,
+                NodeValue::Paragraph
+                    | NodeValue::Heading(_)
+                    | NodeValue::ThematicBreak
+                    | NodeValue::CodeBlock(_)
+                    | NodeValue::HtmlBlock(_)
+                    | NodeValue::Table(_)
+            );
+            if is_leaf && let Some(block) = self.leaf(descendant) {
+                blocks.push(block);
+            }
+        }
+    }
+
     fn row<'a>(&mut self, row: &'a AstNode<'a>) -> TableRow {
-        let data = row.data.borrow();
-        let line = data.sourcepos.start.line.saturating_sub(1);
+        let (header, line) = {
+            let data = row.data.borrow();
+            (
+                matches!(data.value, NodeValue::TableRow(true)),
+                data.sourcepos.start.line.saturating_sub(1),
+            )
+        };
         TableRow {
-            header: matches!(data.value, NodeValue::TableRow(true)),
+            header,
             cells: row
                 .children()
                 .map(|cell| {
                     vec![Block::Paragraph(Paragraph {
                         line,
                         end_line: line,
-                        inlines: self.inlines(cell),
+                        inlines: self.inlines(cell, 0),
                     })]
                 })
                 .collect(),
         }
     }
 
-    fn inlines<'a>(&mut self, parent: &'a AstNode<'a>) -> Vec<Inline> {
+    /// Iteratively collects the text below an inline container that is too
+    /// deep to keep.
+    fn flatten_inline<'a>(&mut self, node: &'a AstNode<'a>) -> Inline {
+        self.limits.inline_flattened(start_line(node));
+        let mut text = String::new();
+        for descendant in node.descendants().skip(1) {
+            match &descendant.data.borrow().value {
+                NodeValue::Text(value) => text.push_str(value),
+                NodeValue::Code(code) => text.push_str(&code.literal),
+                NodeValue::Math(math) => text.push_str(&math.literal),
+                NodeValue::SoftBreak | NodeValue::LineBreak => text.push('\n'),
+                _ => {}
+            }
+        }
+        Inline::Text(text)
+    }
+
+    /// `depth` counts kept inline containers above `parent`'s children.
+    fn inlines<'a>(&mut self, parent: &'a AstNode<'a>, depth: usize) -> Vec<Inline> {
         let mut inlines = Vec::new();
         for node in parent.children() {
-            let data = node.data.borrow();
-            let inline = match &data.value {
-                NodeValue::Text(text) => Inline::Text(text.to_string()),
-                NodeValue::SoftBreak => Inline::SoftBreak,
-                NodeValue::LineBreak => Inline::HardBreak,
-                NodeValue::Code(code) => Inline::Code(code.literal.clone()),
-                NodeValue::HtmlInline(html) => Inline::Html(html.clone()),
-                NodeValue::Emph => Inline::Emphasis(self.inlines(node)),
-                NodeValue::Strong => Inline::Strong(self.inlines(node)),
-                NodeValue::Strikethrough => Inline::Strikethrough(self.inlines(node)),
-                NodeValue::Highlight => Inline::Mark(self.inlines(node)),
-                NodeValue::Superscript => Inline::Superscript(self.inlines(node)),
-                NodeValue::Subscript => Inline::Subscript(self.inlines(node)),
-                NodeValue::Insert => Inline::Inserted(self.inlines(node)),
+            let (value, start) = {
+                let data = node.data.borrow();
+                let leaf = match &data.value {
+                    NodeValue::Text(text) => Some(Inline::Text(text.to_string())),
+                    NodeValue::SoftBreak => Some(Inline::SoftBreak),
+                    NodeValue::LineBreak => Some(Inline::HardBreak),
+                    NodeValue::Code(code) => Some(Inline::Code(code.literal.clone())),
+                    NodeValue::HtmlInline(html) => Some(Inline::Html(html.clone())),
+                    NodeValue::FootnoteReference(reference) => {
+                        Some(Inline::FootnoteReference(reference.name.clone()))
+                    }
+                    NodeValue::Math(math) => Some(Inline::Math(math.literal.clone())),
+                    _ => None,
+                };
+                if let Some(leaf) = leaf {
+                    inlines.push(leaf);
+                    continue;
+                }
+                (
+                    data.value.clone(),
+                    (data.sourcepos.start.line, data.sourcepos.start.column),
+                )
+            };
+            if depth >= MAX_INLINE_DEPTH {
+                inlines.push(self.flatten_inline(node));
+                continue;
+            }
+            let children = self.inlines(node, depth + 1);
+            inlines.push(match value {
+                NodeValue::Emph => Inline::Emphasis(children),
+                NodeValue::Strong => Inline::Strong(children),
+                NodeValue::Strikethrough => Inline::Strikethrough(children),
+                NodeValue::Highlight => Inline::Mark(children),
+                NodeValue::Superscript => Inline::Superscript(children),
+                NodeValue::Subscript => Inline::Subscript(children),
+                NodeValue::Insert => Inline::Inserted(children),
                 NodeValue::Link(link) => {
-                    let start = self
+                    let angle = self
                         .lines
-                        .offset(data.sourcepos.start.line, data.sourcepos.start.column);
-                    let angle = start
+                        .offset(start.0, start.1)
                         .and_then(|offset| self.source.as_bytes().get(offset))
                         .is_some_and(|byte| *byte == b'<');
                     Inline::Link {
@@ -196,27 +288,22 @@ impl Translator<'_> {
                         } else {
                             LinkKind::Standard
                         },
-                        url: link.url.clone(),
-                        title: link.title.clone(),
-                        children: self.inlines(node),
+                        url: link.url,
+                        title: link.title,
+                        children,
                     }
                 }
                 NodeValue::Image(link) => Inline::Image {
-                    url: link.url.clone(),
-                    title: link.title.clone(),
-                    children: self.inlines(node),
+                    url: link.url,
+                    title: link.title,
+                    children,
                 },
-                NodeValue::FootnoteReference(reference) => {
-                    Inline::FootnoteReference(reference.name.clone())
-                }
-                NodeValue::Math(math) => Inline::Math(math.literal.clone()),
+                // Unenabled inline containers keep their children.
                 _ => {
-                    drop(data);
-                    inlines.extend(self.inlines(node));
+                    inlines.extend(children);
                     continue;
                 }
-            };
-            inlines.push(inline);
+            });
         }
         inlines
     }

@@ -61,6 +61,7 @@ mod tests {
         let options = MarkdownOptions {
             max_diagram_count: 1,
             max_diagram_source_bytes: 4,
+            ..MarkdownOptions::default()
         };
         assert_eq!(limit_diagnostic(1, "abc\n", 7, &options), None);
         let size = limit_diagnostic(1, "abcd\n", 7, &options).unwrap();

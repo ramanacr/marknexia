@@ -4,24 +4,34 @@
 
 use crate::Anchor;
 
+/// Linear-time emulation. Two facts keep it linear while preserving the
+/// regex's leftmost, non-overlapping matches:
+///
+/// * Every match ends at a `>`, so nothing can match once no `>` remains.
+/// * All `<a` starts before the same first `>` share that `>` as the bound for
+///   the attribute key, and a key's success does not depend on the start, so
+///   if the earliest such start fails, every later start before that `>` fails.
 pub(crate) fn extract_anchors(html: &str, line_number: usize, anchors: &mut Vec<Anchor>) {
-    if html.trim().is_empty() {
+    let Some(last_gt) = html.rfind('>') else {
         return;
-    }
-    let bytes = html.as_bytes();
+    };
     let mut search = 0;
-    while let Some(relative) = find_anchor_start(&bytes[search..]) {
-        let start = search + relative;
+    let mut next_gt = 0;
+    while let Some(start) = find_anchor_start(html, search) {
         // `<a` followed by at least one whitespace character.
         let Some(body_start) = after_whitespace(html, start + 2) else {
             search = start + 1;
             continue;
         };
         // `[^>]*` cannot cross `>`, so the attribute key starts before the first `>`.
-        let prefix_end = html[body_start..]
-            .find('>')
-            .map_or(html.len(), |offset| body_start + offset);
-        match last_attribute_value(html, body_start, prefix_end) {
+        if next_gt < body_start {
+            match html[body_start..].find('>') {
+                Some(offset) => next_gt = body_start + offset,
+                None => return,
+            }
+        }
+        let prefix_end = next_gt;
+        match last_attribute_value(html, body_start, prefix_end, last_gt) {
             Some((value, end)) => {
                 anchors.push(Anchor {
                     id: value.to_owned(),
@@ -31,15 +41,24 @@ pub(crate) fn extract_anchors(html: &str, line_number: usize, anchors: &mut Vec<
                 });
                 search = end;
             }
-            None => search = start + 1,
+            None => search = prefix_end,
         }
     }
 }
 
-fn find_anchor_start(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(2)
-        .position(|pair| pair[0] == b'<' && pair[1].eq_ignore_ascii_case(&b'a'))
+/// Next `<a` or `<A` at or after `from`, found with memchr-backed `find`.
+fn find_anchor_start(html: &str, mut from: usize) -> Option<usize> {
+    let bytes = html.as_bytes();
+    loop {
+        let start = from + html.get(from..)?.find('<')?;
+        if bytes
+            .get(start + 1)
+            .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'a'))
+        {
+            return Some(start);
+        }
+        from = start + 1;
+    }
 }
 
 /// Returns the offset just after the first whitespace character at `index`.
@@ -50,24 +69,37 @@ fn after_whitespace(text: &str, index: usize) -> Option<usize> {
 
 /// The regex's greedy `[^>]*` prefix selects the right-most `name`/`id` key
 /// that yields a complete match. Returns the value and the match end.
-fn last_attribute_value(html: &str, body_start: usize, prefix_end: usize) -> Option<(&str, usize)> {
-    let lower = html[body_start..prefix_end].to_ascii_lowercase();
-    let mut positions: Vec<usize> = lower.char_indices().map(|(index, _)| index).collect();
-    positions.reverse();
-    positions.into_iter().find_map(|position| {
-        let rest = &lower[position..];
-        let key_len = if rest.starts_with("name") {
+fn last_attribute_value(
+    html: &str,
+    body_start: usize,
+    prefix_end: usize,
+    last_gt: usize,
+) -> Option<(&str, usize)> {
+    let bytes = html.as_bytes();
+    let key_at = |position: usize, key: &[u8]| {
+        bytes
+            .get(position..position + key.len())
+            .is_some_and(|window| window.eq_ignore_ascii_case(key))
+    };
+    (body_start..prefix_end).rev().find_map(|position| {
+        let key_len = if key_at(position, b"name") {
             4
-        } else if rest.starts_with("id") {
+        } else if key_at(position, b"id") {
             2
         } else {
             return None;
         };
-        attribute_value(html, body_start + position + key_len)
+        attribute_value(html, position + key_len, prefix_end, last_gt)
     })
 }
 
-fn attribute_value(html: &str, mut index: usize) -> Option<(&str, usize)> {
+/// `\s*=\s*["']([^"']+)["'][^>]*>` from `index`; returns the value and match end.
+fn attribute_value(
+    html: &str,
+    mut index: usize,
+    prefix_end: usize,
+    last_gt: usize,
+) -> Option<(&str, usize)> {
     let skip_whitespace = |mut at: usize| {
         while let Some(ch) = html[at..].chars().next().filter(|ch| ch.is_whitespace()) {
             at += ch.len_utf8();
@@ -89,8 +121,16 @@ fn attribute_value(html: &str, mut index: usize) -> Option<(&str, usize)> {
     if value_end == value_start {
         return None;
     }
-    // Closing quote, then `[^>]*>`.
-    let close = html[value_end + 1..].find('>')? + value_end + 1;
+    // Closing quote, then `[^>]*>`: the first `>` after the closing quote.
+    // Opening quotes precede `prefix_end`, so only a value that itself spans
+    // `>` needs a search, and none can succeed past the last `>`.
+    let close = if value_end < prefix_end {
+        prefix_end
+    } else if value_end < last_gt {
+        html[value_end + 1..].find('>')? + value_end + 1
+    } else {
+        return None;
+    };
     Some((&html[value_start..value_end], close + 1))
 }
 

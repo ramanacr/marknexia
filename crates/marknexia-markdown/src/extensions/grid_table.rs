@@ -68,17 +68,11 @@ fn parse_grid(
             }
             continue;
         }
-        if !columns
-            .iter()
-            .all(|column| line.as_bytes().get(*column) == Some(&b'|'))
-            || line.len() != columns[columns.len() - 1] + 1
-        {
-            return None;
-        }
+        let boundaries = column_bytes(line, &columns)?;
         let (_, cells) = current
             .get_or_insert_with(|| (first_line + offset, vec![Vec::new(); columns.len() - 1]));
-        for (cell, pair) in cells.iter_mut().zip(columns.windows(2)) {
-            cell.push(line.get(pair[0] + 1..pair[1])?.trim().to_owned());
+        for (cell, pair) in cells.iter_mut().zip(boundaries.windows(2)) {
+            cell.push(line[pair[0] + 1..pair[1]].trim().to_owned());
         }
     }
     if current.is_some() || rows.is_empty() {
@@ -104,6 +98,34 @@ fn parse_grid(
         widths,
         rows,
     })
+}
+
+/// Markdig slices .NET strings, so grid column positions are UTF-16 code-unit
+/// offsets (a supplementary character such as 😀 is two units). Separator
+/// lines are ASCII, so their byte offsets equal their unit offsets; content
+/// lines are measured in units here. Returns the byte offset of each column's
+/// `|`, or `None` unless every column has a `|` at exactly its unit offset and
+/// the line ends at the last column.
+fn column_bytes(line: &str, columns: &[usize]) -> Option<Vec<usize>> {
+    let mut boundaries = Vec::with_capacity(columns.len());
+    let mut unit = 0;
+    for (byte, ch) in line.char_indices() {
+        if let Some(&column) = columns.get(boundaries.len()) {
+            if unit > column {
+                // The column falls inside a surrogate pair.
+                return None;
+            }
+            if unit == column {
+                if ch != '|' {
+                    return None;
+                }
+                boundaries.push(byte);
+            }
+        }
+        unit += ch.len_utf16();
+    }
+    (boundaries.len() == columns.len() && unit == columns[columns.len() - 1] + 1)
+        .then_some(boundaries)
 }
 
 fn is_separator(line: &str) -> bool {
@@ -149,8 +171,43 @@ mod tests {
                 end_line: 0,
                 inlines: vec![Inline::Text(text.to_owned())],
             })],
-            footnotes: Vec::new(),
+            ..Document::default()
         }
+    }
+
+    fn cell_texts(table: &Table) -> Vec<Vec<String>> {
+        table
+            .rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| match cell.as_slice() {
+                        [Block::Paragraph(paragraph)] => match paragraph.inlines.as_slice() {
+                            [Inline::Text(text)] => text.clone(),
+                            other => panic!("{other:?}"),
+                        },
+                        other => panic!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn columns_are_utf16_code_units() {
+        // `é` is one UTF-16 unit and `😀` two, so this grid is aligned for .NET
+        // although its byte offsets differ.
+        let lines = ["+--+--+", "|é |😀|", "+==+==+", "|a |b |", "+--+--+"];
+        let table = parse_grid(&lines, 0, &cell).unwrap();
+        assert_eq!(cell_texts(&table), [["é", "😀"], ["a", "b"]]);
+        assert!(table.rows[0].header);
+        // Four units wide in .NET terms, so `|😀|` (three units) does not fit.
+        assert!(parse_grid(&["+----+", "|😀|", "+----+"], 0, &cell).is_none());
+        assert!(parse_grid(&["+---+", "|😀 |", "+---+"], 0, &cell).is_some());
+        // A column that lands inside a surrogate pair is rejected.
+        assert!(parse_grid(&["+--+-+", "|😀|a|", "+--+-+"], 0, &cell).is_some());
+        assert!(parse_grid(&["+-+--+", "|😀|a|", "+-+--+"], 0, &cell).is_none());
     }
 
     #[test]
