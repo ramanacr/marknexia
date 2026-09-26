@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use marknexia_security::{SanitizedFragment, SanitizedSvg};
+use marknexia_security::{ContentPolicy, HtmlPolicy, SanitizedFragment, SanitizedSvg};
 
 use crate::{
     broker::{BrokerDecision, BrokerRequest, ResourceBroker, TabResourceBroker},
@@ -124,18 +124,63 @@ impl HostDocument {
         fragment: SanitizedFragment,
         assets: BTreeMap<String, GeneratedAsset>,
     ) -> Result<Self, DocumentError> {
-        const PREFIX: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\"></head><body>";
+        Self::from_shell(tab_id, document_epoch, None, fragment, assets)
+    }
+
+    /// Like [`HostDocument::new`], plus a document `<title>` that names the
+    /// WebView document for assistive technology. `title` is plain text and
+    /// is entity-encoded here, so callers cannot inject head markup.
+    pub fn new_titled(
+        tab_id: u64,
+        document_epoch: u64,
+        title: &str,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        let title = HtmlPolicy::new(ContentPolicy::default())
+            .encode_text(title)
+            .map_err(|_| DocumentError::TooLarge)?;
+        Self::from_shell(tab_id, document_epoch, Some(title), fragment, assets)
+    }
+
+    fn from_shell(
+        tab_id: u64,
+        document_epoch: u64,
+        title: Option<SanitizedFragment>,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        const HEAD: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">";
+        const BODY: &str = "</head><body>";
         const SUFFIX: &str = "</body></html>";
-        let required = PREFIX
-            .len()
-            .checked_add(fragment.as_str().len())
-            .and_then(|length| length.checked_add(SUFFIX.len()))
-            .ok_or(DocumentError::TooLarge)?;
+        let title = title.as_ref().map_or("", SanitizedFragment::as_str);
+        let title_markup = if title.is_empty() {
+            0
+        } else {
+            "<title></title>".len()
+        };
+        let required = [
+            HEAD.len(),
+            title_markup,
+            title.len(),
+            BODY.len(),
+            fragment.as_str().len(),
+            SUFFIX.len(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or(DocumentError::TooLarge)?;
         if required > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::TooLarge);
         }
         let mut html = Vec::with_capacity(required);
-        html.extend_from_slice(PREFIX.as_bytes());
+        html.extend_from_slice(HEAD.as_bytes());
+        if !title.is_empty() {
+            html.extend_from_slice(b"<title>");
+            html.extend_from_slice(title.as_bytes());
+            html.extend_from_slice(b"</title>");
+        }
+        html.extend_from_slice(BODY.as_bytes());
         html.extend_from_slice(fragment.as_str().as_bytes());
         html.extend_from_slice(SUFFIX.as_bytes());
         Self::from_parts(

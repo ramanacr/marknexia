@@ -82,3 +82,18 @@ fn navigation_and_message_identity_are_bound_to_one_document() {
         Err(MessageError::WrongOrigin)
     );
 }
+
+#[test]
+fn titled_document_encodes_plain_text_title_in_head() {
+    let body = HtmlPolicy::new(ContentPolicy::default())
+        .encode_text("body")
+        .unwrap();
+    let document =
+        HostDocument::new_titled(3, 1, "</title><script>x</script>", body, BTreeMap::new())
+            .unwrap();
+    let html = String::from_utf8(document.html().to_vec()).unwrap();
+    assert!(html.contains(
+        "<title>&lt;/title&gt;&lt;script&gt;x&lt;/script&gt;</title></head><body>body</body>"
+    ));
+    assert!(!html.contains("<script>"));
+}

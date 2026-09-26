@@ -4,6 +4,7 @@
 //! Candidate output is content-unsafe and unbounded. It includes unsanitized raw
 //! HTML and must never be sent to WebView before sanitization and output limits.
 
+#[cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
 mod compatibility;
 mod engine;
 pub use engine::{Anchor, Diagram, Heading, MarkdownEngine, MarkdownOptions, ParsedDocument};

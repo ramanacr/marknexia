@@ -2,6 +2,7 @@
 
 use std::{cell::RefCell, collections::BTreeMap, ffi::c_void, path::PathBuf, rc::Rc};
 
+use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::{
     environment::StaApartment,
     host::{HostColor, ViewportBounds},
@@ -323,17 +324,22 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             };
             let mut startup_error = None;
             for (tab_id, title) in tabs {
-                // Tab titles are plain text, so they are entity-encoded. The
-                // <title> names the WebView document for UIA observers.
-                let title = encode_html_text(&title);
-                let html = format!("<!doctype html><html><head><title>{title}</title></head><body><main><h1>{title}</h1><p>Marknexia native document viewport.</p></main></body></html>").into_bytes();
-                if let Err(error) = session.add_document(HostDocument {
-                    tab_id: tab_id.get(),
-                    document_epoch: 1,
-                    html,
-                    assets: BTreeMap::new(),
-                }) {
-                    startup_error = Some(format!("WebView2 document: {error:?}"));
+                // Placeholder content until the rendering pipeline lands:
+                // plain text only, through the sealed sanitized constructor.
+                let document = HtmlPolicy::new(ContentPolicy::default())
+                    .encode_text(&format!("{title}: Marknexia native document viewport."))
+                    .map_err(|error| format!("{error}"))
+                    .and_then(|body| {
+                        HostDocument::new_titled(tab_id.get(), 1, &title, body, BTreeMap::new())
+                            .map_err(|error| format!("{error:?}"))
+                    });
+                let added = document.and_then(|document| {
+                    session
+                        .add_document(document)
+                        .map_err(|error| format!("{error:?}"))
+                });
+                if let Err(error) = added {
+                    startup_error = Some(format!("WebView2 document: {error}"));
                 }
             }
             if let Some(active) = active {
@@ -1047,21 +1053,4 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
     let mut state = state.borrow_mut();
     state.last_error = error.or_else(|| state.last_error.take());
     let _ = controls;
-}
-
-/// Entity-encodes plain text for HTML element content. This is encoding of
-/// trusted-structure text, not sanitization of markup.
-fn encode_html_text(text: &str) -> String {
-    let mut encoded = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => encoded.push_str("&amp;"),
-            '<' => encoded.push_str("&lt;"),
-            '>' => encoded.push_str("&gt;"),
-            '"' => encoded.push_str("&quot;"),
-            '\'' => encoded.push_str("&#39;"),
-            _ => encoded.push(character),
-        }
-    }
-    encoded
 }
