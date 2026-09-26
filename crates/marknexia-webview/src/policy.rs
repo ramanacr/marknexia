@@ -150,7 +150,7 @@ impl HostDocument {
         fragment: SanitizedFragment,
         assets: BTreeMap<String, GeneratedAsset>,
     ) -> Result<Self, DocumentError> {
-        const HEAD: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">";
+        const HEAD: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">";
         const BODY: &str = "</head><body>";
         const SUFFIX: &str = "</body></html>";
         let title = title.as_ref().map_or("", SanitizedFragment::as_str);

@@ -20,9 +20,10 @@ use windows::{
             Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
             Gdi::{
                 BeginPaint, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
-                COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateSolidBrush,
-                DeleteObject, DrawFocusRect, EndPaint, FillRect, GetSysColor, GetSysColorBrush,
-                HGDIOBJ, InvalidateRect, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
+                COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateSolidBrush, DT_CENTER,
+                DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint,
+                FillRect, FrameRect, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ,
+                InvalidateRect, PAINTSTRUCT, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
                 TextOutW, UpdateWindow,
             },
         },
@@ -32,20 +33,23 @@ use windows::{
             Threading::{CreateEventW, SetEvent},
         },
         UI::{
+            Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, SetWindowTheme},
             HiDpi::{
                 AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
                 GetDpiForWindow, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext,
             },
             Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT},
             WindowsAndMessaging::{
-                CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-                IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-                SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY,
-                WM_DPICHANGED, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY,
-                WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW,
-                WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW,
+                GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
+                PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+                WINDOW_STYLE, WM_APP, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+                WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
+                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -106,6 +110,9 @@ struct AppState {
     /// Tab whose controller the WebView session last made visible.
     webview_active: Option<u64>,
     readiness: Option<Readiness>,
+    /// Dark-theme brushes for standard controls and the frame background;
+    /// `None` in light and high-contrast themes (system colors apply).
+    brushes: Option<ThemeBrushes>,
     last_error: Option<String>,
     dpi: u32,
     theme: EffectiveTheme,
@@ -125,6 +132,7 @@ impl AppState {
             webview_checked_out: false,
             webview_active: None,
             readiness: None,
+            brushes: None,
             last_error: None,
             dpi: 96,
             theme: EffectiveTheme::Light,
@@ -254,7 +262,8 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             instance,
             w!("BUTTON"),
             w!("Open Markdown"),
-            child_style(0),
+            // Owner-drawn: themed push buttons ignore documented dark styles.
+            child_style(BS_OWNERDRAW as u32),
             1001,
         )?,
         tabs: create_child(hwnd, instance, TAB_CLASS_NAME, w!(""), child_style(0), 1002)?,
@@ -441,6 +450,27 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_KEYDOWN if route_native_key(hwnd, wparam.0 as u16) => LRESULT(0),
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => {
+            match themed_control_brush(hwnd, HDC(wparam.0 as *mut c_void)) {
+                Some(brush) => LRESULT(brush.0 as isize),
+                None => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+            }
+        }
+        WM_DRAWITEM => {
+            // SAFETY: for WM_DRAWITEM, lParam points to a DRAWITEMSTRUCT that
+            // is valid for the duration of this message.
+            match unsafe { (lparam.0 as *const DRAWITEMSTRUCT).as_ref() } {
+                Some(item) if draw_command_button(hwnd, item) => LRESULT(1),
+                _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+            }
+        }
+        WM_ERASEBKGND => {
+            if erase_themed_background(hwnd, HDC(wparam.0 as *mut c_void)) {
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
         WM_APPLY_WEBVIEW_SELECTION => {
             apply_automation_selection(hwnd, wparam.0 as u64);
             LRESULT(0)
@@ -962,8 +992,19 @@ fn update_theme(hwnd: HWND) {
         (state.portable.borrow().theme(), state.controls)
     };
     let theme = resolve_theme(preference, system_prefers_dark(), high_contrast());
-    state.borrow_mut().theme = theme;
+    let brushes = ThemeBrushes::for_theme(theme);
+    let previous = {
+        let mut state = state.borrow_mut();
+        state.theme = theme;
+        std::mem::replace(&mut state.brushes, brushes)
+    };
+    // Controls may still hold the old brush until they repaint below; it is
+    // deleted only after the new one is installed.
+    drop(previous);
     apply_window_theme(hwnd, theme);
+    if let Some(c) = controls {
+        apply_control_themes(c, theme);
+    }
     if let Some(mut session) = take_session(&state) {
         let _ = session.set_background(webview_color(palette(theme).background));
         restore_session(&state, session);
@@ -973,6 +1014,157 @@ fn update_theme(hwnd: HWND) {
             let _ = unsafe { InvalidateRect(Some(window), None, true) };
         }
     }
+}
+
+/// GDI brushes for dark-theme standard controls, deleted on drop.
+struct ThemeBrushes {
+    control: HBRUSH,
+    background: HBRUSH,
+    text: COLORREF,
+    control_color: COLORREF,
+}
+
+impl ThemeBrushes {
+    fn for_theme(theme: EffectiveTheme) -> Option<Self> {
+        if theme != EffectiveTheme::Dark {
+            return None;
+        }
+        let colors = palette(theme);
+        let control_color = native_color(colors.surface);
+        let background_color = native_color(colors.background);
+        let control = unsafe { CreateSolidBrush(control_color) };
+        let background = unsafe { CreateSolidBrush(background_color) };
+        if control.is_invalid() || background.is_invalid() {
+            for brush in [control, background] {
+                if !brush.is_invalid() {
+                    let _ = unsafe { DeleteObject(HGDIOBJ(brush.0)) };
+                }
+            }
+            return None;
+        }
+        Some(Self {
+            control,
+            background,
+            text: native_color(colors.text),
+            control_color,
+        })
+    }
+}
+
+impl Drop for ThemeBrushes {
+    fn drop(&mut self) {
+        for brush in [self.control, self.background] {
+            let _ = unsafe { DeleteObject(HGDIOBJ(brush.0)) };
+        }
+    }
+}
+
+/// Visual styles for standard controls: dark variants in the dark theme,
+/// the default theme otherwise (high contrast uses system colors).
+fn apply_control_themes(c: ShellControls, theme: EffectiveTheme) {
+    let dark = theme == EffectiveTheme::Dark;
+    for (window, dark_class) in [
+        (c.command, w!("DarkMode_Explorer")),
+        (c.sidebar, w!("DarkMode_Explorer")),
+        (c.find, w!("DarkMode_CFD")),
+    ] {
+        let _ = unsafe {
+            if dark {
+                SetWindowTheme(window, dark_class, PCWSTR::null())
+            } else {
+                SetWindowTheme(window, PCWSTR::null(), PCWSTR::null())
+            }
+        };
+    }
+}
+
+/// Paints the owner-drawn command button from the active palette, so light,
+/// dark, and high-contrast (system colors) themes all apply.
+fn draw_command_button(hwnd: HWND, item: &DRAWITEMSTRUCT) -> bool {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return false;
+    };
+    let (command, theme) = {
+        let Ok(state) = state.try_borrow() else {
+            return false;
+        };
+        (state.controls.map(|c| c.command), state.theme)
+    };
+    if command != Some(item.hwndItem) {
+        return false;
+    }
+    let colors = palette(theme);
+    let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
+    let (face, text) = if pressed {
+        (colors.accent_pressed, colors.on_accent)
+    } else if disabled {
+        (colors.surface, colors.text_disabled)
+    } else {
+        (colors.elevated, colors.text)
+    };
+    let dc = item.hDC;
+    let rect = item.rcItem;
+    fill(dc, &rect, native_color(face));
+    let border = unsafe { CreateSolidBrush(native_color(colors.border)) };
+    if !border.is_invalid() {
+        unsafe {
+            FrameRect(dc, &rect, border);
+            let _ = DeleteObject(HGDIOBJ(border.0));
+        }
+    }
+    let mut label = [0_u16; 128];
+    let length = unsafe { GetWindowTextW(item.hwndItem, &mut label) };
+    let length = usize::try_from(length).unwrap_or(0).min(label.len());
+    let mut text_rect = rect;
+    unsafe {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, native_color(text));
+        DrawTextW(
+            dc,
+            &mut label[..length],
+            &mut text_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+    if item.itemState.0 & ODS_FOCUS.0 != 0 {
+        let mut focus = rect;
+        focus.left += 3;
+        focus.top += 3;
+        focus.right -= 3;
+        focus.bottom -= 3;
+        let _ = unsafe { DrawFocusRect(dc, &focus) };
+    }
+    true
+}
+
+fn themed_control_brush(hwnd: HWND, dc: HDC) -> Option<HBRUSH> {
+    let state = unsafe { app_state_handle(hwnd) }?;
+    let state = state.try_borrow().ok()?;
+    let brushes = state.brushes.as_ref()?;
+    unsafe {
+        SetTextColor(dc, brushes.text);
+        SetBkColor(dc, brushes.control_color);
+    }
+    Some(brushes.control)
+}
+
+fn erase_themed_background(hwnd: HWND, dc: HDC) -> bool {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return false;
+    };
+    let Ok(state) = state.try_borrow() else {
+        return false;
+    };
+    let Some(brushes) = state.brushes.as_ref() else {
+        return false;
+    };
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return false;
+    }
+    unsafe { FillRect(dc, &client, brushes.background) };
+    true
 }
 
 fn system_prefers_dark() -> bool {
