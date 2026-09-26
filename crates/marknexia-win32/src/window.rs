@@ -39,12 +39,12 @@ use windows::{
             WindowsAndMessaging::{
                 CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-                IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW,
-                SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DPICHANGED,
-                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
-                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+                SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY,
+                WM_DPICHANGED, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY,
+                WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW,
+                WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -65,6 +65,8 @@ use crate::{
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
+/// Applies a UIA-initiated selection to the WebView outside the UIA call.
+const WM_APPLY_WEBVIEW_SELECTION: u32 = WM_APP + 1;
 const WINDOW_TITLE: PCWSTR = w!("Marknexia");
 
 #[derive(Debug)]
@@ -100,6 +102,8 @@ struct AppState {
     /// reentrant selection must not report success while the active
     /// controller cannot be switched.
     webview_checked_out: bool,
+    /// Tab whose controller the WebView session last made visible.
+    webview_active: Option<u64>,
     last_error: Option<String>,
     dpi: u32,
     theme: EffectiveTheme,
@@ -117,6 +121,7 @@ impl AppState {
             accessibility: None,
             uia_selection: None,
             webview_checked_out: false,
+            webview_active: None,
             last_error: None,
             dpi: 96,
             theme: EffectiveTheme::Light,
@@ -282,12 +287,14 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
         let _ = app.open_tab("Welcome");
         let _ = app.open_tab("Security and privacy");
     }
-    // UIA `Select` completes synchronously: it returns only after portable
-    // state, the active WebView controller, and the tab strip agree. No shell
-    // borrow spans the WebView COM call (see `select_tab_id`), so reentry from
-    // UIA on this STA is safe.
+    // UIA delivers `Select` inside an input-synchronous cross-process call,
+    // where WebView2 rejects outgoing COM (0x802A000C). Acknowledgement
+    // contract: on return, portable selection, the repainted tab strip, and
+    // UIA state agree; the WebView switch is posted and runs on the next loop
+    // turn. If that switch fails, selection reverts to the tab the WebView
+    // still shows and UIA observers get the matching events.
     let select_callback: Rc<SelectTab> =
-        Rc::new(move |tab_id: TabId| select_tab_id(hwnd, tab_id.get(), false));
+        Rc::new(move |tab_id: TabId| select_from_automation(hwnd, tab_id));
     let accessibility = NativeAccessibility::new(
         controls.tabs,
         Rc::downgrade(&portable),
@@ -342,13 +349,17 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
                     startup_error = Some(format!("WebView2 document: {error}"));
                 }
             }
-            if let Some(active) = active {
-                let _ = session.select_tab(active.get());
+            let mut shown = None;
+            if let Some(active) = active
+                && session.select_tab(active.get()).is_ok()
+            {
+                shown = Some(active.get());
             }
             match session.start() {
                 Ok(()) => {
                     let mut state = state.borrow_mut();
                     state.webview_checked_out = false;
+                    state.webview_active = shown;
                     state.webview = Some(session);
                     state.apartment = Some(apartment);
                     state.page_observer = Some(observer);
@@ -418,6 +429,10 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_KEYDOWN if route_native_key(hwnd, wparam.0 as u16) => LRESULT(0),
+        WM_APPLY_WEBVIEW_SELECTION => {
+            apply_automation_selection(hwnd, wparam.0 as u64);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             if let Some(state) = unsafe { app_state_handle(hwnd) } {
                 close_state(&state);
@@ -955,7 +970,77 @@ fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) -> bool {
             state.borrow_mut().last_error = Some(error);
             false
         }
-        None => true,
+        None => {
+            state.borrow_mut().webview_active = Some(tab_id);
+            true
+        }
+    }
+}
+
+/// UIA `Select` handler; see the acknowledgement contract in `initialize`.
+fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return false;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let already_active = portable.borrow().active_tab() == Some(id);
+    if already_active {
+        return true;
+    }
+    let selected = portable.borrow_mut().select_tab(id);
+    if !selected {
+        return false;
+    }
+    refresh_tabs(&state, Some(id));
+    let posted = unsafe {
+        PostMessageW(
+            Some(hwnd),
+            WM_APPLY_WEBVIEW_SELECTION,
+            WPARAM(id.get() as usize),
+            LPARAM(0),
+        )
+    };
+    if posted.is_err() {
+        revert_to_webview_tab(&state);
+        return false;
+    }
+    true
+}
+
+/// Runs outside any UIA call, so WebView2 COM is allowed here.
+fn apply_automation_selection(hwnd: HWND, raw_id: u64) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let active = portable.borrow().active_tab();
+    // A later selection superseded this one; it posted its own switch.
+    if active.map(TabId::get) != Some(raw_id) {
+        return;
+    }
+    if !select_webview(&state, raw_id) {
+        revert_to_webview_tab(&state);
+    }
+}
+
+/// Restores portable selection to the tab the WebView actually shows.
+fn revert_to_webview_tab(state: &Rc<RefCell<AppState>>) {
+    let (portable, shown) = {
+        let state = state.borrow();
+        (Rc::clone(&state.portable), state.webview_active)
+    };
+    let target = shown.and_then(|raw| {
+        portable
+            .borrow()
+            .tabs()
+            .tabs()
+            .iter()
+            .find(|tab| tab.id().get() == raw)
+            .map(|tab| tab.id())
+    });
+    if let Some(target) = target {
+        let _ = portable.borrow_mut().select_tab(target);
+        refresh_tabs(state, Some(target));
     }
 }
 

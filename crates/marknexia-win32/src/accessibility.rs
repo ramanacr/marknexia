@@ -258,8 +258,10 @@ pub mod native {
         lparam.0 == UiaRootObjectId as isize
     }
 
-    /// Synchronous shell selection. Returns true only after portable state,
-    /// the active WebView controller, and the painted tab strip all agree.
+    /// Shell selection for UIA. Returns true once portable state, the painted
+    /// tab strip, and provider state agree; the WebView controller follows on
+    /// the next message-loop turn (WebView2 rejects COM inside UIA's
+    /// input-synchronous call) and a failed switch reverts the selection.
     pub type SelectTab = dyn Fn(TabId) -> bool;
 
     struct TabSnapshot {
