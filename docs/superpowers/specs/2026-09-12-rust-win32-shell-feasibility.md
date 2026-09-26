@@ -54,6 +54,15 @@ available.
   - the document canvas following `color-scheme: light dark`
   Light and high-contrast themes restore the default styles and system
   colors. The high-contrast path has not been captured natively yet.
+- **Keyboard handoff.** WebView2 `AcceleratorKeyPressed` routes only the
+  shell-owned chords (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+W and F6 or Shift+F6)
+  back to the shell. They are drained after dispatch, outside COM, and F6
+  into Document calls `MoveFocus` on the active controller.
+  - The native smoke step focuses the visible WebView document through UIA,
+    confirms that the launched shell owns the foreground, and injects
+    Ctrl+Tab with `SendInput`. It then observes the other tab's document
+    becoming the only visible one. It passed on 2026-09-26.
+  - The step refuses to inject keys unless the shell owns the foreground.
 - **Startup milestones.** The shell signals the named events
   `Local\Marknexia.WebViewReady.<pid>` and `Local\Marknexia.FirstRender.<pid>`.
   `scripts/Collect-RustDesktopPerf.ps1` consumes them. The window is shown
@@ -74,14 +83,6 @@ available.
 
 ## Implemented, awaiting native verification
 
-- **Keyboard handoff.** WebView2 `AcceleratorKeyPressed` routes only the
-  shell-owned chords (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+W, F6 and Shift+F6) back
-  to the shell. They are drained after dispatch, outside COM. F6 into
-  Document calls `MoveFocus` on the active controller.
-  - The native smoke step refuses to inject keys unless the launched shell
-    owns the foreground.
-  - Its first attempt ran while the workstation was locked (`LockApp` owned
-    the foreground), so it is still unverified.
 - **Structure events.** `ChildrenInvalidated` on tab close and
   `AutomationFocusChanged` on keyboard selection are implemented but not yet
   asserted natively.
@@ -89,7 +90,6 @@ available.
 ## Not yet verified or not implemented
 
 - Native `WM_DPICHANGED` across monitors, and high-contrast capture.
-- Keyboard handoff from inside a document (see above).
 - WebView2 focus changes reflected back into portable focus state, for
   example when the user clicks into the document.
 - Document open, render and bridge flows. Placeholder documents are
