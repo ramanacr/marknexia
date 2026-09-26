@@ -419,8 +419,8 @@ fn create_response(
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }?;
     let reason = wide(response.reason);
     let headers = wide(&format!(
-        "Content-Type: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n",
-        response.content_type,
+        "Content-Type: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Security-Policy: {}\r\n",
+        response.content_type, response.content_security_policy,
     ));
     unsafe {
         environment.CreateWebResourceResponse(

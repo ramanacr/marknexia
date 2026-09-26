@@ -22,9 +22,10 @@ use windows::{
         UI::{
             Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement,
-                IUIAutomationSelectionItemPattern, TreeScope_Children, TreeScope_Descendants,
-                UIA_ControlTypePropertyId, UIA_DocumentControlTypeId, UIA_SelectionItemPatternId,
-                UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+                IUIAutomationSelectionItemPattern, IUIAutomationTextPattern, TreeScope_Children,
+                TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_DocumentControlTypeId,
+                UIA_SelectionItemPatternId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+                UIA_TextPatternId,
             },
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -227,6 +228,78 @@ fn select_and_observe(
     wait_for("the selected tab's WebView document", || {
         visible_document(automation, root).filter(|document| *document == expected)
     });
+}
+
+/// All text of a document through the UIA Text pattern.
+fn document_text(document: &IUIAutomationElement) -> Option<String> {
+    let pattern: IUIAutomationTextPattern =
+        unsafe { document.GetCurrentPattern(UIA_TextPatternId) }
+            .ok()?
+            .cast()
+            .ok()?;
+    let range = unsafe { pattern.DocumentRange() }.ok()?;
+    unsafe { range.GetText(-1) }
+        .ok()
+        .map(|text| text.to_string())
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn command_line_markdown_file_opens_as_a_named_rendered_document() {
+    let executable = std::env::var_os("MARKNEXIA_SHELL_EXE").expect("MARKNEXIA_SHELL_EXE");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test-fixtures/markdown/gfm/features.md");
+    let fixture = std::fs::canonicalize(fixture).expect("features.md fixture");
+    let source = std::fs::read_to_string(&fixture).expect("read fixture");
+    let heading = source
+        .lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .expect("fixture's first heading")
+        .trim()
+        .to_owned();
+    let launched = Instant::now();
+    let shell = ShellProcess(
+        Command::new(executable)
+            .arg(&fixture)
+            .spawn()
+            .expect("launch shell"),
+    );
+    let hwnd = wait_for("the launched shell HWND", || {
+        find_shell_window(shell.0.id())
+    });
+
+    let _apartment = Apartment::enter();
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .expect("CUIAutomation");
+    let root = unsafe { automation.ElementFromHandle(hwnd) }.expect("ElementFromHandle");
+    let tab_control = wait_for("the custom TabControl", || {
+        children(&automation, &root).into_iter().find(|element| {
+            unsafe { element.CurrentControlType() }.is_ok_and(|kind| kind == UIA_TabControlTypeId)
+        })
+    });
+    // A document path replaces the startup placeholder tabs.
+    let tabs = children(&automation, &tab_control);
+    let names: Vec<String> = tabs.iter().map(name).collect();
+    assert_eq!(names, ["features.md"], "one tab named after the file");
+
+    wait_for("the rendered document named after the file", || {
+        visible_document(&automation, &root).filter(|document| document == "features.md")
+    });
+    let document = wait_for("the visible document element", || {
+        visible_document_element(&automation, &root)
+    });
+    let text = wait_for("the rendered heading text", || {
+        document_text(&document).filter(|text| text.contains(&heading))
+    });
+    // Markdown syntax is rendered, not shown: no raw table or alert markers.
+    assert!(!text.contains("[!NOTE]"), "alert syntax must be rendered");
+    assert!(!text.contains("| :--- |"), "table syntax must be rendered");
+    eprintln!(
+        "features.md visible with heading {heading:?} after {} ms",
+        launched.elapsed().as_millis()
+    );
+    let _ = hwnd;
 }
 
 #[test]

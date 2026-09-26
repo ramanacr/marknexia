@@ -1,7 +1,16 @@
 //! Raw Win32 shell. All HWND and WebView2 COM state stays on the owning STA.
 
-use std::{cell::RefCell, collections::BTreeMap, ffi::c_void, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    ffi::c_void,
+    path::PathBuf,
+    rc::Rc,
+    sync::mpsc,
+};
 
+use marknexia_core::contracts::AppTheme;
+use marknexia_rendering::PageIdentity;
 use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::{
     environment::StaApartment,
@@ -27,7 +36,9 @@ use windows::{
                 TextOutW, UpdateWindow,
             },
         },
+        Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
         System::{
+            Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
             LibraryLoader::GetModuleHandleW,
             Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
             Threading::{CreateEventW, SetEvent},
@@ -39,13 +50,17 @@ use windows::{
                 GetDpiForWindow, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext,
             },
             Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT},
+            Shell::{
+                Common::COMDLG_FILTERSPEC, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
+                FOS_FORCEFILESYSTEM, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+            },
             WindowsAndMessaging::{
                 BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW,
                 GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
                 PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
                 SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
                 WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
                 WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY,
                 WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW,
@@ -62,6 +77,7 @@ use crate::{
         tab_slot,
     },
     app::{AppState as PortableAppState, FocusSurface},
+    documents::{self, RenderOutcome, RenderTickets},
     keyboard::{KeyChord, ShellCommand, route_key},
     layout::{PixelRect, ShellLayout, ShellLayoutRequest},
     tabs::TabId,
@@ -72,6 +88,14 @@ const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
 /// Applies a UIA-initiated selection to the WebView outside the UIA call.
 const WM_APPLY_WEBVIEW_SELECTION: u32 = WM_APP + 1;
+/// A render worker queued a result on the render channel.
+const WM_RENDER_COMPLETE: u32 = WM_APP + 2;
+/// Runs the Open dialog from the top-level loop, outside the button's
+/// WM_COMMAND notification.
+const WM_OPEN_DIALOG: u32 = WM_APP + 3;
+const COMMAND_OPEN_ID: usize = 1001;
+/// Worker stack for the recursive Markdown, math and sanitizer passes.
+const RENDER_STACK_BYTES: usize = 8 * 1024 * 1024;
 const WINDOW_TITLE: PCWSTR = w!("Marknexia");
 
 #[derive(Debug)]
@@ -117,11 +141,26 @@ struct AppState {
     dpi: u32,
     theme: EffectiveTheme,
     destroyed: bool,
+    /// Renders in flight, by tab; stale results are discarded.
+    renders: RenderTickets,
+    render_sender: mpsc::Sender<RenderOutcome>,
+    render_results: mpsc::Receiver<RenderOutcome>,
+    /// Tabs whose rendered Markdown document is in the WebView session.
+    rendered_tabs: BTreeSet<u64>,
+    /// The shell was started with document paths: `FirstRender` then means
+    /// a rendered document's navigation, not a placeholder's.
+    document_mode: bool,
 }
 
 impl AppState {
     fn new() -> Self {
+        let (render_sender, render_results) = mpsc::channel();
         Self {
+            renders: RenderTickets::new(),
+            render_sender,
+            render_results,
+            rendered_tabs: BTreeSet::new(),
+            document_mode: false,
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -149,6 +188,7 @@ struct CreatePayload {
 }
 
 pub fn run() -> Result<(), WindowError> {
+    let paths = documents::startup_paths(std::env::args_os().skip(1));
     enable_dpi().map_err(WindowError::Dpi)?;
     let module = unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(WindowError::Module)?;
     let instance = HINSTANCE(module.0);
@@ -195,7 +235,7 @@ pub fn run() -> Result<(), WindowError> {
         )
     }
     .map_err(WindowError::Create)?;
-    if let Err(error) = initialize(hwnd, instance) {
+    if let Err(error) = initialize(hwnd, instance, paths) {
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(error);
     }
@@ -255,7 +295,7 @@ fn create_child(
     .map_err(WindowError::Child)
 }
 
-fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
+fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<(), WindowError> {
     let controls = ShellControls {
         command: create_child(
             hwnd,
@@ -294,10 +334,28 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
         state.readiness = Some(Readiness::create());
         Rc::clone(&state.portable)
     };
-    {
+    // Placeholder tabs only without documents. Document renders start before
+    // the window is shown and overlap WebView2 startup.
+    let startup_documents = {
         let mut app = portable.borrow_mut();
-        let _ = app.open_tab("Welcome");
-        let _ = app.open_tab("Security and privacy");
+        if paths.is_empty() {
+            let _ = app.open_tab("Welcome");
+            let _ = app.open_tab("Security and privacy");
+            Vec::new()
+        } else {
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    app.open_tab(documents::tab_title(&path))
+                        .ok()
+                        .map(|id| (id, path))
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    state.borrow_mut().document_mode = !startup_documents.is_empty();
+    for (tab_id, path) in startup_documents {
+        start_render(hwnd, &state, tab_id.get(), path);
     }
     // UIA delivers `Select` inside an input-synchronous cross-process call,
     // where WebView2 rejects outgoing COM (0x802A000C). Acknowledgement
@@ -351,15 +409,17 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             };
             let mut startup_error = None;
             for (tab_id, title) in tabs {
-                // Placeholder content until the rendering pipeline lands:
-                // plain text only, through the sealed sanitized constructor.
-                let document = HtmlPolicy::new(ContentPolicy::default())
-                    .encode_text(&format!("{title}: Marknexia native document viewport."))
-                    .map_err(|error| format!("{error}"))
-                    .and_then(|body| {
-                        HostDocument::new_titled(tab_id.get(), 1, &title, body, BTreeMap::new())
-                            .map_err(|error| format!("{error:?}"))
-                    });
+                // Document tabs join the session when their render arrives.
+                if state.borrow().renders.is_pending(tab_id.get()) {
+                    continue;
+                }
+                // Startup placeholders without documents: plain text only,
+                // through the sealed sanitized constructor.
+                let document = text_document(
+                    tab_id.get(),
+                    &title,
+                    &format!("{title}: Marknexia native document viewport."),
+                );
                 let added = document.and_then(|document| {
                     session
                         .add_document(document)
@@ -404,19 +464,278 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
     Ok(())
 }
 
-/// Shows the most recent shell error in the status bar, or "Ready". The
-/// shell stays usable without WebView2: tabs, keyboard and UIA keep working
-/// and the status explains why documents are not displayed.
+/// A plain-text document (placeholder or error) through the sealed
+/// sanitized constructor.
+fn text_document(tab_id: u64, title: &str, text: &str) -> Result<HostDocument, String> {
+    HtmlPolicy::new(ContentPolicy::default())
+        .encode_text(text)
+        .map_err(|error| format!("{error}"))
+        .and_then(|body| {
+            HostDocument::new_titled(tab_id, 1, title, body, BTreeMap::new())
+                .map_err(|error| format!("{error:?}"))
+        })
+}
+
+/// A fresh per-document page identity from the OS RNG. `PageIdentity`
+/// rejects all-zero values; a zero draw (never expected) is retried.
+fn page_identity() -> Result<PageIdentity, String> {
+    for _ in 0..4 {
+        let mut bytes = [0_u8; 32];
+        // SAFETY: the buffer is a live local; the system-preferred RNG needs
+        // no algorithm handle and is callable from any thread.
+        unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+            .ok()
+            .map_err(|error| format!("BCryptGenRandom failed: {error}"))?;
+        let mut document_id = [0_u8; 16];
+        let mut nonce = [0_u8; 16];
+        document_id.copy_from_slice(&bytes[..16]);
+        nonce.copy_from_slice(&bytes[16..]);
+        if let Ok(identity) = PageIdentity::new(document_id, nonce) {
+            return Ok(identity);
+        }
+    }
+    Err("the OS RNG returned zero bytes".to_owned())
+}
+
+/// Reads and renders `path` on a worker thread. The worker owns only `Send`
+/// data; it never touches HWND state, `AppState` or WebView2, and wakes the
+/// UI thread with `WM_RENDER_COMPLETE` after queueing its result.
+fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: PathBuf) {
+    let (ticket, sender, theme) = {
+        let mut state = state.borrow_mut();
+        let theme = match state.portable.borrow().theme() {
+            crate::theme::ThemePreference::System => AppTheme::System,
+            crate::theme::ThemePreference::Light => AppTheme::Light,
+            crate::theme::ThemePreference::Dark => AppTheme::Dark,
+        };
+        (
+            state.renders.begin(tab_id),
+            state.render_sender.clone(),
+            theme,
+        )
+    };
+    let window = hwnd.0 as isize;
+    let spawned = std::thread::Builder::new()
+        .name("marknexia-render".to_owned())
+        .stack_size(RENDER_STACK_BYTES)
+        .spawn(move || {
+            let result = page_identity()
+                .map_err(documents::OpenError::Identity)
+                .and_then(|identity| {
+                    documents::render_file(&path, identity, theme)
+                        .map(|rendered| (rendered, identity))
+                });
+            let outcome = RenderOutcome {
+                tab_id,
+                ticket,
+                result,
+            };
+            if sender.send(outcome).is_ok() {
+                // SAFETY: PostMessageW may target a window of another thread;
+                // a destroyed window only makes the post fail.
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(HWND(window as *mut c_void)),
+                        WM_RENDER_COMPLETE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            }
+        });
+    if let Err(error) = spawned {
+        let mut state = state.borrow_mut();
+        state.renders.cancel(tab_id);
+        state.last_error = Some(format!("Could not start rendering: {error}"));
+    }
+}
+
+/// Applies queued render results on the UI thread: results for closed tabs
+/// are dropped, others become WebView documents.
+fn apply_render_results(hwnd: HWND) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    if state.borrow().webview_checked_out {
+        // An outer call holds the WebView session; retry on a later turn.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_RENDER_COMPLETE, WPARAM(0), LPARAM(0)) };
+        return;
+    }
+    let outcomes: Vec<RenderOutcome> = state.borrow().render_results.try_iter().collect();
+    for outcome in outcomes {
+        apply_render_outcome(&state, outcome);
+    }
+    refresh_status(&state);
+}
+
+fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
+    let RenderOutcome {
+        tab_id,
+        ticket,
+        result,
+    } = outcome;
+    let portable = Rc::clone(&state.borrow().portable);
+    let title = portable
+        .borrow()
+        .tabs()
+        .tabs()
+        .iter()
+        .find(|tab| tab.id().get() == tab_id)
+        .map(|tab| tab.title().to_owned());
+    let accepted = state.borrow_mut().renders.complete(tab_id, ticket);
+    let (Some(title), true) = (title, accepted) else {
+        // The tab closed (or re-rendered) while this render was in flight.
+        return;
+    };
+    let rendered = result.is_ok();
+    let document = match result {
+        Ok((rendered, identity)) => {
+            HostDocument::from_rendered(tab_id, 1, &title, &rendered, &identity)
+                .map_err(|error| format!("Could not display {title}: {error:?}"))
+        }
+        Err(error) => Err(format!("Could not open {title}: {error}")),
+    };
+    let document = document.or_else(|message| {
+        state.borrow_mut().last_error = Some(message.clone());
+        text_document(tab_id, &title, &message)
+    });
+    let Some(mut session) = take_session(state) else {
+        return;
+    };
+    let added = document.and_then(|document| {
+        session
+            .add_document(document)
+            .map_err(|error| format!("WebView2 document: {error:?}"))
+    });
+    restore_session(state, session);
+    match added {
+        Ok(()) if rendered => {
+            state.borrow_mut().rendered_tabs.insert(tab_id);
+        }
+        Ok(()) => {}
+        Err(error) => state.borrow_mut().last_error = Some(error),
+    }
+    let active = portable.borrow().active_tab().map(TabId::get);
+    if active == Some(tab_id) {
+        let _ = select_webview(state, tab_id);
+    }
+}
+
+fn open_from_dialog(hwnd: HWND) {
+    // No AppState borrow is held: the dialog runs a nested modal loop.
+    match show_open_dialog(hwnd) {
+        Ok(paths) => {
+            for path in paths {
+                open_document(hwnd, path);
+            }
+        }
+        Err(error) => {
+            if let Some(state) = unsafe { app_state_handle(hwnd) } {
+                state.borrow_mut().last_error = Some(format!("Open dialog failed: {error}"));
+                refresh_status(&state);
+            }
+        }
+    }
+}
+
+/// Opens `path` in a new active tab and starts rendering it.
+fn open_document(hwnd: HWND, path: PathBuf) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let opened = portable.borrow_mut().open_tab(documents::tab_title(&path));
+    let Ok(tab_id) = opened else {
+        state.borrow_mut().last_error = Some("No more tabs can be opened.".to_owned());
+        refresh_status(&state);
+        return;
+    };
+    start_render(hwnd, &state, tab_id.get(), path);
+    // The new tab has no document yet: hide the previous controller.
+    let _ = select_webview(&state, tab_id.get());
+    let a11y = state.borrow().accessibility.clone();
+    if let Some(a11y) = a11y {
+        a11y.notify_children_changed();
+    }
+    refresh_tabs(&state, Some(tab_id));
+}
+
+/// The common Open dialog for Markdown and text files. Cancel returns no
+/// paths.
+fn show_open_dialog(owner: HWND) -> Result<Vec<PathBuf>, Error> {
+    const CANCELLED: i32 = 0x8007_04C7_u32 as i32;
+    // SAFETY: COM is initialized on this STA (the WebView apartment); every
+    // interface is released on drop and every returned string is freed.
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        let filters = [
+            COMDLG_FILTERSPEC {
+                pszName: w!("Markdown and text (*.md; *.markdown; *.txt)"),
+                pszSpec: w!("*.md;*.markdown;*.txt"),
+            },
+            COMDLG_FILTERSPEC {
+                pszName: w!("Markdown (*.md; *.markdown)"),
+                pszSpec: w!("*.md;*.markdown"),
+            },
+            COMDLG_FILTERSPEC {
+                pszName: w!("Text (*.txt)"),
+                pszSpec: w!("*.txt"),
+            },
+        ];
+        dialog.SetFileTypes(&filters)?;
+        dialog.SetFileTypeIndex(1)?;
+        let options = dialog.GetOptions()?;
+        dialog
+            .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT)?;
+        if let Err(error) = dialog.Show(Some(owner)) {
+            return if error.code().0 == CANCELLED {
+                Ok(Vec::new())
+            } else {
+                Err(error)
+            };
+        }
+        let items = dialog.GetResults()?;
+        let mut paths = Vec::new();
+        for index in 0..items.GetCount()? {
+            let name = items.GetItemAt(index)?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let text = name.to_string();
+            CoTaskMemFree(Some(name.0 as *const c_void));
+            if let Ok(text) = text {
+                paths.push(PathBuf::from(text));
+            }
+        }
+        Ok(paths)
+    }
+}
+
+/// Shows the most recent shell error in the status bar, "Rendering…" while
+/// the active tab's render is pending, or "Ready". The shell stays usable
+/// without WebView2: tabs, keyboard and UIA keep working and the status
+/// explains why documents are not displayed.
 fn refresh_status(state: &Rc<RefCell<AppState>>) {
     let (status, text) = {
         let state = state.borrow();
-        let text = match state.last_error.as_deref() {
-            None => "Ready".to_owned(),
-            Some(error) if error.starts_with("WebView2 unavailable") => {
+        let pending = {
+            let app = state.portable.borrow();
+            app.active_tab()
+                .filter(|tab| state.renders.is_pending(tab.get()))
+                .and_then(|tab| {
+                    app.tabs()
+                        .tabs()
+                        .iter()
+                        .find(|candidate| candidate.id() == tab)
+                        .map(|candidate| candidate.title().to_owned())
+                })
+        };
+        let text = match (state.last_error.as_deref(), pending) {
+            (None, Some(title)) => format!("Rendering {title}\u{2026}"),
+            (None, None) => "Ready".to_owned(),
+            (Some(error), _) if error.starts_with("WebView2 unavailable") => {
                 "Microsoft Edge WebView2 Runtime is not available; documents cannot be displayed."
                     .to_owned()
             }
-            Some(error) => error.to_owned(),
+            (Some(error), _) => error.to_owned(),
         };
         (state.controls.map(|c| c.status), text)
     };
@@ -496,6 +815,19 @@ unsafe extern "system" fn window_proc(
         }
         WM_APPLY_WEBVIEW_SELECTION => {
             apply_automation_selection(hwnd, wparam.0 as u64);
+            LRESULT(0)
+        }
+        // BN_CLICKED (notification code 0) from the Open Markdown button.
+        WM_COMMAND if wparam.0 & 0xffff == COMMAND_OPEN_ID && (wparam.0 >> 16) & 0xffff == 0 => {
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_OPEN_DIALOG, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        WM_OPEN_DIALOG => {
+            open_from_dialog(hwnd);
+            LRESULT(0)
+        }
+        WM_RENDER_COMPLETE => {
+            apply_render_results(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -684,12 +1016,21 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
             return false;
         };
         if let Some(mut session) = take_session(&state) {
-            let result = session.remove_document(active.get());
+            // A tab whose render is still pending has no document yet.
+            let result = if session.has_document(active.get()) {
+                session.remove_document(active.get())
+            } else {
+                Ok(())
+            };
             restore_session(&state, session);
             if result.is_err() {
                 return false;
             }
         }
+        // Any in-flight render for the closed tab is now stale.
+        let mut state = state.borrow_mut();
+        state.renders.cancel(active.get());
+        state.rendered_tabs.remove(&active.get());
     }
     let previous = portable.borrow().active_tab();
     let applied = portable.borrow_mut().apply_command(command);
@@ -853,6 +1194,7 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     if let (Some(a11y), Some(id)) = (a11y.as_ref(), newly_selected) {
         a11y.notify_selected(id);
     }
+    refresh_status(state);
 }
 
 fn poll_webview(hwnd: HWND) {
@@ -866,10 +1208,28 @@ fn poll_webview(hwnd: HWND) {
         .poll()
         .err()
         .map(|error| format!("WebView2 poll: {error:?}"));
-    let active = state.borrow().webview_active;
-    let (controller_ready, document_loaded) = active
+    let (active, document_mode, rendered_tabs) = {
+        let state = state.borrow();
+        (
+            state.webview_active,
+            state.document_mode,
+            state.rendered_tabs.iter().copied().collect::<Vec<_>>(),
+        )
+    };
+    let (controller_ready, active_loaded) = active
         .and_then(|tab| session.host(tab))
         .map_or((false, false), |host| (true, host.document_loaded()));
+    // With document paths, first render means the first rendered Markdown
+    // document finished navigating, whichever tab it is in.
+    let document_loaded = if document_mode {
+        rendered_tabs.iter().any(|tab| {
+            session
+                .host(*tab)
+                .is_some_and(|host| host.document_loaded())
+        })
+    } else {
+        active_loaded
+    };
     let accelerators = session.drain_accelerators();
     restore_session(&state, session);
     // Shell chords pressed inside the document run here, outside COM.
@@ -1286,8 +1646,14 @@ fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) -> bool {
     let Some(mut session) = take_session(state) else {
         return true;
     };
-    let error = session
-        .select_tab(tab_id)
+    // A tab whose render is pending has no controller: show none.
+    let has_document = session.has_document(tab_id);
+    let result = if has_document {
+        session.select_tab(tab_id)
+    } else {
+        session.clear_selection()
+    };
+    let error = result
         .err()
         .map(|error| format!("WebView2 select: {error:?}"));
     restore_session(state, session);
@@ -1297,7 +1663,7 @@ fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) -> bool {
             false
         }
         None => {
-            state.borrow_mut().webview_active = Some(tab_id);
+            state.borrow_mut().webview_active = has_document.then_some(tab_id);
             true
         }
     }

@@ -65,9 +65,95 @@ available.
   - The step refuses to inject keys unless the shell owns the foreground.
 - **Startup milestones.** The shell signals the named events
   `Local\Marknexia.WebViewReady.<pid>` and `Local\Marknexia.FirstRender.<pid>`.
-  `scripts/Collect-RustDesktopPerf.ps1` consumes them. The window is shown
+  `scripts/Collect-RustDesktopPerf.ps1` consumes them for the empty-shell,
+  small-document and large-document scenarios. The window is shown
   before WebView2 startup begins. The trial numbers so far came from a heavily
   loaded machine and are not evidence.
+
+## Documents: open, render and host (native-tested on x64, 2026-09-27)
+
+- **Opening.** `marknexia-win32.exe <file.md> [...]` opens each path in its
+  own tab titled with the file name; the placeholder tabs appear only when no
+  path is given. The "Open Markdown" button runs `IFileOpenDialog`
+  (multi-select; `*.md;*.markdown;*.txt`, Markdown and Text filters) from a
+  posted message, with no `AppState` borrow across its modal loop. Reads
+  follow .NET `FileService`: the file length goes through the renderer's
+  `check_source_size` (50 MiB) before reading, `BoundedReader` bounds the read
+  by the same limit, and bytes decode like `DecodeBytes` (UTF-8 BOM stripped,
+  UTF-16 LE/BE BOMs, the .NET UTF-32 quirks, strict UTF-8, Latin-1 fallback).
+- **Off-thread rendering.** A worker thread (8 MiB stack) draws a
+  `PageIdentity` from `BCryptGenRandom` (system-preferred RNG, all-zero draws
+  rejected), reads and renders, sends the `Send` result on a channel and
+  posts `WM_APP+2`. The UI thread drains the channel, builds the
+  `HostDocument` and adds it to the session; the worker never touches HWND
+  state, `AppState` or WebView2. A per-tab ticket makes results stale when
+  the tab closes (or re-renders) first, so an in-flight render is discarded.
+  While pending the tab has no controller (`WebViewSession::clear_selection`
+  hides all) and the status bar reads "Rendering <name>…". A failed read or
+  render shows a plain-text error document and the error in the status bar.
+- **Sealed hosting.** `HostDocument::from_rendered(tab, epoch, title,
+  &RenderedDocument, &PageIdentity)` hosts the rendering crate's own page
+  (`page_html()`): the .NET template with its inline bundled CSS and
+  nonce'd inline bridge script around the `SanitizedFragment` body. Only
+  `marknexia-rendering` can construct a `RenderedDocument`, so no raw HTML
+  constructor is reopened; the host adds one entity-encoded `<title>` line
+  at a fixed offset in the trusted template head. Fields stay private and
+  the page bytes are shared immutably (`Arc<[u8]>`).
+  - The document is served through the existing broker from the page
+    identity's own origin (`https://document-<id>.marknexia.viewer/document`),
+    so `<base href>`, `base-uri` and `img-src` name the serving origin.
+  - The document response's `Content-Security-Policy` header is the page's
+    meta policy, rebuilt from the identity (nonce and origin) and checked
+    against the page head; a page rendered for another identity, or a
+    template change, fails closed with `IdentityMismatch`. Other responses
+    keep the default `'self'`-only header policy.
+  - No separate CSS/JS assets are served: the rendering template inlines
+    them under its nonce CSP. A header of `style-src 'self'; script-src
+    'self'` would have blocked exactly those inline elements. The Mermaid
+    runtime reference (`https://marknexia.assets/mermaid.min.js`) and every
+    local image are denied by the broker, so diagrams show their source
+    text and images show the bridge's "Image unavailable" fallback.
+  - Bridge: `bridge.js` posts untyped `{type, href}` / `{type, text}` objects
+    without protocol, tab or epoch, which the strict page-to-host protocol
+    rejects (`InvalidPayload`, tested). The bridge is therefore limited to
+    in-page behaviour: link clicks are cancelled and do nothing, copy does
+    nothing, in-page anchor links do not scroll; diagram zoom and source
+    toggles stay page-local (not exercised natively). Navigation stays
+    pinned to the document URI.
+- **Readiness.** With document paths, `FirstRender` fires when the first
+  rendered Markdown document's navigation completes (placeholders and error
+  documents never count); `WebViewReady` still means the active tab's
+  controller exists.
+- **Native UIA.** The ignored test
+  `command_line_markdown_file_opens_as_a_named_rendered_document` launches
+  the release shell with `test-fixtures/markdown/gfm/features.md` and asserts
+  one tab named `features.md`, a single visible document named `features.md`
+  whose Text-pattern content contains "GFM Full Features Test" and no raw
+  alert or table syntax. It passed in 2 of 2 runs.
+- **Capture.** A PrintWindow capture (system dark theme) shows the heading,
+  the styled table, task-list checkboxes, the five alerts with icons,
+  footnotes, the highlighted C# block, math superscripts and the Mermaid
+  frame with its source text. Two rendering-asset observations, identical in
+  the .NET CSS: task-list items keep their list bullets, and the Mermaid zoom
+  badge (`.marknexia-diagram-zoom-status`, `position: absolute`) is placed
+  against the page because `.marknexia-mermaid` is not positioned.
+- **Startup samples (loaded machine, not evidence).** `small-document`, 5 cold
+  and 5 warm runs: first render median 3235 ms cold and 3452 ms warm
+  (first render lands about 0.6 s after `WebViewReady`); host private bytes
+  about 7.2 MB; WebView2 working set about 360 MB. `empty-shell` on the same
+  machine: first render 3.5–4.3 s. Shell-visible times of 1.2–4.5 s show the
+  machine load.
+- **Blocked: large-document.** The generated fixture (features.md plus LF,
+  2000 times; 1,864,000 bytes) renders to a body over the sanitizer's
+  4 MiB HTML input budget (`PolicyLimits::default().max_html_input_bytes`,
+  REND-1), so the shell shows "sanitizer rejected the document: HTML input
+  exceeds the 4194304-byte policy limit" and `FirstRender` never fires. The
+  collector generates, hashes and passes the file correctly; collection
+  needs a security/rendering budget change.
+- **Not run natively this session:** the Open dialog (the workstation locked
+  during the session), and the keyboard-handoff step of the two-tab smoke:
+  the foreground belonged to `LockApp`, so its foreground guard refused
+  `SendInput`.
 
 ## Compiled and headless-tested
 
@@ -78,6 +164,15 @@ available.
   44-DIP targets at 96, 144 and 192 DPI; theme resolution; the `tab_slot`
   geometry shared by paint, hit testing and UIA bounds; and the shell
   accelerator filter.
+- Document tests: path-argument parsing, .NET-compatible decoding, the
+  size pre-check and bounded read, stale-render discard
+  (`tests/documents.rs`); rendered hosting, identity and CSP binding, and
+  bridge-message rejection (`marknexia-webview/tests/rendered_document.rs`);
+  collector fixture generation and digests without launching the shell
+  (`tests/perf/collect_rust_desktop_perf.tests.ps1`).
+- `cargo deny check` fails only on licenses reached through the optional
+  `candidate-comrak` feature (comrak `BSD-2-Clause`, finl_unicode
+  `Unicode-DFS-2016`), which predates this work; `deny.toml` is unchanged.
 - Release builds pass for `x86_64` (483–488 KB) and `aarch64`
   (440 KB, compile-only).
 
@@ -92,10 +187,9 @@ available.
 - Native `WM_DPICHANGED` across monitors, and high-contrast capture.
 - WebView2 focus changes reflected back into portable focus state, for
   example when the user clicks into the document.
-- Document open, render and bridge flows. Placeholder documents are
-  plain-text only, going through `HtmlPolicy::encode_text` and
-  `HostDocument::new_titled`.
-- Drag and drop, dialogs, association activation, and the repository
-  sidebar contents.
+- Page-to-host bridge actions (links, copy), the Mermaid runtime and local
+  images; the large-document scenario (sanitizer budget).
+- Drag and drop, association activation, and the repository sidebar
+  contents (so `repository-scan` stays uncollectable).
 - ARM64 runtime on real hardware, and all release gates: packaging, size,
   performance on a quiet machine, and parity.

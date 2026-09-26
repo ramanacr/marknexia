@@ -46,6 +46,12 @@ impl TabResourceBroker {
         }
     }
 
+    /// A broker for a document served from its own virtual origin (a rendered
+    /// page's identity origin). `origin` is trusted host-generated text.
+    pub(crate) fn with_origin(tab_id: u64, origin: String) -> Self {
+        Self { tab_id, origin }
+    }
+
     #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin

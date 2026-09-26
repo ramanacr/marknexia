@@ -172,6 +172,26 @@ impl WebViewSession {
         Ok(())
     }
 
+    /// Hide every controller: the shell's active tab has no document yet (a
+    /// render is pending). A later `select_tab` shows a controller again.
+    pub fn clear_selection(&mut self) -> Result<(), SessionError> {
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
+        }
+        if self.browser_recovering {
+            return Err(SessionError::Recovering);
+        }
+        self.recovery.set_active_tab(None);
+        self.visibility_pending = true;
+        self.apply_selected_visibility()?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has_document(&self, tab_id: u64) -> bool {
+        self.documents.contains_key(&tab_id)
+    }
+
     /// Apply shell-owned client bounds to every live controller and remember
     /// them for controllers that complete asynchronously after a DPI/layout
     /// change.

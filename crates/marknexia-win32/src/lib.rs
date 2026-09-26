@@ -2,6 +2,7 @@
 
 pub mod accessibility;
 pub mod app;
+pub mod documents;
 pub mod keyboard;
 pub mod layout;
 pub mod tabs;

@@ -16,6 +16,14 @@ Warm runs share one profile that is primed by a discarded run. Neither phase
 flushes the OS file cache, so "cold" is a profile-cold approximation; the
 output records that definition.
 
+Scenarios: empty-shell starts with no document. small-document passes the
+pinned fixture as the command-line argument; large-document generates its
+file in %TEMP% exactly as the scenario describes, hashes it, and passes that.
+FirstRender then means the opened document's navigation completed. The
+provenance fixtureDigest is the SHA-256 of the file actually opened, and it
+must equal the artifact measurement's fixtureDigest. repository-scan is not
+collectable yet (no repository sidebar).
+
 The output is a samples file for Measure-RustDesktopPerf.ps1, bound to the
 supplied artifact measurement (commit, hardware, OS, native artifact SHA-256).
 #>
@@ -32,14 +40,59 @@ param(
 $ErrorActionPreference = 'Stop'
 $artifact = Get-Content -LiteralPath $ArtifactMeasurementPath -Raw | ConvertFrom-Json -AsHashtable
 $scenarioData = Get-Content -LiteralPath $Scenario -Raw | ConvertFrom-Json -AsHashtable
-if ($scenarioData.id -ne 'empty-shell') {
-    throw "Scenario '$($scenarioData.id)' needs document opening, which the shell does not implement yet; only empty-shell is collectable."
-}
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $exe = [IO.Path]::GetFullPath((Join-Path $ArtifactsRoot $artifact.nativeArtifact.path))
 $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
 $record = @($artifact.artifacts.files | Where-Object { $_.path -ceq $artifact.nativeArtifact.path })
 if ($record.Count -ne 1 -or $record[0].sha256 -cne $exeHash) {
     throw 'Native artifact on disk does not match the artifact measurement record.'
+}
+
+function Get-Sha256Hex([string]$Path) {
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+# The document the shell opens on its command line, and the digest of exactly
+# those bytes. empty-shell opens nothing and keeps the artifact's digest.
+$documentPath = $null
+$generatedDocument = $null
+switch ($scenarioData.id) {
+    'empty-shell' { $fixtureDigest = $artifact.fixtureDigest }
+    'small-document' {
+        $documentPath = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $scenarioData.fixture))
+        if (-not (Test-Path -LiteralPath $documentPath -PathType Leaf)) { throw "Scenario fixture not found: $documentPath" }
+        $fixtureDigest = Get-Sha256Hex $documentPath
+    }
+    'large-document' {
+        $fixture = $scenarioData.fixture
+        $source = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $fixture.source))
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Scenario fixture source not found: $source" }
+        $repeat = [int]$fixture.repeat
+        if ($repeat -lt 1) { throw 'large-document fixture.repeat must be positive.' }
+        # "Concatenate the UTF-8 source with one newline separator per repeat":
+        # each repeat is the source bytes followed by one LF, written byte for
+        # byte (no BOM, no newline translation).
+        $sourceBytes = [IO.File]::ReadAllBytes($source)
+        $unit = [byte[]]::new($sourceBytes.Length + 1)
+        [Array]::Copy($sourceBytes, $unit, $sourceBytes.Length)
+        $unit[$sourceBytes.Length] = 0x0A
+        $generatedDocument = Join-Path ([IO.Path]::GetTempPath()) "marknexia-perf-large-document-$([Guid]::NewGuid().ToString('N')).md"
+        $stream = [IO.File]::Open($generatedDocument, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        try { foreach ($index in 1..$repeat) { $stream.Write($unit, 0, $unit.Length) } }
+        finally { $stream.Dispose() }
+        $documentPath = $generatedDocument
+        # Hash the generated file before any capture run.
+        $fixtureDigest = Get-Sha256Hex $documentPath
+        Write-Host "Generated large-document fixture ($((Get-Item -LiteralPath $documentPath).Length) bytes, sha256 $fixtureDigest): $documentPath"
+    }
+    'repository-scan' {
+        throw "Scenario 'repository-scan' needs a repository sidebar scan, which the Rust shell does not implement yet; collect empty-shell, small-document or large-document."
+    }
+    default { throw "Unknown scenario '$($scenarioData.id)'." }
+}
+if ($fixtureDigest -cne $artifact.fixtureDigest) {
+    if ($generatedDocument) { Remove-Item -LiteralPath $generatedDocument -Force -ErrorAction SilentlyContinue }
+    throw "Artifact measurement fixtureDigest '$($artifact.fixtureDigest)' does not match the '$($scenarioData.id)' fixture digest '$fixtureDigest'; record the artifact measurement with -FixtureDigest $fixtureDigest."
 }
 
 Add-Type -TypeDefinition @'
@@ -93,7 +146,12 @@ function Test-EventSignaled([string]$Name) {
 function Invoke-Run([string]$UserData) {
     $env:MARKNEXIA_WEBVIEW2_USER_DATA = $UserData
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $process = Start-Process -FilePath $exe -PassThru
+    $process = if ($documentPath) {
+        Start-Process -FilePath $exe -ArgumentList "`"$documentPath`"" -PassThru
+    }
+    else {
+        Start-Process -FilePath $exe -PassThru
+    }
     $sample = [ordered]@{}
     $window = [IntPtr]::Zero
     try {
@@ -153,6 +211,7 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $profileRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($generatedDocument) { Remove-Item -LiteralPath $generatedDocument -Force -ErrorAction SilentlyContinue }
 }
 
 $samples = [ordered]@{
@@ -162,7 +221,7 @@ $samples = [ordered]@{
     webViewResidency = 'separate-process'
     provenance = [ordered]@{
         commit = $artifact.commit
-        fixtureDigest = $artifact.fixtureDigest
+        fixtureDigest = $fixtureDigest
         scenario = [ordered]@{
             id = $scenarioData.id
             sha256 = (Get-FileHash -LiteralPath $Scenario -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -348,6 +348,7 @@ name = "marknexia-webview"
 version = "0.1.0"
 dependencies = [
  "marknexia-core",
+ "marknexia-rendering",
  "marknexia-security",
  "percent-encoding",
  "serde",
@@ -362,6 +363,8 @@ name = "marknexia-win32"
 version = "0.1.0"
 dependencies = [
  "marknexia-core",
+ "marknexia-files",
+ "marknexia-rendering",
  "marknexia-security",
  "marknexia-webview",
  "windows",
