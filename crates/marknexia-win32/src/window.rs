@@ -678,7 +678,13 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
             let state = state.borrow();
             (state.controls, portable.borrow().focused_surface())
         };
-        if let Some(controls) = controls {
+        if focus == FocusSurface::Document {
+            // Logical Document focus lives inside the active WebView.
+            let moved = focus_document(&state);
+            if !moved && let Some(controls) = controls {
+                let _ = unsafe { SetFocus(Some(controls.tabs)) };
+            }
+        } else if let Some(controls) = controls {
             let target = focus_target(controls, focus);
             let _ = unsafe { SetFocus(Some(target)) };
         }
@@ -712,6 +718,19 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
     }
     refresh_tabs(&state, active.filter(|id| Some(*id) != previous));
     true
+}
+
+/// Moves keyboard focus into the active document's WebView controller.
+fn focus_document(state: &Rc<RefCell<AppState>>) -> bool {
+    let active = state.borrow().webview_active;
+    let Some(session) = take_session(state) else {
+        return false;
+    };
+    let moved = active
+        .and_then(|tab| session.host(tab))
+        .is_some_and(|host| host.move_focus().is_ok());
+    restore_session(state, session);
+    moved
 }
 
 fn focus_target(c: ShellControls, focus: FocusSurface) -> HWND {
@@ -828,7 +847,19 @@ fn poll_webview(hwnd: HWND) {
     let (controller_ready, document_loaded) = active
         .and_then(|tab| session.host(tab))
         .map_or((false, false), |host| (true, host.document_loaded()));
+    let accelerators = session.drain_accelerators();
     restore_session(&state, session);
+    // Shell chords pressed inside the document run here, outside COM.
+    for chord in accelerators {
+        if let Some(command) = route_key(KeyChord::new(
+            chord.virtual_key,
+            chord.ctrl,
+            chord.shift,
+            false,
+        )) {
+            let _ = execute_command(hwnd, command);
+        }
+    }
     if let Some(error) = error {
         state.borrow_mut().last_error = Some(error);
     }

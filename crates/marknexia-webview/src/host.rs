@@ -8,9 +8,11 @@ use std::{
 };
 
 use webview2_com::{
+    AcceleratorKeyPressedEventHandler,
     Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_COLOR, COREWEBVIEW2_PROCESS_FAILED_KIND,
-        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+        COREWEBVIEW2_COLOR, COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+        COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
         COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
         COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, ICoreWebView2,
         ICoreWebView2Controller, ICoreWebView2Controller2,
@@ -18,7 +20,12 @@ use webview2_com::{
     ProcessFailedEventHandler,
 };
 use windows::{
-    Win32::Foundation::RECT,
+    Win32::{
+        Foundation::RECT,
+        UI::Input::KeyboardAndMouse::{
+            GetKeyState, VK_CONTROL, VK_F6, VK_MENU, VK_SHIFT, VK_TAB, VK_W,
+        },
+    },
     core::{BOOL, Interface},
 };
 
@@ -116,7 +123,40 @@ pub struct WebViewHost {
     security_abort: Option<Rc<dyn Fn() -> windows::core::Result<()>>>,
     document: Option<Rc<HostDocument>>,
     page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
+    accelerator_token: Option<i64>,
+    accelerators: Rc<RefCell<VecDeque<ShellAccelerator>>>,
     _environment: WebViewEnvironment,
+}
+
+/// A shell-owned key chord pressed while the WebView had keyboard focus.
+/// WebView2 swallows these for the shell; the application drains them after
+/// dispatch, outside COM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellAccelerator {
+    pub virtual_key: u16,
+    pub ctrl: bool,
+    pub shift: bool,
+}
+
+impl ShellAccelerator {
+    /// Only chords the native shell owns leave the page: Ctrl+Tab,
+    /// Ctrl+Shift+Tab, Ctrl+W and F6/Shift+F6. Everything else, including
+    /// copy and find inside the document, stays with WebView2.
+    #[must_use]
+    pub fn from_key(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> Option<Self> {
+        let owned = !alt
+            && match virtual_key {
+                key if key == VK_TAB.0 => ctrl,
+                key if key == VK_W.0 => ctrl && !shift,
+                key if key == VK_F6.0 => !ctrl,
+                _ => false,
+            };
+        owned.then_some(Self {
+            virtual_key,
+            ctrl,
+            shift,
+        })
+    }
 }
 
 impl WebViewHost {
@@ -137,8 +177,76 @@ impl WebViewHost {
             security_abort: None,
             document: None,
             page_messages: Rc::new(RefCell::new(VecDeque::new())),
+            accelerator_token: None,
+            accelerators: Rc::new(RefCell::new(VecDeque::new())),
             _environment: environment,
         })
+    }
+
+    /// Route shell accelerators pressed inside the page back to the shell.
+    /// The callback only records the chord; the shell acts on it after
+    /// dispatch through `drain_accelerators`.
+    pub fn intercept_shell_accelerators(&mut self) -> Result<(), HostError> {
+        if self.accelerator_token.is_some() {
+            return Ok(());
+        }
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let queue = Rc::downgrade(&self.accelerators);
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+            let mut key = 0_u32;
+            // SAFETY: event args are valid for this STA callback; outputs are
+            // live stack values that COM does not retain.
+            unsafe {
+                args.KeyEventKind(&mut kind)?;
+                args.VirtualKey(&mut key)?;
+            }
+            if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+            {
+                return Ok(());
+            }
+            // SAFETY: GetKeyState reads this thread's keyboard state, which
+            // WebView2 synchronizes before raising the event on the UI thread.
+            let down = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
+            let Ok(key) = u16::try_from(key) else {
+                return Ok(());
+            };
+            if let Some(chord) = ShellAccelerator::from_key(
+                key,
+                down(VK_CONTROL.0),
+                down(VK_SHIFT.0),
+                down(VK_MENU.0),
+            ) && let Some(queue) = queue.upgrade()
+            {
+                unsafe { args.SetHandled(true)? };
+                let _ = catch_unwind(AssertUnwindSafe(|| queue.borrow_mut().push_back(chord)));
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        // SAFETY: registered on the creating STA; the token is removed before
+        // the controller is closed (see `close`).
+        unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
+            .map_err(HostError::from_com)?;
+        self.accelerator_token = Some(token);
+        Ok(())
+    }
+
+    /// Drain shell accelerators recorded by the page callback.
+    pub fn drain_accelerators(&self) -> Vec<ShellAccelerator> {
+        self.accelerators.borrow_mut().drain(..).collect()
+    }
+
+    /// Give keyboard focus to the document (logical Document focus).
+    pub fn move_focus(&self) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        // SAFETY: synchronous call on the owning STA with no retained state.
+        unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) }
+            .map_err(HostError::from_com)
     }
 
     pub fn set_bounds(&self, bounds: ViewportBounds) -> Result<(), HostError> {
@@ -313,6 +421,17 @@ impl WebViewHost {
             }
             self.process_failure_tokens = failed_tokens;
         }
+        if let (Some(controller), Some(token)) = (self.controller.as_ref(), self.accelerator_token)
+        {
+            // SAFETY: removal on the creating STA before Close; a failed
+            // removal keeps the token so close can be retried.
+            match unsafe { controller.remove_AcceleratorKeyPressed(token) } {
+                Ok(()) => self.accelerator_token = None,
+                Err(error) => {
+                    first_error.get_or_insert(HostError::from_com(error));
+                }
+            }
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -328,6 +447,7 @@ impl WebViewHost {
         self.security_abort.take();
         self.document.take();
         self.page_messages.borrow_mut().clear();
+        self.accelerators.borrow_mut().clear();
         Ok(())
     }
 
@@ -343,6 +463,11 @@ impl WebViewHost {
                 let _ = unsafe { core.remove_ProcessFailed(token) };
             }
         }
+        if let (Some(controller), Some(token)) =
+            (self.controller.as_ref(), self.accelerator_token.take())
+        {
+            let _ = unsafe { controller.remove_AcceleratorKeyPressed(token) };
+        }
         if let Some(controller) = self.controller.as_ref() {
             unsafe { controller.Close() }.map_err(HostError::from_com)?;
         }
@@ -352,6 +477,7 @@ impl WebViewHost {
         self.security_abort.take();
         self.document.take();
         self.page_messages.borrow_mut().clear();
+        self.accelerators.borrow_mut().clear();
         Ok(())
     }
 }

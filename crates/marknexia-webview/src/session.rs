@@ -406,6 +406,7 @@ impl WebViewSession {
                 });
                 if let Err(error) = host
                     .observe_process_failures(Rc::downgrade(&observer))
+                    .and_then(|()| host.intercept_shell_accelerators())
                     .and_then(|()| host.bind_document(document))
                 {
                     self.controller_generations.remove(&tab_id);
@@ -638,6 +639,15 @@ impl WebViewSession {
             return Err(SessionError::Host(error));
         }
         Ok(())
+    }
+
+    /// Shell accelerators pressed inside any live document since the last
+    /// drain, in arrival order per host.
+    pub fn drain_accelerators(&self) -> Vec<crate::host::ShellAccelerator> {
+        self.hosts
+            .values()
+            .flat_map(WebViewHost::drain_accelerators)
+            .collect()
     }
 
     pub fn host(&self, tab_id: u64) -> Option<&WebViewHost> {

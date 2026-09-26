@@ -1,71 +1,101 @@
-# Rust/raw-Win32 shell feasibility evidence (in progress)
+# Rust/raw-Win32 shell feasibility evidence (Task 6, in progress)
 
-This is an interim Task 6 record for
+This records Task 6 evidence for
 `docs/superpowers/plans/2026-09-12-rust-win32-feasibility.md`. It is not a
-production-readiness claim or a replacement for the existing .NET edition.
+production-readiness claim and does not replace the .NET edition. Evidence
+states are kept separate: *source-reviewed*, *compiled*, *headless-tested*,
+*native-tested (x64)*, and *not yet verified*.
 
-## Source recovery, 2026-09-24
+Host for native evidence, 2026-09-26: Windows 11 Pro 10.0.26200, x64, WebView2
+Evergreen 153.0.4234.32, system dark app theme. No ARM64 hardware was
+available.
 
-The recovered Task 6 library now exports the existing layout and raw-window
-modules used by the binary and integration tests. Theme tests were aligned to
-the current palette shape and the approved dark Metallic Radium colors; the
-light accent follows the current WinUI XAML resource. Rust source formatting
-and the native smoke script's PowerShell AST parse passed. Cargo, the native
-shell, UI Automation, and WebView2 were not run during this recovery. The
-historical x64 observations below are not a current runtime gate. The custom
-tab strip, UIA providers, connected WebView viewport, and full native flows
-remain incomplete.
+## Native-tested on x64 (2026-09-26)
 
-## Evidence on Windows x64, 2026-09-17
+- **Window and lifecycle.** A release x64 `marknexia-win32.exe` shows a
+  top-level window with the custom `MarknexiaRustTabStrip` child
+  (`scripts/Test-RustNativeShell.ps1` passed) and exits cleanly on WM_CLOSE.
+  One boxed `Rc<RefCell<AppState>>` lives in `GWLP_USERDATA` from
+  `WM_NCCREATE` to `WM_NCDESTROY`. No `RefCell` borrow spans a reentrant
+  Win32, WebView2 or UIA call.
+- **UI Automation.** `tests/automation_smoke.rs` passes 4/4 runs against the
+  shell process it launched:
+  - It binds the HWND by PID through `EnumWindows`.
+  - It finds the server-side `TabControl` provider and two named `TabItem`
+    children. The default HWND proxy is not accepted.
+  - It invokes `SelectionItem.Select` and waits until exactly one on-screen
+  WebView document is visible and its name equals the selected tab, for two
+  consecutive selections.
+  - Providers use ABI-local `IRawElementProviderSimple`, `Fragment` and
+  `FragmentRoot` interfaces. All three derive from IUnknown, as in
+  UIAutomationCore.h. Every nullable out pointer is written before return.
+- **Select acknowledgement contract.** WebView2 rejects outgoing COM with
+  `0x802A000C` while UIA's input-synchronous `Select` call is on the stack,
+  and this was observed natively. `Select` therefore returns once portable
+  selection, the repainted tab strip and the provider state agree. The
+  WebView switch is posted and applied on the next message-loop turn. If that
+  switch fails, selection reverts to the tab the WebView still shows, and the
+  matching UIA events are raised. Pointer and keyboard selection stay fully
+  synchronous.
+- **WebView2 lifecycle.** All six ignored native WebView2 tests pass:
+  - loader detection
+  - STA environment creation
+  - independent bounds and visibility for two controllers
+  - page messages delivered only after `poll`
+  - resource, message, renderer and teardown contract
+  - browser-process exit with the environment and immutable tabs recreated
+  The browser-exit test was run with an automated kill of only the WebView2
+  browser process that the test itself started.
+- **Theme.** A native capture confirmed the system-dark rendering:
+  - dark DWM title bar and Metallic Radium tab strip
+  - dark `STATIC`, `LISTBOX` and `EDIT` controls, set through `WM_CTLCOLOR*`
+    and the `DarkMode_*` visual styles
+  - an owner-drawn command button
+  - the document canvas following `color-scheme: light dark`
+  Light and high-contrast themes restore the default styles and system
+  colors. The high-contrast path has not been captured natively yet.
+- **Startup milestones.** The shell signals the named events
+  `Local\Marknexia.WebViewReady.<pid>` and `Local\Marknexia.FirstRender.<pid>`.
+  `scripts/Collect-RustDesktopPerf.ps1` consumes them. The window is shown
+  before WebView2 startup begins. The trial numbers so far came from a heavily
+  loaded machine and are not evidence.
 
-- `marknexia-win32.exe` now creates a real top-level Win32 window with native
-  chrome and a visible native `STATIC` development-status surface. Its window
-  procedure transfers exactly one boxed state pointer into `GWLP_USERDATA`
-  during `WM_NCCREATE`, clears it during `WM_NCDESTROY`, and runs a checked
-  message loop. Raw Win32 calls are isolated to the adapter module.
-- `scripts/Test-RustNativeShell.ps1` first failed against the old console stub,
-  then verified a visible window, expected class/title, owning process ID, and
-  native status child on both debug and release x64 builds. The script closes
-  only the process it starts. Its window lookup is scoped to that process, so
-  an already-open preview cannot be mistaken for the test instance. The
-  release-mode smoke returned a visible HWND after this check was added.
-- Error paths after top-level creation now destroy that HWND, allowing
-  `WM_NCDESTROY` to release its boxed state if child creation or the message
-  loop fails. The normal path and error-path build passed the focused test,
-  lint, and native smoke gates; error injection remains future test work.
-- Pure shell tests cover stable tab IDs, active selection, wraparound,
-  selected/inactive close behavior, reordering, and mapping of Ctrl+Tab,
-  Ctrl+Shift+Tab, Ctrl+W, and F6 without consuming Alt+F4 or plain Tab.
-- Pure layout tests cover 44-DIP interactive targets at 96, 144, and 192 DPI,
-  optional sidebar/find surfaces, all surface bounds, non-overlap, and
-  deterministic degradation for zero/tiny clients. They do not prove native
-  `WM_DPICHANGED` behavior or accessibility by themselves.
-- The Win32 adapter now requests Per-Monitor DPI v2 before window creation,
-  applies the suggested rectangle on `WM_DPICHANGED`, and recomputes the
-  current layout on resize. The existing development-status child follows
-  the computed viewport bounds. These paths compile and pass headless unit
-  tests, but moving the window between monitors has not been observed in a
-  native automation run.
-- Pure theme resolution and palette tests cover system/light/dark/high-contrast
-  priority. The dark tokens match the approved Metallic Radium reference and
-  high contrast uses symbolic system-color roles, not fixed branded RGB.
-  These colors are not yet applied to native controls or the WebView viewport.
-- `cargo test -p marknexia-win32 -p marknexia-webview --offline --locked`,
-  formatting, and Clippy with `-D warnings` passed using a local dependency
-  evaluation override. Release builds of this partial shell compiled for both
-  x64 and ARM64. ARM64 was **not** run on a native ARM64 host.
+## Compiled and headless-tested
 
-## Still required
+- `cargo clippy --workspace --all-targets -- -D warnings` passes, with default
+  features and with all features.
+- The headless test suites pass. They cover stable tab IDs and the selection
+  and close rules; key routing (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+W, F6);
+  44-DIP targets at 96, 144 and 192 DPI; theme resolution; the `tab_slot`
+  geometry shared by paint, hit testing and UIA bounds; and the shell
+  accelerator filter.
+- Release builds pass for `x86_64` (483–488 KB) and `aarch64`
+  (440 KB, compile-only).
 
-- Connect native tab controls, repository/sidebar, find/status surfaces, and a
-  secured WebView2 document viewport. The visible status surface explicitly
-  says the viewport is not connected; the shell is not yet a Markdown viewer.
-- Per-monitor DPI v2, responsive layout, theme/high contrast, keyboard focus
-  routing, drag/drop, dialogs, association activation, UI Automation providers,
-  and native automation assertions.
-- Real document open/render/bridge flows; native renderer/browser recovery;
-  ARM64 runtime; clean package, dependency, size, startup, memory, parity,
-  accessibility, and security release gates.
+## Implemented, awaiting native verification
 
-The current `Cargo.lock` still depends on local path-patched evaluation sources.
-It is not a portable release lockfile and cannot be used as release evidence.
+- **Keyboard handoff.** WebView2 `AcceleratorKeyPressed` routes only the
+  shell-owned chords (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+W, F6 and Shift+F6) back
+  to the shell. They are drained after dispatch, outside COM. F6 into
+  Document calls `MoveFocus` on the active controller.
+  - The native smoke step refuses to inject keys unless the launched shell
+    owns the foreground.
+  - Its first attempt ran while the workstation was locked (`LockApp` owned
+    the foreground), so it is still unverified.
+- **Structure events.** `ChildrenInvalidated` on tab close and
+  `AutomationFocusChanged` on keyboard selection are implemented but not yet
+  asserted natively.
+
+## Not yet verified or not implemented
+
+- Native `WM_DPICHANGED` across monitors, and high-contrast capture.
+- Keyboard handoff from inside a document (see above).
+- WebView2 focus changes reflected back into portable focus state, for
+  example when the user clicks into the document.
+- Document open, render and bridge flows. Placeholder documents are
+  plain-text only, going through `HtmlPolicy::encode_text` and
+  `HostDocument::new_titled`.
+- Drag and drop, dialogs, association activation, and the repository
+  sidebar contents.
+- ARM64 runtime on real hardware, and all release gates: packaging, size,
+  performance on a quiet machine, and parity.

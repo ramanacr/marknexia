@@ -26,8 +26,13 @@ use windows::{
                 UIA_ControlTypePropertyId, UIA_DocumentControlTypeId, UIA_SelectionItemPatternId,
                 UIA_TabControlTypeId, UIA_TabItemControlTypeId,
             },
+            Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_TAB,
+            },
             WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+                EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+                IsWindowVisible, SetForegroundWindow,
             },
         },
     },
@@ -165,6 +170,46 @@ fn visible_document(automation: &IUIAutomation, root: &IUIAutomationElement) -> 
     visible.next().is_none().then_some(first)
 }
 
+fn visible_document_element(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Option<IUIAutomationElement> {
+    let condition = unsafe {
+        automation.CreatePropertyCondition(
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_DocumentControlTypeId.0),
+        )
+    }
+    .ok()?;
+    let found = unsafe { root.FindAll(TreeScope_Descendants, &condition) }.ok()?;
+    (0..unsafe { found.Length() }.ok()?)
+        .filter_map(|index| unsafe { found.GetElement(index) }.ok())
+        .find(|document| {
+            unsafe { document.CurrentIsOffscreen() }.is_ok_and(|offscreen| !offscreen.as_bool())
+        })
+}
+
+/// Presses the keys in order, then releases them in reverse order.
+fn send_chord(keys: &[VIRTUAL_KEY]) {
+    let key = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    };
+    let mut inputs: Vec<INPUT> = keys
+        .iter()
+        .map(|vk| key(*vk, KEYBD_EVENT_FLAGS(0)))
+        .collect();
+    inputs.extend(keys.iter().rev().map(|vk| key(*vk, KEYEVENTF_KEYUP)));
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    assert_eq!(sent as usize, inputs.len(), "SendInput");
+}
+
 fn select_and_observe(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
@@ -222,4 +267,28 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     // and then the second proves two real active-view changes.
     select_and_observe(&automation, &root, &tabs[0]);
     select_and_observe(&automation, &root, &tabs[1]);
+
+    // Keyboard handoff: with focus inside the active WebView document, the
+    // shell-owned Ctrl+Tab must still switch tabs (AcceleratorKeyPressed).
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    let document = wait_for("a focusable visible document", || {
+        visible_document_element(&automation, &root)
+    });
+    unsafe { document.SetFocus() }.expect("focus WebView document");
+    thread::sleep(Duration::from_millis(300));
+    // Never inject keys unless the launched shell owns the foreground, so a
+    // failed activation cannot type into another application.
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut owner = 0;
+    unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
+    assert_eq!(
+        owner,
+        shell.0.id(),
+        "shell must be foreground before SendInput"
+    );
+    send_chord(&[VK_CONTROL, VK_TAB]);
+    let expected = name(&tabs[0]);
+    wait_for("Ctrl+Tab from inside the document to switch tabs", || {
+        visible_document(&automation, &root).filter(|document| *document == expected)
+    });
 }
