@@ -44,12 +44,12 @@ use windows::{
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW,
                 GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
                 PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-                WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
-                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+                WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+                WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY,
+                WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW,
+                WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -400,7 +400,30 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
     // Apply theme and bounds to the WebView session created above.
     update_theme(hwnd);
     reflow(hwnd, dpi);
+    refresh_status(&state);
     Ok(())
+}
+
+/// Shows the most recent shell error in the status bar, or "Ready". The
+/// shell stays usable without WebView2: tabs, keyboard and UIA keep working
+/// and the status explains why documents are not displayed.
+fn refresh_status(state: &Rc<RefCell<AppState>>) {
+    let (status, text) = {
+        let state = state.borrow();
+        let text = match state.last_error.as_deref() {
+            None => "Ready".to_owned(),
+            Some(error) if error.starts_with("WebView2 unavailable") => {
+                "Microsoft Edge WebView2 Runtime is not available; documents cannot be displayed."
+                    .to_owned()
+            }
+            Some(error) => error.to_owned(),
+        };
+        (state.controls.map(|c| c.status), text)
+    };
+    if let Some(status) = status {
+        let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = unsafe { SetWindowTextW(status, PCWSTR::from_raw(text.as_ptr())) };
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -862,6 +885,7 @@ fn poll_webview(hwnd: HWND) {
     }
     if let Some(error) = error {
         state.borrow_mut().last_error = Some(error);
+        refresh_status(&state);
     }
     if let Some(readiness) = state.borrow_mut().readiness.as_mut() {
         readiness.observe(controller_ready, document_loaded);
