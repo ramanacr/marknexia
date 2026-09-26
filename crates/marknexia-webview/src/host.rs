@@ -284,6 +284,13 @@ impl WebViewHost {
             .is_some_and(CallbackTokens::resource_failed)
     }
 
+    /// True once the pinned document completed a successful navigation.
+    pub fn document_loaded(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::document_loaded)
+    }
+
     /// Drain validated page messages after Windows dispatch, outside COM.
     pub fn drain_page_messages(&self) -> Vec<PageToHost> {
         self.page_messages.borrow_mut().drain(..).collect()

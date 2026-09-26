@@ -16,7 +16,8 @@ use webview2_com::{
         ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
         ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2WebResourceResponse,
     },
-    NavigationStartingEventHandler, NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::{
@@ -38,10 +39,12 @@ pub(crate) struct CallbackTokens {
     core: ICoreWebView2,
     resource: Option<i64>,
     navigation: Option<i64>,
+    navigation_completed: Option<i64>,
     message: Option<i64>,
     new_window: Option<i64>,
     filter: bool,
     resource_failed: Rc<Cell<bool>>,
+    document_loaded: Rc<Cell<bool>>,
     pending_deferrals: Rc<RefCell<Vec<ICoreWebView2Deferral>>>,
 }
 
@@ -51,10 +54,12 @@ impl CallbackTokens {
             core: core.clone(),
             resource: None,
             navigation: None,
+            navigation_completed: None,
             message: None,
             new_window: None,
             filter: false,
             resource_failed: Rc::new(Cell::new(false)),
+            document_loaded: Rc::new(Cell::new(false)),
             pending_deferrals: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -200,6 +205,27 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         self.navigation = Some(token);
 
+        // Records only that the pinned document finished loading; no
+        // application code runs inside the COM callback.
+        let document_loaded = Rc::clone(&self.document_loaded);
+        let completed_handler =
+            NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+                if let Some(args) = args {
+                    let mut success = windows::core::BOOL::default();
+                    unsafe { args.IsSuccess(&mut success) }?;
+                    if success.as_bool() {
+                        document_loaded.set(true);
+                    }
+                }
+                Ok(())
+            }));
+        unsafe {
+            self.core
+                .add_NavigationCompleted(&completed_handler, &mut token)
+        }
+        .map_err(HostError::from_com)?;
+        self.navigation_completed = Some(token);
+
         let weak_document = Rc::downgrade(document);
         let message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
             if let (Some(args), Some(document)) = (args, weak_document.upgrade()) {
@@ -258,6 +284,10 @@ impl CallbackTokens {
             ),
             (&mut self.message, ICoreWebView2::remove_WebMessageReceived),
             (
+                &mut self.navigation_completed,
+                ICoreWebView2::remove_NavigationCompleted,
+            ),
+            (
                 &mut self.navigation,
                 ICoreWebView2::remove_NavigationStarting,
             ),
@@ -294,6 +324,10 @@ impl CallbackTokens {
 
     pub(crate) fn resource_failed(&self) -> bool {
         self.resource_failed.get()
+    }
+
+    pub(crate) fn document_loaded(&self) -> bool {
+        self.document_loaded.get()
     }
 }
 

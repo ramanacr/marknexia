@@ -13,8 +13,8 @@ use marknexia_webview::{
 use windows::{
     Win32::{
         Foundation::{
-            COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SetLastError,
-            WIN32_ERROR, WPARAM,
+            COLORREF, CloseHandle, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT,
+            SetLastError, WIN32_ERROR, WPARAM,
         },
         Graphics::{
             Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
@@ -29,6 +29,7 @@ use windows::{
         System::{
             LibraryLoader::GetModuleHandleW,
             Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+            Threading::{CreateEventW, SetEvent},
         },
         UI::{
             HiDpi::{
@@ -104,6 +105,7 @@ struct AppState {
     webview_checked_out: bool,
     /// Tab whose controller the WebView session last made visible.
     webview_active: Option<u64>,
+    readiness: Option<Readiness>,
     last_error: Option<String>,
     dpi: u32,
     theme: EffectiveTheme,
@@ -122,6 +124,7 @@ impl AppState {
             uia_selection: None,
             webview_checked_out: false,
             webview_active: None,
+            readiness: None,
             last_error: None,
             dpi: 96,
             theme: EffectiveTheme::Light,
@@ -280,6 +283,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
         let mut state = state.borrow_mut();
         state.controls = Some(controls);
         state.dpi = dpi;
+        state.readiness = Some(Readiness::create());
         Rc::clone(&state.portable)
     };
     {
@@ -782,9 +786,73 @@ fn poll_webview(hwnd: HWND) {
         .poll()
         .err()
         .map(|error| format!("WebView2 poll: {error:?}"));
+    let active = state.borrow().webview_active;
+    let (controller_ready, document_loaded) = active
+        .and_then(|tab| session.host(tab))
+        .map_or((false, false), |host| (true, host.document_loaded()));
     restore_session(&state, session);
     if let Some(error) = error {
         state.borrow_mut().last_error = Some(error);
+    }
+    if let Some(readiness) = state.borrow_mut().readiness.as_mut() {
+        readiness.observe(controller_ready, document_loaded);
+    }
+}
+
+/// Named manual-reset events that let an external measurement harness
+/// observe startup milestones of this process without UI scraping:
+/// `Local\Marknexia.WebViewReady.<pid>` when the active tab's controller
+/// exists, and `Local\Marknexia.FirstRender.<pid>` when its document has
+/// completed navigation. Signalling is best-effort and never affects the UI.
+struct Readiness {
+    webview_ready: Option<HANDLE>,
+    first_render: Option<HANDLE>,
+}
+
+impl Readiness {
+    fn create() -> Self {
+        let pid = std::process::id();
+        Self {
+            webview_ready: named_event(&format!(r"Local\Marknexia.WebViewReady.{pid}")),
+            first_render: named_event(&format!(r"Local\Marknexia.FirstRender.{pid}")),
+        }
+    }
+
+    fn observe(&mut self, controller_ready: bool, document_loaded: bool) {
+        if controller_ready {
+            signal_once(&mut self.webview_ready);
+        }
+        if document_loaded {
+            signal_once(&mut self.first_render);
+        }
+    }
+}
+
+impl Drop for Readiness {
+    fn drop(&mut self) {
+        for handle in [self.webview_ready.take(), self.first_render.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = unsafe { CloseHandle(handle) };
+        }
+    }
+}
+
+fn named_event(name: &str) -> Option<HANDLE> {
+    let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `name` is NUL-terminated and outlives the call; the returned
+    // handle is owned by `Readiness` and closed exactly once in Drop.
+    unsafe { CreateEventW(None, true, false, PCWSTR::from_raw(name.as_ptr())) }.ok()
+}
+
+/// Sets the event, then closes it: each milestone fires once per process.
+fn signal_once(slot: &mut Option<HANDLE>) {
+    if let Some(handle) = slot.take() {
+        unsafe {
+            let _ = SetEvent(handle);
+            let _ = CloseHandle(handle);
+        }
     }
 }
 
