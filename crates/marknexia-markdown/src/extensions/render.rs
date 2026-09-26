@@ -277,6 +277,9 @@ impl Renderer<'_> {
         }
         self.out.push_str(">\n");
         for item in &list.items {
+            if self.over_limit() {
+                break;
+            }
             self.ensure_line();
             self.out.push_str("<li");
             if item.task.is_some() {
@@ -347,6 +350,9 @@ impl Renderer<'_> {
         let mut has_header = false;
         let mut header_open = false;
         for row in &table.rows {
+            if self.over_limit() {
+                break;
+            }
             if row.header {
                 if !has_header {
                     self.out.push_str("<thead>\n");

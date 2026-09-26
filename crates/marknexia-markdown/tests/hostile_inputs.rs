@@ -231,3 +231,28 @@ fn rendered_output_limit_rejects_like_dotnet() {
         assert!(engine.parse("# bounded output", &fits).is_ok(), "{name}");
     }
 }
+
+#[test]
+fn grid_cell_flattening_reports_a_diagnostic() {
+    let cell = format!("{}x", "> ".repeat(40));
+    let width = cell.chars().count() + 2;
+    let border = format!("+{}+", "-".repeat(width));
+    let source = format!("{border}\n| {cell} |\n{border}\n");
+    for (name, engine) in engines() {
+        let document = engine
+            .parse(&source, &MarkdownOptions::default())
+            .expect("grid parses");
+        assert!(
+            document.rendered_body_html.contains("<table>"),
+            "grid table expected: {}",
+            document.rendered_body_html
+        );
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("flattened")),
+            "{name}: flattening inside a grid cell must be reported"
+        );
+    }
+}

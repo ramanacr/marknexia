@@ -20,7 +20,7 @@ What happens beyond the limit:
 | Deeper inline span | Nested markup | The span's text is kept, but not its tag. For a link that means no `<a>` and no entry in `links`; for an image, its alt text is kept as plain text. |
 | `==mark==` nesting (pulldown's Marknexia mark pass) | Nested `<mark>` | Delimiters past the remaining inline depth render as literal `==`. |
 
-The first flattened block and the first flattened inline each add one `Warning` diagnostic, `block|inline nesting deeper than 32 levels was flattened`, with the zero-based source line. The warnings are not serialized, just like `markdown-source-diagnostics.md`.
+The first flattened block and the first flattened inline span each add one `Warning` diagnostic (including content parsed inside grid-table cells), `block|inline nesting deeper than 32 levels was flattened`, with the zero-based source line. The warnings are not serialized, just like `markdown-source-diagnostics.md`. Separately, `==` delimiters beyond the mark pass's remaining inline budget render as literal `==` text without an additional diagnostic.
 
 The stack budget is measured by `tests/hostile_inputs.rs` on a 1 MiB thread:
 

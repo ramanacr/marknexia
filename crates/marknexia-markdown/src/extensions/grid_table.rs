@@ -3,6 +3,8 @@
 //! with an optional `+===+` header separator. Row and column spans are not
 //! supported; such paragraphs stay paragraphs.
 
+use marknexia_core::contracts::Diagnostic;
+
 use super::model::{Alignment, Block, Document, Table, TableRow};
 
 pub(crate) fn apply(document: &mut Document, lines: &[&str], parse: &dyn Fn(&str) -> Document) {
@@ -13,8 +15,19 @@ pub(crate) fn apply(document: &mut Document, lines: &[&str], parse: &dyn Fn(&str
         let Some(source) = lines.get(paragraph.line..=paragraph.end_line) else {
             continue;
         };
-        if let Some(table) = parse_grid(source, paragraph.line, parse) {
+        if let Some((table, diagnostics)) = parse_grid(source, paragraph.line, parse) {
             *block = Block::Table(table);
+            // Cell fragments are parsed separately; keep their diagnostics
+            // (for example depth flattening), at most one per message.
+            for diagnostic in diagnostics {
+                if !document
+                    .diagnostics
+                    .iter()
+                    .any(|existing| existing.message == diagnostic.message)
+                {
+                    document.diagnostics.push(diagnostic);
+                }
+            }
         }
     }
 }
@@ -23,7 +36,7 @@ fn parse_grid(
     lines: &[&str],
     first_line: usize,
     parse: &dyn Fn(&str) -> Document,
-) -> Option<Table> {
+) -> Option<(Table, Vec<Diagnostic>)> {
     let first = lines.first()?.trim_end();
     if !is_separator(first) || !first.contains('-') {
         return None;
@@ -78,6 +91,7 @@ fn parse_grid(
     if current.is_some() || rows.is_empty() {
         return None;
     }
+    let mut diagnostics = Vec::new();
     let rows = rows
         .into_iter()
         .enumerate()
@@ -86,18 +100,26 @@ fn parse_grid(
             cells: cells
                 .into_iter()
                 .map(|cell| {
-                    let mut blocks = parse(cell.join("\n").trim()).blocks;
+                    let fragment = parse(cell.join("\n").trim());
+                    let mut blocks = fragment.blocks;
                     relocate(&mut blocks, line);
+                    diagnostics.extend(fragment.diagnostics.into_iter().map(|mut diagnostic| {
+                        diagnostic.source_line = Some(line);
+                        diagnostic
+                    }));
                     blocks
                 })
                 .collect(),
         })
         .collect();
-    Some(Table {
-        alignments: vec![Alignment::None; columns.len() - 1],
-        widths,
-        rows,
-    })
+    Some((
+        Table {
+            alignments: vec![Alignment::None; columns.len() - 1],
+            widths,
+            rows,
+        },
+        diagnostics,
+    ))
 }
 
 /// Markdig slices .NET strings, so grid column positions are UTF-16 code-unit
@@ -199,7 +221,7 @@ mod tests {
         // `é` is one UTF-16 unit and `😀` two, so this grid is aligned for .NET
         // although its byte offsets differ.
         let lines = ["+--+--+", "|é |😀|", "+==+==+", "|a |b |", "+--+--+"];
-        let table = parse_grid(&lines, 0, &cell).unwrap();
+        let (table, _) = parse_grid(&lines, 0, &cell).unwrap();
         assert_eq!(cell_texts(&table), [["é", "😀"], ["a", "b"]]);
         assert!(table.rows[0].header);
         // Four units wide in .NET terms, so `|😀|` (three units) does not fit.
@@ -219,7 +241,7 @@ mod tests {
             "| 1 | 2    |",
             "+---+------+",
         ];
-        let table = parse_grid(&lines, 5, &cell).unwrap();
+        let (table, _) = parse_grid(&lines, 5, &cell).unwrap();
         assert_eq!(table.widths.len(), 2);
         assert!((table.widths[0] - 100.0 / 3.0).abs() < 0.001);
         assert_eq!(table.rows.len(), 2);
