@@ -5,7 +5,7 @@ pub mod history;
 
 pub use marknexia_files::virtual_fs::VirtualFileSystem;
 
-use marknexia_files::path::{CanonicalPath, RepositoryScope};
+use marknexia_files::path::{CanonicalPath, PathError, RepositoryScope};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -196,11 +196,49 @@ fn virtual_relative_target(
     Ok(components.join("/"))
 }
 
-fn canonical_scope(context: &ResolutionContext) -> Option<RepositoryScope> {
-    context
-        .repository_root
-        .as_deref()
-        .and_then(|root| RepositoryScope::new(root).ok())
+/// How the repository root of a resolution context can be enforced.
+enum RootMode {
+    /// No repository root was supplied.
+    Absent,
+    /// A canonical Windows root; containment is checked component-wise.
+    Canonical(RepositoryScope),
+    /// A lexically safe relative root naming a virtual (fixture) repository.
+    /// Containment is enforced by `virtual_relative_target`, which refuses to
+    /// pop above the virtual root.
+    Virtual,
+    /// A root that is neither canonical nor a safe virtual name. With sandbox
+    /// enforcement on, resolution must fail closed.
+    Invalid,
+}
+
+/// A relative, drive-less, non-rooted path whose every component is a plain
+/// file name: no traversal, no stream/drive separators, no reserved names.
+fn is_safe_virtual_relative_path(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with(['/', '\\'])
+        || path.chars().any(char::is_control)
+        || path.contains(':')
+    {
+        return false;
+    }
+    path.split(['/', '\\']).all(|component| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && !component.contains(['<', '>', '"', '|', '?', '*'])
+            && !component.ends_with([' ', '.'])
+    })
+}
+
+fn root_mode(context: &ResolutionContext) -> RootMode {
+    let Some(root) = context.repository_root.as_deref() else {
+        return RootMode::Absent;
+    };
+    match RepositoryScope::new(root) {
+        Ok(scope) => RootMode::Canonical(scope),
+        Err(PathError::NotAbsolute) if is_safe_virtual_relative_path(root) => RootMode::Virtual,
+        Err(_) => RootMode::Invalid,
+    }
 }
 
 fn join_canonical(base: &CanonicalPath, path: &str) -> Result<CanonicalPath, ()> {
@@ -418,14 +456,40 @@ pub fn resolve(
     let rooted = decoded.starts_with('/') || decoded.starts_with('\\');
     let absolute_input = lower.starts_with("file:") || has_drive_prefix(&decoded);
     let absolute_destination = CanonicalPath::new(&decoded).ok();
-    let scope = canonical_scope(context);
+    let mode = root_mode(context);
 
-    if context.enforce_repository_sandbox && context.repository_root.is_some() && scope.is_none() {
-        return blocked(
-            fragment,
-            "Access blocked: Repository root is invalid; cannot enforce repository sandbox.",
-        );
+    if context.enforce_repository_sandbox {
+        match mode {
+            RootMode::Invalid => {
+                return blocked(
+                    fragment,
+                    "Access blocked: Repository root is invalid; cannot enforce repository sandbox.",
+                );
+            }
+            RootMode::Virtual => {
+                // A virtual root only sandboxes virtual relative paths. An
+                // unparseable current file or any absolute target cannot be
+                // proven contained, so fail closed before any probe.
+                if !is_safe_virtual_relative_path(&context.current_file) {
+                    return blocked(
+                        fragment,
+                        "Access blocked: Current file is invalid; cannot enforce repository sandbox.",
+                    );
+                }
+                if absolute_destination.is_some() || absolute_input {
+                    return blocked(
+                        fragment,
+                        "Access blocked: Absolute path is outside repository sandbox.",
+                    );
+                }
+            }
+            RootMode::Absent | RootMode::Canonical(_) => {}
+        }
     }
+    let scope = match mode {
+        RootMode::Canonical(scope) => Some(scope),
+        _ => None,
+    };
 
     if let Some(target) = absolute_destination {
         return complete_local_target(

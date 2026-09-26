@@ -185,3 +185,65 @@ fn malformed_external_normalization_inserts_root_path_before_query_or_fragment()
         assert_eq!(result.file_system_probe_count, 0);
     }
 }
+
+#[test]
+fn virtual_root_resolves_while_invalid_roots_still_fail_closed_before_probe() {
+    let vfs = VirtualFileSystem {
+        files: vec!["docs/api.md".into(), "c:/repo/docs/api.md".into()],
+    };
+    let virtual_context = ResolutionContext {
+        current_file: "README.md".into(),
+        repository_root: Some("navigation".into()),
+        allow_external_links: true,
+        enforce_repository_sandbox: true,
+    };
+    let result = resolve(Some("docs/api.md"), &virtual_context, &vfs);
+    assert_eq!(result.intent.kind, "CrossDocument");
+    assert_eq!(
+        result.intent.target_document.as_deref(),
+        Some("docs/api.md")
+    );
+    assert_eq!(result.file_system_probe_count, 1);
+
+    for invalid_root in [
+        "",
+        "..",
+        "../repository",
+        "repository/../..",
+        "C:relative",
+        r"\\?\C:\repo",
+        r"repo\..\..",
+        "//server/share",
+        "/rooted",
+        "repo:stream",
+    ] {
+        let context = ResolutionContext {
+            repository_root: Some(invalid_root.into()),
+            ..virtual_context.clone()
+        };
+        let result = resolve(Some("docs/api.md"), &context, &vfs);
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{invalid_root}");
+        assert_eq!(
+            result.intent.diagnostic.as_deref(),
+            Some("Access blocked: Repository root is invalid; cannot enforce repository sandbox."),
+            "{invalid_root}"
+        );
+        assert_eq!(result.file_system_probe_count, 0, "{invalid_root}");
+    }
+
+    for invalid_current in ["C:/repo/README.md", "/README.md", "../README.md", ""] {
+        let context = ResolutionContext {
+            current_file: invalid_current.into(),
+            ..virtual_context.clone()
+        };
+        let result = resolve(Some("docs/api.md"), &context, &vfs);
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{invalid_current}");
+        assert_eq!(result.file_system_probe_count, 0, "{invalid_current}");
+    }
+
+    for absolute in ["C:/repo/docs/api.md", "file:///C:/repo/docs/api.md"] {
+        let result = resolve(Some(absolute), &virtual_context, &vfs);
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{absolute}");
+        assert_eq!(result.file_system_probe_count, 0, "{absolute}");
+    }
+}
