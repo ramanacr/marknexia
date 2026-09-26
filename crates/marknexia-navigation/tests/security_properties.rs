@@ -247,3 +247,148 @@ fn virtual_root_resolves_while_invalid_roots_still_fail_closed_before_probe() {
         assert_eq!(result.file_system_probe_count, 0, "{absolute}");
     }
 }
+
+fn absolute_context(current_file: &str) -> ResolutionContext {
+    ResolutionContext {
+        current_file: current_file.into(),
+        repository_root: Some("C:/repo".into()),
+        allow_external_links: true,
+        enforce_repository_sandbox: true,
+    }
+}
+
+const RELATIVE_ESCAPE: &str = "Access blocked: Relative path escapes repository root sandbox.";
+
+/// Decision NAV-1: .NET probes the current file before checking a relative
+/// target's containment (one probe); Rust rejects the escape with no probe.
+#[test]
+fn nav_1_relative_escape_is_rejected_before_the_current_file_probe() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/README.md".into(), "c:/private.md".into()],
+    };
+    let result = resolve(
+        Some("../private.md"),
+        &absolute_context("C:/repo/README.md"),
+        &vfs,
+    );
+    assert_eq!(result.intent.kind, "BlockedOrInvalid");
+    assert_eq!(result.intent.diagnostic.as_deref(), Some(RELATIVE_ESCAPE));
+    assert_eq!(result.file_system_probe_count, 0);
+}
+
+/// Decision NAV-1: when the current file is missing, .NET retries with the
+/// current path as the base directory and would resolve this to
+/// `C:/repo/docs/api.md` (two probes). Rust has already rejected the escaping
+/// directory-based target before any probe.
+#[test]
+fn nav_1_missing_current_file_does_not_rescue_an_escaping_directory_target() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/docs/api.md".into()],
+    };
+    let result = resolve(
+        Some("../docs/api.md"),
+        &absolute_context("C:/repo/missing.md"),
+        &vfs,
+    );
+    assert_eq!(result.intent.kind, "BlockedOrInvalid");
+    assert_eq!(result.intent.diagnostic.as_deref(), Some(RELATIVE_ESCAPE));
+    assert_eq!(result.file_system_probe_count, 0);
+}
+
+/// Decision NAV-2: .NET `Path.GetFullPath` clamps `..` at the drive root, so
+/// these resolve to `C:\repo\docs\api.md` there. Rust rejects traversal above
+/// the drive root before any probe.
+#[test]
+fn nav_2_traversal_above_the_drive_root_is_rejected_before_probe() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/README.md".into(), "c:/repo/docs/api.md".into()],
+    };
+    for (destination, diagnostic) in [
+        ("../../repo/docs/api.md", RELATIVE_ESCAPE),
+        (
+            "/../../repo/docs/api.md",
+            "Access blocked: Repository root traversal outside sandbox boundary.",
+        ),
+    ] {
+        let result = resolve(
+            Some(destination),
+            &absolute_context("C:/repo/README.md"),
+            &vfs,
+        );
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{destination}");
+        assert_eq!(
+            result.intent.diagnostic.as_deref(),
+            Some(diagnostic),
+            "{destination}"
+        );
+        assert_eq!(result.file_system_probe_count, 0, "{destination}");
+    }
+}
+
+#[test]
+fn missing_current_file_is_used_as_the_base_directory_like_dotnet() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/docs/api.md".into()],
+    };
+    let result = resolve(Some("api.md"), &absolute_context("C:/repo/docs"), &vfs);
+    assert_eq!(result.intent.kind, "CrossDocument");
+    assert_eq!(
+        result.intent.target_document.as_deref(),
+        Some("C:/repo/docs/api.md")
+    );
+    assert_eq!(result.file_system_probe_count, 2);
+}
+
+#[test]
+fn broken_targets_keep_the_callers_case_and_dotnet_diagnostics() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/README.md".into()],
+    };
+    for (destination, target, diagnostic, probes) in [
+        (
+            "docs/Missing.md",
+            "C:/repo/docs/Missing.md",
+            r"Target file not found: C:\repo\docs\Missing.md",
+            2,
+        ),
+        (
+            "/Docs/Missing.md",
+            "C:/repo/Docs/Missing.md",
+            r"Repository-relative file not found: C:\repo\Docs\Missing.md",
+            1,
+        ),
+        (
+            "C:/REPO/Missing.md",
+            "C:/REPO/Missing.md",
+            r"Absolute target file not found: C:\REPO\Missing.md",
+            1,
+        ),
+    ] {
+        let result = resolve(
+            Some(destination),
+            &absolute_context("C:/repo/README.md"),
+            &vfs,
+        );
+        assert_eq!(result.intent.kind, "BrokenTarget", "{destination}");
+        assert!(result.intent.is_safe, "{destination}");
+        assert_eq!(result.intent.target_document.as_deref(), Some(target));
+        assert_eq!(result.intent.diagnostic.as_deref(), Some(diagnostic));
+        assert_eq!(result.file_system_probe_count, probes, "{destination}");
+    }
+}
+
+#[test]
+fn case_changes_never_escape_the_repository_scope() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repository/secret.md".into()],
+    };
+    for destination in ["C:/REPOSITORY/secret.md", "../Repository/secret.md"] {
+        let result = resolve(
+            Some(destination),
+            &absolute_context("C:/Repo/README.md"),
+            &vfs,
+        );
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{destination}");
+        assert_eq!(result.file_system_probe_count, 0, "{destination}");
+    }
+}

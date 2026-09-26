@@ -37,7 +37,7 @@ fn navigation_v1_matches_frozen_contract() {
         checked += 1;
     }
     assert!(
-        checked >= 9,
+        checked >= 13,
         "navigation fixture coverage was empty or incomplete"
     );
 }

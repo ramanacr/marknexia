@@ -241,38 +241,97 @@ fn root_mode(context: &ResolutionContext) -> RootMode {
     }
 }
 
-fn join_canonical(base: &CanonicalPath, path: &str) -> Result<CanonicalPath, ()> {
-    CanonicalPath::new(&format!(
-        "{}/{}",
-        base.as_str().trim_end_matches('/'),
-        path.trim_start_matches(['/', '\\'])
-    ))
-    .map_err(|_| ())
+/// A lexically validated absolute Windows path in two forms.
+///
+/// `canonical` is case-folded and decides repository containment, so a case
+/// change can never slip past the sandbox. `display` is the same path with the
+/// caller's case kept, which is what .NET `Path.GetFullPath` returns (and so
+/// what the oracle reports as the target). Both come from the same segment
+/// walk, so they name the same path. `display` uses `/` separators.
+#[derive(Clone, Debug)]
+struct LocalPath {
+    canonical: CanonicalPath,
+    display: String,
 }
 
-fn parent_canonical(path: &CanonicalPath) -> Result<CanonicalPath, ()> {
-    let value = path.as_str();
-    let parent = value.rsplit_once('/').map_or(value, |(parent, _)| parent);
-    CanonicalPath::new(parent).map_err(|_| ())
+impl LocalPath {
+    fn new(input: &str) -> Result<Self, PathError> {
+        // Validation (network/device, drive form, reserved names, traversal
+        // above the drive) is owned by `CanonicalPath`.
+        let canonical = CanonicalPath::new(input)?;
+        // `CanonicalPath` succeeded, so bytes 0..3 are an ASCII drive letter,
+        // ':' and a separator.
+        let normalized = input.replace('\\', "/");
+        let mut segments: Vec<&str> = Vec::new();
+        for segment in normalized[3..].split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop();
+                }
+                _ => segments.push(segment),
+            }
+        }
+        let drive = &normalized[..1];
+        let display = if segments.is_empty() {
+            format!("{drive}:/")
+        } else {
+            format!("{drive}:/{}", segments.join("/"))
+        };
+        Ok(Self { canonical, display })
+    }
+
+    fn join(&self, path: &str) -> Result<Self, PathError> {
+        Self::new(&format!(
+            "{}/{}",
+            self.display.trim_end_matches('/'),
+            path.trim_start_matches(['/', '\\'])
+        ))
+    }
+
+    /// The containing directory. A drive root has none (as .NET
+    /// `Path.GetDirectoryName` returns null), so it is an error here.
+    fn parent(&self) -> Result<Self, PathError> {
+        match self.display.rsplit_once('/') {
+            Some((drive, "")) if drive.len() == 2 => Err(PathError::NotAbsolute),
+            Some((drive, _)) if drive.len() == 2 => Self::new(&format!("{drive}/")),
+            Some((parent, _)) => Self::new(parent),
+            None => Err(PathError::NotAbsolute),
+        }
+    }
+
+    /// The path as .NET `Path.GetFullPath` spells it, for diagnostics.
+    fn windows(&self) -> String {
+        self.display.replace('/', "\\")
+    }
 }
+
+/// .NET `NavigationResolver` diagnostic prefixes for a missing target.
+const RELATIVE_NOT_FOUND: &str = "Target file not found: ";
+const REPOSITORY_NOT_FOUND: &str = "Repository-relative file not found: ";
+const ABSOLUTE_NOT_FOUND: &str = "Absolute target file not found: ";
+const RELATIVE_ESCAPE: &str = "Access blocked: Relative path escapes repository root sandbox.";
 
 fn complete_local_target(
-    target: CanonicalPath,
+    target: LocalPath,
     fragment: Option<String>,
     scope: Option<&RepositoryScope>,
     context: &ResolutionContext,
     vfs: &VirtualFileSystem,
     outside_message: &'static str,
+    not_found_prefix: &'static str,
 ) -> ResolutionResult {
-    if context.enforce_repository_sandbox && scope.is_some_and(|scope| !scope.contains(&target)) {
+    if context.enforce_repository_sandbox
+        && scope.is_some_and(|scope| !scope.contains(&target.canonical))
+    {
         return blocked(fragment, outside_message);
     }
 
     let mut probes = 0;
-    let exists = vfs.file_exists(target.as_str(), &mut probes);
+    let exists = vfs.file_exists(&target.display, &mut probes);
     let target_document = format!(
         "{}{}",
-        target.as_str(),
+        target.display,
         fragment
             .as_ref()
             .map_or(String::new(), |value| format!("#{value}"))
@@ -293,10 +352,58 @@ fn complete_local_target(
             fragment,
             external_uri: None,
             is_safe: true,
-            diagnostic: (!exists).then(|| format!("Target file not found: {}", target.as_str())),
+            diagnostic: (!exists).then(|| format!("{not_found_prefix}{}", target.windows())),
         },
         file_system_probe_count: probes,
     }
+}
+
+/// Resolve a relative destination against an absolute current file, in the
+/// .NET order: probe the current file; if it exists the base is its directory,
+/// otherwise the current path itself is the base.
+///
+/// Decision NAV-1 (`compat/decisions/navigation-probe-order.md`): with the
+/// sandbox enforced, the directory-based target is checked for containment
+/// before the current-file probe, so an escaping destination is rejected with
+/// zero probes. .NET probes the current file first.
+fn resolve_relative_to_current(
+    current: &LocalPath,
+    decoded: &str,
+    fragment: Option<String>,
+    scope: &RepositoryScope,
+    context: &ResolutionContext,
+    vfs: &VirtualFileSystem,
+) -> ResolutionResult {
+    let from_directory = current.parent().and_then(|parent| parent.join(decoded));
+    if context.enforce_repository_sandbox
+        && !from_directory
+            .as_ref()
+            .is_ok_and(|target| scope.contains(&target.canonical))
+    {
+        return blocked(fragment, RELATIVE_ESCAPE);
+    }
+
+    let mut probes = 0;
+    let target = if vfs.file_exists(&current.display, &mut probes) {
+        from_directory
+    } else {
+        current.join(decoded)
+    };
+    let mut result = match target {
+        Ok(target) => complete_local_target(
+            target,
+            fragment,
+            Some(scope),
+            context,
+            vfs,
+            RELATIVE_ESCAPE,
+            RELATIVE_NOT_FOUND,
+        ),
+        Err(_) => blocked(fragment, RELATIVE_ESCAPE),
+    };
+    // Only the trusted current file can have been probed before a rejection.
+    result.file_system_probe_count += probes;
+    result
 }
 
 fn complete_virtual_target(
@@ -455,7 +562,7 @@ pub fn resolve(
     }
     let rooted = decoded.starts_with('/') || decoded.starts_with('\\');
     let absolute_input = lower.starts_with("file:") || has_drive_prefix(&decoded);
-    let absolute_destination = CanonicalPath::new(&decoded).ok();
+    let absolute_destination = LocalPath::new(&decoded).ok();
     let mode = root_mode(context);
 
     if context.enforce_repository_sandbox {
@@ -499,6 +606,7 @@ pub fn resolve(
             context,
             vfs,
             "Access blocked: Absolute path is outside repository sandbox.",
+            ABSOLUTE_NOT_FOUND,
         );
     }
     if absolute_input {
@@ -510,25 +618,19 @@ pub fn resolve(
     }
 
     if let Some(scope) = scope.as_ref() {
-        let base = if rooted {
-            CanonicalPath::new(context.repository_root.as_deref().unwrap_or_default()).ok()
-        } else {
-            CanonicalPath::new(&context.current_file)
-                .ok()
-                .and_then(|current| parent_canonical(&current).ok())
-        };
-        if base.is_none() && context.enforce_repository_sandbox {
-            return blocked(
-                fragment,
-                "Access blocked: Current file is invalid; cannot enforce repository sandbox.",
-            );
-        }
-        if let Some(base) = base {
-            let Ok(target) = join_canonical(&base, &decoded) else {
+        if rooted {
+            const ROOT_TRAVERSAL: &str =
+                "Access blocked: Repository root traversal outside sandbox boundary.";
+            // A canonical scope implies the root parses; fail closed regardless.
+            let Ok(root) = LocalPath::new(context.repository_root.as_deref().unwrap_or_default())
+            else {
                 return blocked(
                     fragment,
-                    "Access blocked: Relative path escapes repository root sandbox.",
+                    "Access blocked: Repository root is invalid; cannot enforce repository sandbox.",
                 );
+            };
+            let Ok(target) = root.join(&decoded) else {
+                return blocked(fragment, ROOT_TRAVERSAL);
             };
             return complete_local_target(
                 target,
@@ -536,8 +638,27 @@ pub fn resolve(
                 Some(scope),
                 context,
                 vfs,
-                "Access blocked: Relative path escapes repository root sandbox.",
+                ROOT_TRAVERSAL,
+                REPOSITORY_NOT_FOUND,
             );
+        } else {
+            let current = LocalPath::new(&context.current_file)
+                .ok()
+                .filter(|current| current.parent().is_ok());
+            match current {
+                Some(current) => {
+                    return resolve_relative_to_current(
+                        &current, &decoded, fragment, scope, context, vfs,
+                    );
+                }
+                None if context.enforce_repository_sandbox => {
+                    return blocked(
+                        fragment,
+                        "Access blocked: Current file is invalid; cannot enforce repository sandbox.",
+                    );
+                }
+                None => {}
+            }
         }
     }
 

@@ -8,7 +8,7 @@
       "fragment": "overview",
       "isSafe": true,
       "kind": "CrossDocumentWithAnchor",
-      "targetDocument": "c:/repo/docs/api.md#overview"
+      "targetDocument": "C:/repo/docs/api.md#overview"
     }
   },
   "input": {
@@ -25,7 +25,10 @@
   "schemaVersion": "marknexia-parity-v1",
   "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
   "virtualFileSystem": {
-    "files": ["c:/repo/docs/nested/details.md", "c:/repo/docs/api.md"],
+    "files": [
+      "c:/repo/docs/nested/details.md",
+      "c:/repo/docs/api.md"
+    ],
     "root": "C:/repo"
   }
 }

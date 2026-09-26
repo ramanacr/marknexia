@@ -1,14 +1,14 @@
 {
   "area": "navigation",
   "expected": {
-    "fileSystemProbeCount": 1,
+    "fileSystemProbeCount": 2,
     "intent": {
       "diagnostic": null,
       "externalUri": null,
       "fragment": null,
       "isSafe": true,
       "kind": "CrossDocument",
-      "targetDocument": "c:/repo/docs/api.md"
+      "targetDocument": "C:/repo/docs/api.md"
     }
   },
   "input": {
@@ -25,7 +25,10 @@
   "schemaVersion": "marknexia-parity-v1",
   "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
   "virtualFileSystem": {
-    "files": ["c:/repo/README.md", "c:/repo/docs/api.md"],
+    "files": [
+      "c:/repo/README.md",
+      "c:/repo/docs/api.md"
+    ],
     "root": "C:/repo"
   }
 }

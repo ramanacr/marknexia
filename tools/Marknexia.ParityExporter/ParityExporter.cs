@@ -137,6 +137,32 @@ public sealed class ParityExporter
             }, sourceRevision));
         }
 
+        // Positive navigation cases over an absolute virtual Windows repository. The real
+        // resolver and canonicalizer run against an in-memory file set, so no host path
+        // under C:\repo is ever probed and every FileExists call is counted.
+        string[] rootFiles = ["c:/repo/README.md", "c:/repo/docs/api.md"];
+        string[] nestedFiles = ["c:/repo/docs/nested/details.md", "c:/repo/docs/api.md"];
+        foreach ((string name, string currentFile, string destination, string[] files) in new[]
+        {
+            ("positive-relative", "C:/repo/README.md", "docs/api.md", rootFiles),
+            ("positive-repository-root", "C:/repo/docs/nested/details.md", "/docs/api.md#overview", nestedFiles),
+            ("positive-absolute-local", "C:/repo/README.md", "file:///C:/repo/docs/api.md#overview", rootFiles),
+            ("positive-windows-absolute", "C:/repo/README.md", "C:\\REPO\\docs\\api.md", rootFiles)
+        })
+        {
+            var virtualFiles = new InMemoryFileService(files);
+            var positiveResolver = new NavigationResolver(canonicalizer, virtualFiles);
+            var positiveContext = new ResolutionContext(currentFile, AbsoluteVirtualRoot, null, new NavigationPolicy());
+            NavigationIntent intent = positiveResolver.Resolve(destination, positiveContext);
+            if (!intent.IsSafe || intent.Kind is not (NavigationKind.CrossDocument or NavigationKind.CrossDocumentWithAnchor))
+                throw new InvalidDataException($"Positive navigation fixture '{name}' did not resolve to a document: {intent.Kind}.");
+            cases.Add(Case("navigation", name, AbsoluteNavigationInput(destination, positiveContext), AbsoluteVirtualFileSystem(files), new JsonObject
+            {
+                ["intent"] = AbsoluteIntentExpected(intent),
+                ["fileSystemProbeCount"] = virtualFiles.ProbeCount
+            }, sourceRevision));
+        }
+
         foreach ((string name, string html, bool svg) in new[]
         {
             ("unsafe-html", "<script>alert(1)</script><a href=\"javascript:alert(1)\">bad</a>", false),
@@ -400,6 +426,73 @@ public sealed class ParityExporter
         public bool DirectoryExists(string directoryPath) { CheckedPaths.Add(directoryPath); return false; }
         public string ComputeContentHash(string content) => throw new NotSupportedException();
         public Task<FileReadResult> ReadTextAsync(string filePath, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// In-memory model of the Windows file system for navigation fixtures: a file exists when
+    /// its path equals a declared file under ordinal case-insensitive comparison after '/' is
+    /// read as '\'. Every FileExists and DirectoryExists call counts as one probe.
+    /// </summary>
+    private sealed class InMemoryFileService(IReadOnlyCollection<string> files) : IFileService
+    {
+        public int ProbeCount { get; private set; }
+        public bool FileExists(string filePath)
+        {
+            ProbeCount++;
+            string probe = filePath.Replace('/', '\\');
+            return files.Any(file => file.Replace('/', '\\').Equals(probe, StringComparison.OrdinalIgnoreCase));
+        }
+        public bool DirectoryExists(string directoryPath) { ProbeCount++; return false; }
+        public string ComputeContentHash(string content) => throw new NotSupportedException();
+        public Task<FileReadResult> ReadTextAsync(string filePath, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    // Serialization rules for absolute virtual-root navigation cases:
+    // * Inputs and declared files are written exactly as passed to the resolver.
+    // * targetDocument is DocumentUri.ToString() with each '\' written as '/', the separator
+    //   used by every other fixture path. Nothing else changes: drive letter and path case
+    //   are exactly what the .NET PathCanonicalizer returned (it preserves case).
+    // * Targets outside the declared virtual root (ordinal case-insensitive, as .NET
+    //   IsWithinRoot compares) are rejected rather than exported.
+    private const string AbsoluteVirtualRoot = "C:/repo";
+
+    private static JsonObject AbsoluteNavigationInput(string destination, ResolutionContext context) => new()
+    {
+        ["destination"] = destination,
+        ["currentFile"] = context.CurrentFilePath,
+        ["repositoryRoot"] = context.RepositoryRoot,
+        ["policy"] = new JsonObject
+        {
+            ["enforceRepositorySandbox"] = context.Policy.EnforceRepositorySandbox,
+            ["allowExternalLinks"] = context.Policy.AllowExternalLinks,
+            ["allowRemoteAssets"] = context.Policy.AllowRemoteAssets
+        }
+    };
+
+    private static JsonObject AbsoluteVirtualFileSystem(IEnumerable<string> files) => new()
+    {
+        ["root"] = AbsoluteVirtualRoot,
+        ["files"] = new JsonArray(files.Select(file => JsonValue.Create(file)).ToArray<JsonNode?>())
+    };
+
+    private static JsonObject AbsoluteIntentExpected(NavigationIntent intent) => new()
+    {
+        ["kind"] = intent.Kind.ToString(),
+        ["fragment"] = intent.Fragment,
+        ["isSafe"] = intent.IsSafe,
+        ["targetDocument"] = ToAbsoluteVirtualDocument(intent.TargetDocument),
+        ["externalUri"] = intent.ExternalUri?.ToString(),
+        ["diagnostic"] = intent.Diagnostic
+    };
+
+    private static string? ToAbsoluteVirtualDocument(DocumentUri? document)
+    {
+        if (document is null) return null;
+        string path = document.CanonicalPath.Replace('\\', '/');
+        string root = AbsoluteVirtualRoot + "/";
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Navigation fixture target escaped its declared virtual root.");
+        return string.IsNullOrEmpty(document.Fragment) ? path : path + "#" + document.Fragment;
     }
 
     private static ParityCase Case(string area, string name, JsonNode input, JsonNode? virtualFileSystem, JsonNode expected, string sourceRevision) =>
