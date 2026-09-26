@@ -28,7 +28,9 @@ fn fixture(source: &str) -> Fixture {
 }
 
 #[test]
-fn all_frozen_hostile_fixtures_preserve_expected_parity_and_fail_closed() {
+fn frozen_hostile_fixture_inputs_never_emit_active_content() {
+    // Byte-exact parity is gated in tests/parity_v1.rs. This test pins the
+    // security-relevant outcome of each frozen input independently of it.
     let cases = [
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-html.case.json"),
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-uri.case.json"),
@@ -36,48 +38,40 @@ fn all_frozen_hostile_fixtures_preserve_expected_parity_and_fail_closed() {
         include_str!("../../../compat/fixtures/v1/sanitizer/unsafe-svg.case.json"),
     ];
     let policy = ContentPolicy::default();
-    let expected = [
-        ("unsafe-html", "<a href=\"#\">bad</a>"),
-        ("unsafe-uri", "<img src=\"#\">"),
-        (
-            "unsafe-css",
-            "<div style=\"background-position: initial; background-size: initial; background-repeat: initial; background-attachment: initial; background-origin: initial; background-clip: initial; background-color: initial\">text</div>",
-        ),
-        ("unsafe-svg", "<svg><path d=\"M0 0\"></path></svg>"),
-    ];
-    for (source, (expected_name, expected_output)) in cases.into_iter().zip(expected) {
+    for source in cases {
         let case = fixture(source);
-        assert_eq!(case.name, expected_name);
-        assert_eq!(case.expected.sanitized_html, expected_output);
-        let result: Result<(), SanitizeError> = match case.input.mode.as_str() {
+        let output = match case.input.mode.as_str() {
             "html" => HtmlPolicy::new(policy)
                 .sanitize_fragment(&case.input.html)
-                .map(|_| ()),
+                .unwrap()
+                .into_string(),
             "svg" => SvgPolicy::new(policy)
                 .sanitize(&case.input.html)
-                .map(|_| ()),
+                .unwrap()
+                .as_str()
+                .to_owned(),
             mode => panic!("unexpected fixture mode {mode}"),
         };
-        assert!(
-            matches!(
-                result,
-                Err(SanitizeError::ParserUnavailable | SanitizeError::SvgParserUnavailable)
-            ),
-            "{} must not bypass the unavailable parser boundary",
-            case.name
-        );
-        match expected_name {
-            "unsafe-uri" => assert_eq!(
-                UrlPolicy::new(policy).validate("vbscript:msgbox(1)", UrlContext::Image),
-                Err(SanitizeError::UnsafeUrl)
-            ),
-            "unsafe-css" => assert_eq!(
-                CssPolicy::new(policy).sanitize_inline_style("background:url(javascript:alert(1))"),
-                Err(SanitizeError::CssParserUnavailable)
-            ),
-            _ => {}
+        let lower = output.to_ascii_lowercase();
+        for needle in ["<script", "javascript:", "vbscript:", "onclick", "url("] {
+            assert!(
+                !lower.contains(needle),
+                "{}: {needle} in {output}",
+                case.name
+            );
         }
+        assert!(!case.expected.sanitized_html.is_empty());
     }
+    assert_eq!(
+        UrlPolicy::new(policy).validate("vbscript:msgbox(1)", UrlContext::Image),
+        Err(SanitizeError::UnsafeUrl)
+    );
+    assert_eq!(
+        CssPolicy::new(policy)
+            .sanitize_inline_style("background:url(javascript:alert(1))")
+            .unwrap(),
+        ""
+    );
 }
 
 #[test]
@@ -230,14 +224,25 @@ fn plain_text_encoder_cannot_create_active_markup() {
 }
 
 #[test]
-fn css_and_svg_never_return_partially_cleaned_content_without_parsers() {
+fn css_and_svg_policies_return_only_sanitized_content() {
     let policy = ContentPolicy::default();
     assert_eq!(
-        CssPolicy::new(policy).sanitize_inline_style("color:red"),
-        Err(SanitizeError::CssParserUnavailable)
+        CssPolicy::new(policy)
+            .sanitize_inline_style("color:red")
+            .unwrap(),
+        "color: red"
     );
     assert_eq!(
-        SvgPolicy::new(policy).sanitize("<svg><path/></svg>"),
-        Err(SanitizeError::SvgParserUnavailable)
+        CssPolicy::new(policy)
+            .sanitize_inline_style("color:red;behavior:url(x.htc);width:expression(alert(1))")
+            .unwrap(),
+        "color: red"
+    );
+    assert_eq!(
+        SvgPolicy::new(policy)
+            .sanitize("<svg><path/></svg>")
+            .unwrap()
+            .as_str(),
+        "<svg><path></path></svg>"
     );
 }

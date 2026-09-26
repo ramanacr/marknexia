@@ -2,11 +2,18 @@
 
 //! Security-owned content boundaries.
 //!
-//! [`SanitizedFragment`] cannot be constructed outside this crate. The current
-//! feasibility workspace has no locked parser-backed sanitizer, so
-//! [`HtmlPolicy`] deliberately rejects markup rather than approximating a
-//! sanitizer with string replacement. Plain text can still cross the boundary
-//! after deterministic HTML escaping.
+//! [`SanitizedFragment`] and [`SanitizedSvg`] cannot be constructed outside
+//! this crate. Markup crosses the boundary only through the parser-backed
+//! sanitizer in [`HtmlPolicy::sanitize_fragment`] and [`SvgPolicy::sanitize`]
+//! (ammonia/html5ever with the .NET-equivalent allowlists) or as plain text
+//! through [`HtmlPolicy::encode_text`]. Inline CSS is decided on `cssparser`
+//! tokens. No security decision is made with string replacement on markup.
+
+mod css;
+mod depth;
+mod html;
+
+pub use depth::MAX_NESTING_DEPTH;
 
 use std::{error::Error, fmt};
 
@@ -107,9 +114,8 @@ pub enum SanitizeError {
     LimitExceedsHardCap { kind: &'static str, cap: usize },
     InputTooLarge { kind: &'static str, limit: usize },
     OutputTooLarge { limit: usize },
-    ParserUnavailable,
-    CssParserUnavailable,
-    SvgParserUnavailable,
+    NestingTooDeep { limit: usize },
+    Serialization,
     UnsafeUrl,
 }
 
@@ -125,9 +131,10 @@ impl fmt::Display for SanitizeError {
             Self::OutputTooLarge { limit } => {
                 write!(f, "sanitized output exceeds the {limit}-byte policy limit")
             }
-            Self::ParserUnavailable => f.write_str("parser-backed HTML sanitizer unavailable"),
-            Self::CssParserUnavailable => f.write_str("parser-backed CSS sanitizer unavailable"),
-            Self::SvgParserUnavailable => f.write_str("parser-backed SVG sanitizer unavailable"),
+            Self::NestingTooDeep { limit } => {
+                write!(f, "markup nests deeper than the {limit}-level policy limit")
+            }
+            Self::Serialization => f.write_str("sanitized output could not be serialized"),
             Self::UnsafeUrl => f.write_str("URL rejected by content policy"),
         }
     }
@@ -165,8 +172,8 @@ impl SanitizedSvg {
     }
 }
 
-/// Fail-closed HTML boundary. A parser-backed implementation can replace the
-/// unavailable branch without exposing construction of `SanitizedFragment`.
+/// Parser-backed HTML boundary. Output is produced only by the sanitizer, so
+/// callers cannot relabel arbitrary strings as `SanitizedFragment`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HtmlPolicy {
     policy: ContentPolicy,
@@ -178,14 +185,13 @@ impl HtmlPolicy {
         Self { policy }
     }
 
-    /// No parser is locked in this feasibility tree, so non-empty markup is
-    /// rejected explicitly and without partial output.
+    /// Parse `html` as a `<div>` fragment and keep only the allowlisted
+    /// elements, attributes, URLs and CSS declarations. The input budget is
+    /// checked before parsing and the output budget while serializing; either
+    /// failure returns an error and no partial output.
     pub fn sanitize_fragment(&self, html: &str) -> Result<SanitizedFragment, SanitizeError> {
         enforce_input_limit(html, "HTML", self.policy.limits.max_html_input_bytes)?;
-        if html.is_empty() {
-            return Ok(SanitizedFragment(String::new()));
-        }
-        Err(SanitizeError::ParserUnavailable)
+        html::sanitize(html, self.policy).map(SanitizedFragment)
     }
 
     /// Encode untrusted plain text as inert HTML. This is not an HTML sanitizer.
@@ -222,9 +228,13 @@ impl SvgPolicy {
         Self { policy }
     }
 
+    /// Sanitize SVG markup with the same parser and allowlists as the .NET
+    /// `SanitizeSvg` (which also runs the HTML sanitizer). Scripts, event
+    /// handlers, foreign-namespace escapes and non-fragment `<use>`
+    /// references are removed. Output is bounded by the HTML output budget.
     pub fn sanitize(&self, svg: &str) -> Result<SanitizedSvg, SanitizeError> {
         enforce_input_limit(svg, "SVG", self.policy.limits.max_svg_input_bytes)?;
-        Err(SanitizeError::SvgParserUnavailable)
+        html::sanitize(svg, self.policy).map(SanitizedSvg)
     }
 }
 
@@ -239,10 +249,13 @@ impl CssPolicy {
         Self { policy }
     }
 
-    /// Inline style input is rejected until a real CSS parser is locked.
+    /// Sanitize the body of an inline `style` attribute: only Ganss
+    /// `AllowedCssProperties` survive, and any declaration carrying `url()`,
+    /// `expression()` or another active construct is dropped. Returns the
+    /// retained declarations as `name: value` joined by `"; "` (possibly empty).
     pub fn sanitize_inline_style(&self, css: &str) -> Result<String, SanitizeError> {
         enforce_input_limit(css, "CSS", self.policy.limits.max_css_input_bytes)?;
-        Err(SanitizeError::CssParserUnavailable)
+        Ok(css::sanitize_declarations(css))
     }
 }
 

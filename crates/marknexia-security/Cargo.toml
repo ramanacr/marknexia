@@ -6,7 +6,11 @@ license.workspace = true
 
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+ammonia = "=4.2.0"
+cssparser = { version = "=0.38.0", default-features = false }
+html5ever = "=0.40.1"
 serde = { workspace = true }
+url = "=2.5.8"
 
 [dev-dependencies]
 serde_json = { workspace = true }
