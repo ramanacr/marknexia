@@ -10,7 +10,7 @@ use std::{borrow::Cow, collections::HashMap, io};
 
 use ammonia::{Builder, UrlRelative};
 
-use crate::{ContentPolicy, SanitizeError, UrlContext, UrlPolicy, css, depth};
+use crate::{ContentPolicy, SanitizeError, UrlContext, UrlPolicy, attrs, css, depth};
 
 /// Ganss default `AllowedTags` + .NET additions − .NET removals (`script`,
 /// `iframe`, `object`, `embed`, `applet`, `form`, `base`, `meta`, `link`).
@@ -399,6 +399,11 @@ const PASS_THROUGH_SCHEMES: &[&str] = &["http", "https", "mailto", "tel", "javas
 pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, SanitizeError> {
     if input.trim().is_empty() {
         return Ok(String::new());
+    }
+    // Bound the tokenizer's per-tag O(k²) duplicate-attribute check before
+    // any html5ever parse (probe or ammonia) runs.
+    if !attrs::within_attribute_limit(input, attrs::MAX_ATTRIBUTES_PER_TAG) {
+        return Err(SanitizeError::TooComplex);
     }
     match depth::probe(input, depth::MAX_NESTING_DEPTH) {
         depth::Verdict::Within => {}

@@ -806,6 +806,121 @@ fn adoption_agency_nesting_is_rejected_within_a_time_bound() {
     }
 }
 
+/// Tight bound for the cheap rejection paths under `cargo test --release`.
+fn fast_rejection_bound() -> std::time::Duration {
+    if cfg!(debug_assertions) {
+        std::time::Duration::from_secs(20)
+    } else {
+        std::time::Duration::from_millis(100)
+    }
+}
+
+fn assert_too_complex_fast(label: &str, result: impl FnOnce() -> Result<(), SanitizeError>) {
+    let started = std::time::Instant::now();
+    let outcome = result();
+    let elapsed = started.elapsed();
+    assert_eq!(outcome, Err(SanitizeError::TooComplex), "{label}");
+    assert!(elapsed < fast_rejection_bound(), "{label} took {elapsed:?}");
+}
+
+#[test]
+fn foster_parenting_and_misnested_tables_exhaust_the_work_budget_quickly() {
+    // SAN-8: rcdom scans the parent's children from the front for every
+    // foster-parented insertion, so these are quadratic without the budget.
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let svg_policy = SvgPolicy::new(ContentPolicy::default());
+    let fostered_text = format!("<table>{}", "x<br>".repeat(100_000));
+    let misnested = "<a><table></a>".repeat(100_000);
+    for (label, input) in [
+        ("fostered text", &fostered_text),
+        ("misnested anchor tables", &misnested),
+    ] {
+        assert_too_complex_fast(label, || html_policy.sanitize_fragment(input).map(|_| ()));
+    }
+    // 2 MB of fostered rows: rejected after mostly linear tokenizing work.
+    let fostered_rows = "<table><tr>x<b>y</table>".repeat(80_000);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        html_policy.sanitize_fragment(&fostered_rows),
+        Err(SanitizeError::TooComplex)
+    );
+    assert!(
+        started.elapsed() < rejection_bound(),
+        "fostered rows took {:?}",
+        started.elapsed()
+    );
+    assert_too_complex_fast("svg fostered text", || {
+        svg_policy
+            .sanitize(&format!("<table>{}", "x<br>".repeat(100_000)))
+            .map(|_| ())
+    });
+}
+
+#[test]
+fn tags_with_too_many_attributes_are_rejected_before_tokenizing() {
+    // SAN-8: html5ever's duplicate-attribute check is O(k²) per tag.
+    let limit = marknexia_security::MAX_ATTRIBUTES_PER_TAG;
+    let tag = |count: usize| {
+        let mut tag = String::from("<p");
+        for index in 0..count {
+            tag.push_str(&format!(" a{index}=\"v\""));
+        }
+        tag.push_str(">t</p>");
+        tag
+    };
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let svg_policy = SvgPolicy::new(ContentPolicy::default());
+    let many = tag(10_000);
+    assert_too_complex_fast("10k attributes", || {
+        html_policy.sanitize_fragment(&many).map(|_| ())
+    });
+    let svg_many = format!(
+        "<svg><path{}/></svg>",
+        &tag(10_000)[2..tag(10_000).len() - 6]
+    );
+    assert_too_complex_fast("10k svg attributes", || {
+        svg_policy.sanitize(&svg_many).map(|_| ())
+    });
+    // Hidden behind a raw-text quote misalignment.
+    let hidden = format!("<textarea><x y=\"</textarea>{}", tag(limit + 1));
+    assert_too_complex_fast("hidden attributes", || {
+        html_policy.sanitize_fragment(&hidden).map(|_| ())
+    });
+    // At the limit is fine; unknown attributes are then dropped as usual.
+    assert_eq!(html(&tag(limit)), "<p>t</p>");
+}
+
+#[test]
+fn legitimate_large_documents_are_not_rejected() {
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let row = "<tr><td>a</td><td><code>b</code></td><td style=\"text-align: right\">c</td></tr>
+";
+    let table = format!(
+        "<table><thead><tr><th>h</th></tr></thead><tbody>{}</tbody></table>",
+        row.repeat(20_000)
+    );
+    assert_eq!(
+        html_policy.sanitize_fragment(&table).unwrap().as_str(),
+        table
+    );
+    let mut list = String::new();
+    for _ in 0..40 {
+        list.push_str("<ul><li>item");
+    }
+    for _ in 0..40 {
+        list.push_str("</li></ul>");
+    }
+    let lists = format!("{list}<blockquote><p>quote</p></blockquote>").repeat(2_000);
+    assert_eq!(
+        html_policy.sanitize_fragment(&lists).unwrap().as_str(),
+        lists
+    );
+    let attributes =
+        "<p class=\"a b\" id=\"x\" title=\"t > u\" style=\"color: red\"><!-- c -->t</p>"
+            .repeat(20_000);
+    assert!(html_policy.sanitize_fragment(&attributes).is_ok());
+}
+
 #[test]
 fn flat_content_under_maximum_nesting_exhausts_the_work_budget() {
     // SAN-8: 250 levels of nesting followed by ~4 MiB of flat siblings.

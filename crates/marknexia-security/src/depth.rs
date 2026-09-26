@@ -92,6 +92,19 @@ pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
     verdict.get()
 }
 
+/// Upper bound on rcdom's front-to-back scan to reach element `position` in
+/// a child list that interleaves at most one merged text node between
+/// elements.
+fn rcdom_index_cost(position: usize) -> usize {
+    position.saturating_mul(2).saturating_add(2)
+}
+
+/// Upper bound on the length of the rcdom child list that holds `len`
+/// elements, plus one unit for the operation itself.
+fn rcdom_len_cost(len: usize) -> usize {
+    len.saturating_mul(2).saturating_add(2)
+}
+
 fn document_name() -> QualName {
     QualName::new(None, ns!(), local_name!(""))
 }
@@ -161,7 +174,10 @@ impl DepthSink {
         };
         let siblings = &mut nodes[parent].children;
         if let Some(position) = siblings.iter().rposition(|&c| c == child) {
-            self.charge(siblings.len() - position);
+            // rcdom finds the child by scanning its parent's children from
+            // the front, and that list also holds text nodes (at most one
+            // between neighbouring elements after merging).
+            self.charge(rcdom_index_cost(position));
             siblings.remove(position);
         }
     }
@@ -178,7 +194,13 @@ impl DepthSink {
         let position = before
             .and_then(|sibling| siblings.iter().rposition(|&c| c == sibling))
             .unwrap_or(siblings.len());
-        self.charge(siblings.len() - position + 1);
+        // Appending is O(1) in rcdom. Inserting before a sibling scans for
+        // the sibling from the front and shifts the tail: the whole list.
+        self.charge(if before.is_some() {
+            rcdom_len_cost(siblings.len())
+        } else {
+            1
+        });
         siblings.insert(position, child);
         nodes[child].parent = Some(parent);
         let depth = nodes[parent].depth + 1;
@@ -276,13 +298,22 @@ impl TreeSink for DepthSink {
     fn set_quirks_mode(&self, _mode: QuirksMode) {}
 
     fn append_before_sibling(&self, sibling: &usize, new_node: NodeOrText<usize>) {
-        if let NodeOrText::AppendNode(child) = new_node {
-            let parent = self.nodes.borrow()[*sibling].parent;
-            match parent {
+        let parent = self.nodes.borrow()[*sibling].parent;
+        match new_node {
+            NodeOrText::AppendNode(child) => match parent {
                 Some(parent) => self.attach(child, parent, Some(*sibling)),
                 None => {
                     let mut nodes = self.nodes.borrow_mut();
                     self.detach(&mut nodes, child);
+                }
+            },
+            // Foster-parented text: rcdom still scans the parent's children
+            // for the sibling and may insert, even though the probe keeps no
+            // text nodes.
+            NodeOrText::AppendText(_) => {
+                if let Some(parent) = parent {
+                    let len = self.nodes.borrow()[parent].children.len();
+                    self.charge(rcdom_len_cost(len));
                 }
             }
         }

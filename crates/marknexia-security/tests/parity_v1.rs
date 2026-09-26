@@ -225,6 +225,19 @@ fn rendered_markdown_bodies_from_rendering_fixtures_are_preserved() {
             .sanitize_fragment(body)
             .expect("rendered body within limits");
         assert_eq!(sanitized.as_str(), body, "{} body changed", case.name);
+        // The same body repeated up to 1,000 times (within the 4 MiB input
+        // limit) must not trip the depth, work or attribute budgets.
+        let copies = (marknexia_security::MAX_HTML_INPUT_BYTES / body.len().max(1)).min(1_000);
+        let repeated = body.repeat(copies);
+        let sanitized = HtmlPolicy::new(policy)
+            .sanitize_fragment(&repeated)
+            .unwrap_or_else(|error| panic!("{} x{copies}: {error}", case.name));
+        assert_eq!(
+            sanitized.as_str(),
+            repeated,
+            "{} x{copies} changed",
+            case.name
+        );
         rendered += 1;
     }
     assert!(

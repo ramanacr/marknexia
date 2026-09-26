@@ -56,7 +56,10 @@ AngleSharp has no nesting or work limit. html5ever's tree builder scans the open
 
 * tree depth exceeds `MAX_NESTING_DEPTH` (256): `SanitizeError::NestingTooDeep`;
 * tree-construction work (each placement is charged its depth, plus re-measurement and child-scan steps) exceeds `8 × input bytes + 262,144`: `SanitizeError::TooComplex`;
-* more than 4,096 adoption-agency reparent operations occur: `SanitizeError::TooComplex`.
+* more than 4,096 adoption-agency reparent operations occur: `SanitizeError::TooComplex`. Only misnested raw HTML triggers these (Markdown output is well-formed), so a document with more than 4,096 misnesting repairs is rejected rather than sanitized. That is an accepted usability cost.
+* any start or end tag may carry more than `MAX_ATTRIBUTES_PER_TAG` (256) attributes: `SanitizeError::TooComplex`. html5ever's duplicate-attribute check is quadratic per tag and invisible to the tree sink, so a linear pre-scan runs before any html5ever parse. The pre-scan follows the tokenizer's tag and quoting states. Where the real state depends on the tree builder (raw-text elements, comments, CDATA), it tracks every possible state at once, so it can over-count but never under-count.
+
+Foster-parented and moved nodes are charged what rcdom's front-to-back child scans cost, including text nodes. Without that charge, `<table>` followed by many `x<br>` pairs is quadratic in rcdom.
 
 Browsers cap parser nesting at 512. Ordinary Markdown output uses well under 3 work units per byte.
 

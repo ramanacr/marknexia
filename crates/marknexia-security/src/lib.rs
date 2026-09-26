@@ -9,10 +9,12 @@
 //! through [`HtmlPolicy::encode_text`]. Inline CSS is decided on `cssparser`
 //! tokens. No security decision is made with string replacement on markup.
 
+mod attrs;
 mod css;
 mod depth;
 mod html;
 
+pub use attrs::MAX_ATTRIBUTES_PER_TAG;
 pub use depth::MAX_NESTING_DEPTH;
 
 use std::{error::Error, fmt};
