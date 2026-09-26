@@ -1,5 +1,5 @@
 use marknexia_win32::{
-    accessibility::{AccessibilityTree, AccessibleRole},
+    accessibility::{AccessibilityTree, AccessibleRole, tab_slot},
     tabs::TabStore,
 };
 
@@ -34,4 +34,14 @@ fn destroyed_accessibility_tree_exposes_no_stale_children() {
 
     assert!(tree.children().is_empty());
     assert_eq!(tree.selected_tab(), None);
+}
+
+#[test]
+fn tab_slots_cover_the_strip_without_gaps_and_reject_out_of_range() {
+    assert_eq!(tab_slot(100, 3, 0), Some((0, 33)));
+    assert_eq!(tab_slot(100, 3, 1), Some((33, 66)));
+    assert_eq!(tab_slot(100, 3, 2), Some((66, 100)));
+    assert_eq!(tab_slot(100, 3, 3), None);
+    assert_eq!(tab_slot(100, 0, 0), None);
+    assert_eq!(tab_slot(-5, 2, 1), Some((0, 0)));
 }

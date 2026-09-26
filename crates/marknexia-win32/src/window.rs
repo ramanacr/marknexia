@@ -10,57 +10,61 @@ use marknexia_webview::{
     session::WebViewSession,
 };
 use windows::{
-    core::{w, Error, PCWSTR},
     Win32::{
         Foundation::{
-            GetLastError, SetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WIN32_ERROR, WPARAM,
+            COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SetLastError,
+            WIN32_ERROR, WPARAM,
         },
         Graphics::{
-            Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE},
+            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
             Gdi::{
-                BeginPaint, CreateSolidBrush, DeleteObject, DrawFocusRect, EndPaint, FillRect,
-                GetSysColor, GetSysColorBrush, SetBkMode, SetTextColor, TextOutW, COLORREF,
-                COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
-                COLOR_WINDOW, COLOR_WINDOWTEXT, HGDIOBJ, PAINTSTRUCT, TRANSPARENT,
+                BeginPaint, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
+                COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateSolidBrush,
+                DeleteObject, DrawFocusRect, EndPaint, FillRect, GetSysColor, GetSysColorBrush,
+                HGDIOBJ, InvalidateRect, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
+                TextOutW, UpdateWindow,
             },
         },
         System::{
             LibraryLoader::GetModuleHandleW,
-            Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
         },
         UI::{
             HiDpi::{
-                AreDpiAwarenessContextsEqual, GetDpiForWindow, GetThreadDpiAwarenessContext,
-                SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                GetDpiForWindow, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext,
             },
-            Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT},
+            Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT},
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-                GetMessageW, GetWindowLongPtrW, InvalidateRect, LoadCursorW, PostMessageW,
-                PostQuitMessage, RegisterClassW, SetFocus, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-                IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_GETOBJECT, WM_KEYDOWN,
-                WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
-                WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW,
-                WS_TABSTOP, WS_VISIBLE,
+                CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
+                IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW,
+                SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DPICHANGED,
+                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
+                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
+    core::{Error, PCWSTR, w},
 };
 
 use crate::{
-    accessibility::native::{is_uia_root_request, NativeAccessibility},
+    accessibility::{
+        native::{NativeAccessibility, SelectTab, is_uia_root_request},
+        tab_slot,
+    },
     app::{AppState as PortableAppState, FocusSurface},
-    keyboard::{route_key, KeyChord, ShellCommand},
+    keyboard::{KeyChord, ShellCommand, route_key},
     layout::{PixelRect, ShellLayout, ShellLayoutRequest},
-    theme::{palette, resolve_theme, ColorSpec, EffectiveTheme, SystemColorRole},
+    tabs::TabId,
+    theme::{ColorSpec, EffectiveTheme, SystemColorRole, palette, resolve_theme},
 };
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
 const WINDOW_TITLE: PCWSTR = w!("Marknexia");
-const WM_SELECT_TAB: u32 = WM_APP + 1;
 
 #[derive(Debug)]
 pub enum WindowError {
@@ -90,7 +94,11 @@ struct AppState {
     apartment: Option<Rc<StaApartment>>,
     page_observer: Option<Rc<dyn Fn(PageToHost)>>,
     accessibility: Option<NativeAccessibility>,
-    uia_selection: Option<Rc<dyn Fn(crate::tabs::TabId)>>,
+    uia_selection: Option<Rc<SelectTab>>,
+    /// True while the WebView session is taken out for a COM call. A
+    /// reentrant selection must not report success while the active
+    /// controller cannot be switched.
+    webview_checked_out: bool,
     last_error: Option<String>,
     dpi: u32,
     theme: EffectiveTheme,
@@ -107,6 +115,7 @@ impl AppState {
             page_observer: None,
             accessibility: None,
             uia_selection: None,
+            webview_checked_out: false,
             last_error: None,
             dpi: 96,
             theme: EffectiveTheme::Light,
@@ -116,6 +125,9 @@ impl AppState {
 }
 
 struct CreatePayload {
+    // GWLP_USERDATA owns exactly one boxed strong handle, so the slot has a
+    // stable address independent of the Rc allocation.
+    #[allow(clippy::redundant_allocation)]
     state: Option<Box<Rc<RefCell<AppState>>>>,
 }
 
@@ -269,18 +281,12 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
         let _ = app.open_tab("Welcome");
         let _ = app.open_tab("Security and privacy");
     }
-    let select_callback: Rc<dyn Fn(crate::tabs::TabId)> = Rc::new(move |tab_id| {
-        // Queue selection onto the shell loop. The UIA callback never borrows
-        // shell state or calls WebView2 while COM is still on its stack.
-        let _ = unsafe {
-            PostMessageW(
-                Some(hwnd),
-                WM_SELECT_TAB,
-                WPARAM(tab_id.get() as usize),
-                LPARAM(0),
-            )
-        };
-    });
+    // UIA `Select` completes synchronously: it returns only after portable
+    // state, the active WebView controller, and the tab strip agree. No shell
+    // borrow spans the WebView COM call (see `select_tab_id`), so reentry from
+    // UIA on this STA is safe.
+    let select_callback: Rc<SelectTab> =
+        Rc::new(move |tab_id: TabId| select_tab_id(hwnd, tab_id.get(), false));
     let accessibility = NativeAccessibility::new(
         controls.tabs,
         Rc::downgrade(&portable),
@@ -293,6 +299,9 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
     }
     match StaApartment::enter() {
         Ok(apartment) => {
+            // Until the session is stored, a reentrant UIA Select must not
+            // report success against a controller it cannot reach.
+            state.borrow_mut().webview_checked_out = true;
             let apartment = Rc::new(apartment);
             let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
             let mut session = WebViewSession::new(
@@ -309,12 +318,15 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
                         .iter()
                         .map(|tab| (tab.id(), tab.title().to_owned()))
                         .collect::<Vec<_>>(),
-                    app.active_id(),
+                    app.active_tab(),
                 )
             };
             let mut startup_error = None;
             for (tab_id, title) in tabs {
-                let html = format!("<!doctype html><html><body><main><h1>{title}</h1><p>Marknexia native document viewport.</p></main></body></html>").into_bytes();
+                // Tab titles are plain text, so they are entity-encoded. The
+                // <title> names the WebView document for UIA observers.
+                let title = encode_html_text(&title);
+                let html = format!("<!doctype html><html><head><title>{title}</title></head><body><main><h1>{title}</h1><p>Marknexia native document viewport.</p></main></body></html>").into_bytes();
                 if let Err(error) = session.add_document(HostDocument {
                     tab_id: tab_id.get(),
                     document_epoch: 1,
@@ -330,6 +342,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             match session.start() {
                 Ok(()) => {
                     let mut state = state.borrow_mut();
+                    state.webview_checked_out = false;
                     state.webview = Some(session);
                     state.apartment = Some(apartment);
                     state.page_observer = Some(observer);
@@ -337,8 +350,9 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
                 }
                 Err(error) => {
                     let _ = session.close();
-                    state.borrow_mut().last_error =
-                        Some(format!("WebView2 unavailable: {error:?}"));
+                    let mut state = state.borrow_mut();
+                    state.webview_checked_out = false;
+                    state.last_error = Some(format!("WebView2 unavailable: {error:?}"));
                 }
             }
         }
@@ -398,10 +412,6 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_KEYDOWN if route_native_key(hwnd, wparam.0 as u16) => LRESULT(0),
-        WM_SELECT_TAB => {
-            select_tab_id(hwnd, wparam.0 as u64, false);
-            LRESULT(0)
-        }
         WM_DESTROY => {
             if let Some(state) = unsafe { app_state_handle(hwnd) } {
                 close_state(&state);
@@ -494,17 +504,12 @@ fn paint_tabs(hwnd: HWND) {
     let mut client = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
         fill(dc, &client, native_color(colors.surface));
-        if count > 0 {
-            let width = (client.right - client.left).max(0) / count as i32;
-            for (index, (tab_id, title)) in tabs.iter().enumerate() {
-                let mut rect = RECT {
-                    left: index as i32 * width,
+        for (index, (tab_id, title)) in tabs.iter().enumerate() {
+            if let Some((left, right)) = tab_slot(client.right - client.left, count, index) {
+                let rect = RECT {
+                    left,
                     top: 0,
-                    right: if index + 1 == count {
-                        client.right
-                    } else {
-                        (index as i32 + 1) * width
-                    },
+                    right,
                     bottom: client.bottom,
                 };
                 let active = selected == Some(*tab_id);
@@ -538,7 +543,7 @@ fn paint_tabs(hwnd: HWND) {
             }
         }
     }
-    unsafe { EndPaint(hwnd, &paint) };
+    let _ = unsafe { EndPaint(hwnd, &paint) };
 }
 
 fn fill(dc: windows::Win32::Graphics::Gdi::HDC, rect: &RECT, color: COLORREF) {
@@ -554,7 +559,7 @@ fn native_color(spec: ColorSpec) -> COLORREF {
         ColorSpec::Rgb(rgb) => {
             COLORREF(((rgb & 0xff) << 16) | (rgb & 0x00ff00) | ((rgb >> 16) & 0xff))
         }
-        ColorSpec::System(role) => unsafe {
+        ColorSpec::System(role) => COLORREF(unsafe {
             GetSysColor(match role {
                 SystemColorRole::Window => COLOR_WINDOW,
                 SystemColorRole::WindowText => COLOR_WINDOWTEXT,
@@ -564,7 +569,7 @@ fn native_color(spec: ColorSpec) -> COLORREF {
                 SystemColorRole::ButtonText => COLOR_BTNTEXT,
                 SystemColorRole::GrayText => COLOR_GRAYTEXT,
             })
-        },
+        }),
     }
 }
 
@@ -574,9 +579,7 @@ fn route_native_key(hwnd: HWND, key: u16) -> bool {
     if !ctrl && !shift && matches!(key, 0x25 | 0x27) {
         let tab_strip = unsafe { app_state_handle(hwnd) }
             .and_then(|state| state.borrow().controls.map(|controls| controls.tabs));
-        if tab_strip.is_none()
-            || unsafe { windows::Win32::UI::WindowsAndMessaging::GetFocus() } != tab_strip
-        {
+        if tab_strip.is_none() || Some(unsafe { GetFocus() }) != tab_strip {
             return false;
         }
     }
@@ -602,7 +605,9 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
             }
         }
     }
-    if !portable.borrow_mut().apply_command(command) {
+    let previous = portable.borrow().active_tab();
+    let applied = portable.borrow_mut().apply_command(command);
+    if !applied {
         return false;
     }
     if command == ShellCommand::CycleFocus {
@@ -614,10 +619,35 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
             let target = focus_target(controls, focus);
             let _ = unsafe { SetFocus(Some(target)) };
         }
-    } else if let Some(active) = portable.borrow().active_tab() {
-        select_webview(&state, active.get());
+        refresh_tabs(&state, None);
+        return true;
     }
-    refresh_tabs(&state);
+    // Bind the active tab first: a borrow held in an `if let` scrutinee would
+    // span the reentrant WebView COM call below.
+    let active = portable.borrow().active_tab();
+    let closed = command == ShellCommand::CloseTab;
+    // Commands that keep the active tab (sidebar, find bar) need no switch.
+    let switched = closed || active != previous;
+    if switched
+        && let Some(active) = active
+        && !select_webview(&state, active.get())
+    {
+        // Keep portable state and the visible controller in agreement.
+        if command != ShellCommand::CloseTab
+            && let Some(previous) = previous
+        {
+            let _ = portable.borrow_mut().select_tab(previous);
+        }
+        refresh_tabs(&state, None);
+        return false;
+    }
+    if closed {
+        let a11y = state.borrow().accessibility.clone();
+        if let Some(a11y) = a11y {
+            a11y.notify_children_changed();
+        }
+    }
+    refresh_tabs(&state, active.filter(|id| Some(*id) != previous));
     true
 }
 
@@ -652,15 +682,20 @@ fn select_tab_at(hwnd: HWND, x: i32) {
     if count == 0 {
         return;
     }
-    let index =
-        ((x.max(0) as u32).saturating_mul(count as u32) / width).min(count as u32 - 1) as usize;
+    let width = i32::try_from(width).unwrap_or(i32::MAX);
+    let index = (0..count)
+        .find(|index| tab_slot(width, count, *index).is_some_and(|(_, right)| x < right))
+        .unwrap_or(count - 1);
     let id = portable.borrow().tabs().tabs()[index].id();
-    select_tab_id(hwnd, id.get(), true);
+    let _ = select_tab_id(hwnd, id.get(), true);
 }
 
-fn select_tab_id(hwnd: HWND, raw_id: u64, pointer_input: bool) {
+/// Selects a tab from pointer, keyboard, or UIA input. Returns true only when
+/// portable state, the active WebView controller, and the tab strip agree on
+/// `raw_id`. The WebView switches first so a failure leaves nothing changed.
+fn select_tab_id(hwnd: HWND, raw_id: u64, pointer_input: bool) -> bool {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
-        return;
+        return false;
     };
     let portable = Rc::clone(&state.borrow().portable);
     let id = portable
@@ -670,26 +705,48 @@ fn select_tab_id(hwnd: HWND, raw_id: u64, pointer_input: bool) {
         .iter()
         .find(|tab| tab.id().get() == raw_id)
         .map(|tab| tab.id());
-    let Some(id) = id else { return };
+    let Some(id) = id else { return false };
     if pointer_input {
         portable.borrow_mut().note_pointer_input();
     }
-    if portable.borrow_mut().select_tab(id) {
-        select_webview(&state, id.get());
-        refresh_tabs(&state);
+    let already_active = portable.borrow().active_tab() == Some(id);
+    if already_active {
+        return true;
     }
+    if !select_webview(&state, id.get()) {
+        return false;
+    }
+    let selected = portable.borrow_mut().select_tab(id);
+    if !selected {
+        // The tab closed during the WebView call; restore the controller for
+        // whichever tab portable state still considers active.
+        let active = portable.borrow().active_tab();
+        if let Some(active) = active {
+            let _ = select_webview(&state, active.get());
+        }
+        refresh_tabs(&state, None);
+        return false;
+    }
+    refresh_tabs(&state, Some(id));
+    true
 }
 
-fn refresh_tabs(state: &Rc<RefCell<AppState>>) {
+/// Repaints the tab strip synchronously and, when a new tab became active,
+/// raises the UIA selection event after the paint so clients observe
+/// agreement.
+fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     let (a11y, controls) = {
         let state = state.borrow();
         (state.accessibility.clone(), state.controls)
     };
-    if let Some(a11y) = a11y.as_ref() {
-        a11y.refresh();
-    }
     if let Some(c) = controls {
-        let _ = unsafe { InvalidateRect(Some(c.tabs), None, true) };
+        unsafe {
+            let _ = InvalidateRect(Some(c.tabs), None, true);
+            let _ = UpdateWindow(c.tabs);
+        }
+    }
+    if let (Some(a11y), Some(id)) = (a11y.as_ref(), newly_selected) {
+        a11y.notify_selected(id);
     }
 }
 
@@ -858,24 +915,41 @@ fn webview_color(spec: ColorSpec) -> HostColor {
 }
 
 fn take_session(state: &Rc<RefCell<AppState>>) -> Option<WebViewSession> {
-    state.borrow_mut().webview.take()
+    let mut state = state.borrow_mut();
+    let session = state.webview.take();
+    if session.is_some() {
+        state.webview_checked_out = true;
+    }
+    session
 }
 fn restore_session(state: &Rc<RefCell<AppState>>, session: WebViewSession) {
     let mut state = state.borrow_mut();
+    state.webview_checked_out = false;
     if !state.destroyed {
         state.webview = Some(session);
     }
 }
-fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) {
-    if let Some(mut session) = take_session(state) {
-        let error = session
-            .select_tab(tab_id)
-            .err()
-            .map(|error| format!("WebView2 select: {error:?}"));
-        restore_session(state, session);
-        if let Some(error) = error {
+/// Makes `tab_id` the visible controller. Returns false when the session is
+/// checked out by an outer call or rejects the selection. Without a WebView
+/// session (runtime unavailable) there is no controller to disagree with.
+fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) -> bool {
+    if state.borrow().webview_checked_out {
+        return false;
+    }
+    let Some(mut session) = take_session(state) else {
+        return true;
+    };
+    let error = session
+        .select_tab(tab_id)
+        .err()
+        .map(|error| format!("WebView2 select: {error:?}"));
+    restore_session(state, session);
+    match error {
+        Some(error) => {
             state.borrow_mut().last_error = Some(error);
+            false
         }
+        None => true,
     }
 }
 
@@ -972,5 +1046,22 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
     drop(apartment);
     let mut state = state.borrow_mut();
     state.last_error = error.or_else(|| state.last_error.take());
-    drop(controls);
+    let _ = controls;
+}
+
+/// Entity-encodes plain text for HTML element content. This is encoding of
+/// trusted-structure text, not sanitization of markup.
+fn encode_html_text(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => encoded.push_str("&amp;"),
+            '<' => encoded.push_str("&lt;"),
+            '>' => encoded.push_str("&gt;"),
+            '"' => encoded.push_str("&quot;"),
+            '\'' => encoded.push_str("&#39;"),
+            _ => encoded.push(character),
+        }
+    }
+    encoded
 }
