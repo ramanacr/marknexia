@@ -13,22 +13,25 @@
 
 use crate::text::{html_encode, is_space, is_word};
 
-/// `ColorCodeSyntaxHighlighter.HighlightCode`.
-pub(crate) fn highlight(code: &str, language: &str) -> String {
+/// `ColorCodeSyntaxHighlighter.HighlightCode`, or `None` as soon as the
+/// output would exceed `limit` bytes.
+pub(crate) fn highlight(code: &str, language: &str, limit: usize) -> Option<String> {
     if code.is_empty() {
-        return String::new();
+        return Some(String::new());
     }
-    let mut out = String::with_capacity(code.len() * 2 + 64);
+    let mut out = String::with_capacity((code.len() * 2 + 64).min(limit));
     if is_csharp(language) {
         out.push_str("<div class=\"csharp\"><pre>\n");
-        CSharp::new(code).write(&mut out);
+        if !CSharp::new(code).write(&mut out, limit) {
+            return None;
+        }
         out.push_str("\n</pre></div>");
     } else {
         out.push_str("<pre><code>");
         html_encode(code, &mut out);
         out.push_str("</code></pre>");
     }
-    out
+    (out.len() <= limit).then_some(out)
 }
 
 /// `ResolveLanguage` for C#: `c#`/`cs` map to `csharp`, and ColorCode's C#
@@ -211,8 +214,11 @@ struct CSharp<'a> {
     /// already failed to the end of their line.
     char_dead_until: usize,
     string_dead_until: usize,
-    /// No `]` at or after this offset.
-    no_bracket_from: usize,
+    /// Next `]`, and next `]` or `"`, for the attribute rule.
+    next_bracket: NextOf,
+    next_stop: NextOf,
+    /// The last `"…"` search: its opening quote and result.
+    last_string: Option<(usize, Option<usize>)>,
     /// A preprocessor attempt whose leading `\s*` reached this offset failed.
     directive_dead_until: usize,
 }
@@ -225,13 +231,16 @@ impl<'a> CSharp<'a> {
             no_comment_end_from: usize::MAX,
             char_dead_until: 0,
             string_dead_until: 0,
-            no_bracket_from: usize::MAX,
+            next_bracket: NextOf::default(),
+            next_stop: NextOf::default(),
+            last_string: None,
             directive_dead_until: 0,
         }
     }
 
-    /// `HtmlClassFormatter.Write` for every parsed fragment.
-    fn write(mut self, out: &mut String) {
+    /// `HtmlClassFormatter.Write` for every parsed fragment. Returns `false`
+    /// once `out` exceeds `limit` bytes.
+    fn write(mut self, out: &mut String, limit: usize) -> bool {
         let code = self.code;
         let mut plain_from = 0;
         let mut index = 0;
@@ -254,11 +263,15 @@ impl<'a> CSharp<'a> {
                 html_encode(&code[cursor..found.end], out);
                 index = found.end;
                 plain_from = index;
+                if out.len() > limit {
+                    return false;
+                }
             } else {
                 index += utf8_len(self.bytes[index]);
             }
         }
         html_encode(&code[plain_from..], out);
+        out.len() <= limit
     }
 
     /// The combined regex at one position: the first rule that matches.
@@ -389,13 +402,21 @@ impl<'a> CSharp<'a> {
         if index < self.string_dead_until {
             return None;
         }
-        match self.closing_quote(index, b'"') {
+        // The attribute rule may ask again for the same opening quote.
+        if let Some((open, result)) = self.last_string
+            && open == index
+        {
+            return result;
+        }
+        let result = match self.closing_quote(index, b'"') {
             Ok(close) => Some(close + 1),
             Err(line_end) => {
                 self.string_dead_until = line_end;
                 None
             }
-        }
+        };
+        self.last_string = Some((index, result));
+        result
     }
 
     /// `(?s)@"(?:""|.)*?"(?!")`. The lazy loop prefers to stop at a quote not
@@ -431,9 +452,9 @@ impl<'a> CSharp<'a> {
         })?;
         let target_end = target_start + target.len();
         let after_colon = target_end + 1;
-        let stop = self.code[after_colon..]
-            .find([']', '"'])
-            .map(|offset| after_colon + offset)?;
+        let stop = self
+            .next_stop
+            .query(self.bytes, after_colon, |b| b == b']' || b == b'"')?;
         let mut scopes = vec![(target_start, target_end, Style::Keyword)];
         if self.bytes[stop] == b']' {
             return Some(Match {
@@ -458,14 +479,7 @@ impl<'a> CSharp<'a> {
     }
 
     fn bracket_from(&mut self, from: usize) -> Option<usize> {
-        if from >= self.no_bracket_from {
-            return None;
-        }
-        let found = self.code[from..].find(']').map(|offset| from + offset);
-        if found.is_none() {
-            self.no_bracket_from = from;
-        }
-        found
+        self.next_bracket.query(self.bytes, from, |b| b == b']')
     }
 
     /// `^\s*(\#define|…|\#warning).*?$` in multiline mode. `\s*` crosses
@@ -524,6 +538,34 @@ impl<'a> CSharp<'a> {
     }
 }
 
+/// Memoized "next byte matching a fixed predicate at or after `q`". A cached
+/// answer covers every query between its start and its hit (or the end), so
+/// repeated queries from a moving start rescan nothing: the attribute rule's
+/// searches are amortized linear instead of quadratic.
+#[derive(Default)]
+struct NextOf {
+    cached: Option<(usize, Option<usize>)>,
+}
+
+impl NextOf {
+    fn query(&mut self, bytes: &[u8], q: usize, matches: impl Fn(u8) -> bool) -> Option<usize> {
+        let scan = |from: usize, to: usize| {
+            bytes[from.min(to)..to]
+                .iter()
+                .position(|&b| matches(b))
+                .map(|offset| from + offset)
+        };
+        let result = match self.cached {
+            Some((from, found)) if q >= from && found.is_none_or(|hit| q <= hit) => return found,
+            // Only the gap before the cached range is new.
+            Some((from, found)) if q < from => scan(q, from).or(found),
+            _ => scan(q, bytes.len()),
+        };
+        self.cached = Some((q, result));
+        result
+    }
+}
+
 const fn utf8_len(first: u8) -> usize {
     match first {
         0x00..=0x7F => 1,
@@ -538,7 +580,7 @@ mod tests {
     use super::*;
 
     fn cs(code: &str) -> String {
-        let html = highlight(code, "c#");
+        let html = highlight(code, "c#", usize::MAX).unwrap();
         html.strip_prefix("<div class=\"csharp\"><pre>\n")
             .and_then(|rest| rest.strip_suffix("\n</pre></div>"))
             .expect("C# wrapper")
@@ -556,11 +598,19 @@ mod tests {
     #[test]
     fn language_resolution() {
         for language in ["c#", "C#", "cs", " CSharp ", "cake"] {
-            assert!(highlight("x", language).starts_with("<div class=\"csharp\">"));
+            assert!(
+                highlight("x", language, usize::MAX)
+                    .unwrap()
+                    .starts_with("<div class=\"csharp\">")
+            );
         }
-        assert_eq!(highlight("a<b", "python"), "<pre><code>a&lt;b</code></pre>");
-        assert_eq!(highlight("a<b", ""), "<pre><code>a&lt;b</code></pre>");
-        assert_eq!(highlight("", "c#"), "");
+        let plain = Some("<pre><code>a&lt;b</code></pre>".to_owned());
+        assert_eq!(highlight("a<b", "python", usize::MAX), plain);
+        assert_eq!(highlight("a<b", "", usize::MAX), plain);
+        assert_eq!(highlight("", "c#", usize::MAX), Some(String::new()));
+        // The budget stops output growth early.
+        assert_eq!(highlight(&"1 ".repeat(10_000), "cs", 1_000), None);
+        assert_eq!(highlight("a<b", "python", 10), None);
     }
 
     #[test]
@@ -623,11 +673,35 @@ mod tests {
 
     #[test]
     fn hostile_shapes_stay_linear() {
-        let started = std::time::Instant::now();
-        for sample in ["\\'", "\\\"", "/*", "[type:\"", "\n \n", "@\"\"", "///<a"] {
-            let code = sample.repeat(200_000);
-            let _ = highlight(&code, "cs");
+        let mut inputs: Vec<String> = [
+            "\\'",
+            "\\\"",
+            "/*",
+            "[type:\"",
+            "[type:",
+            "\n \n",
+            "@\"\"",
+            "///<a",
+            "[type:\"x\"",
+        ]
+        .iter()
+        .map(|sample| sample.repeat(200_000))
+        .collect();
+        // A single far stop, quote or bracket shared by every attempt.
+        inputs.push(format!("{}\"", "[type:".repeat(200_000)));
+        inputs.push(format!("{}\"x\"", "[type:".repeat(200_000)));
+        inputs.push(format!("{}]", "[type:\"x".repeat(100_000)));
+        for code in &inputs {
+            let started = std::time::Instant::now();
+            let _ = highlight(code, "cs", usize::MAX);
+            let elapsed = started.elapsed();
+            // Quadratic behavior takes minutes here; linear takes milliseconds
+            // (tens of milliseconds unoptimized).
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "{:?}… took {elapsed:?}",
+                &code[..12]
+            );
         }
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 }

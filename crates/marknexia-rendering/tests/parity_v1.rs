@@ -67,7 +67,7 @@ fn directory_case_paths() -> Vec<String> {
 }
 
 fn normalize(page: &str) -> String {
-    let identity = PageIdentity::new(DOCUMENT_ID, NONCE);
+    let identity = PageIdentity::new(DOCUMENT_ID, NONCE).unwrap();
     let host = identity.origin().trim_start_matches("https://").to_owned();
     let nonce = identity.nonce();
     assert_eq!(nonce.len(), 24);
@@ -106,7 +106,10 @@ fn render_case(engine: impl MarkdownEngine, fixture: &Value) -> Value {
     assert_eq!(input["repositoryRoot"], ".");
     let source_path = input["sourcePath"].as_str().unwrap();
     let directory = source_path.rsplit_once('/').map_or("", |(dir, _)| dir);
-    let mut context = RenderContext::new(AppTheme::System, PageIdentity::new(DOCUMENT_ID, NONCE));
+    let mut context = RenderContext::new(
+        AppTheme::System,
+        PageIdentity::new(DOCUMENT_ID, NONCE).unwrap(),
+    );
     context.allow_remote_assets = input["allowRemoteAssets"].as_bool().unwrap();
     context.enable_diagrams = input["enableDiagrams"].as_bool().unwrap();
     context.enable_math = input["enableMath"].as_bool().unwrap();
@@ -447,9 +450,15 @@ fn bundled_assets_match_the_dotnet_sources() {
         let path = repository_root()
             .join("src/Marknexia.Rendering/Assets")
             .join(name);
-        if let Ok(source) = fs::read_to_string(&path) {
-            let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-            assert_eq!(source, bundled, "{name} drifted from {}", path.display());
-        }
+        // Fail loudly: a missing oracle asset must not let this pass silently.
+        let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "{name}: cannot read the .NET oracle asset {} ({error}); the bundled copy \
+                 cannot be verified without it",
+                path.display()
+            )
+        });
+        let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+        assert_eq!(source, bundled, "{name} drifted from {}", path.display());
     }
 }

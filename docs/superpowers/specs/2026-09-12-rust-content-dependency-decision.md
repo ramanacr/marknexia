@@ -254,7 +254,8 @@ ColorCode emits `<div class="{language}"><pre>`, then the source with `<span cla
 Evidence and design:
 
 * The C# rules are the ten ColorCode.Core 2.0.15 `CSharp` rule regexes, in string-heap order: block comment, XML doc comment, line comment, char literal, verbatim string, string, attribute target, preprocessor directive, keyword list, number. They were read from the installed package's user-string heap (`~/.nuget/packages/colorcode.core/2.0.15`). The style class names (`keyword`, `number`, `string`, `stringCSharpVerbatim`, `comment`, `xmlDocTag`, `xmlDocComment`, `preprocessorKeyword`) come from the same heap.
-* Each rule is a hand-written matcher with the same leftmost-first and backtracking outcome, including the backtracking quirk of unterminated verbatim strings. Memoized failure bounds make it linear, whereas the .NET regex is quadratic on unterminated quotes, `/*`, `[type:"` and long blank runs (unit test `hostile_shapes_stay_linear`).
+* Each rule is a hand-written matcher with the same leftmost-first and backtracking outcome, including the backtracking quirk of unterminated verbatim strings. Memoized searches make it linear, whereas the .NET regex is quadratic on unterminated quotes, `/*`, `[type:"` and long blank runs (unit test `hostile_shapes_stay_linear`).
+* **Review C1 fix:** the attribute rule's `]`/`"` stop search was not memoized. `[type:` repeated 64,000 times took 27.2 s (release) and would take hours at 4 MB. After the fix, n = 16,000 / 64,000 / 200,000 render in 19 / 60 / 159 ms (`csharp_attribute_prefix_floods_stay_linear`).
 * Other ColorCode languages fall back to the .NET plain-text output (REND-2). Adding a grammar later means porting its rules the same way and adding a frozen oracle case.
 * **Dependencies.** The only dependency added to `marknexia-rendering` is `markup5ever =0.40.0`, already in the graph through html5ever. It provides the HTML5 named-entity table for the `WebUtility.HtmlDecode` emulation. `Cargo.lock` gains no package. Licenses are unchanged.
 * **Binary size.** Not measured, because a binary build is outside the allowed command set. No crate was added, so the delta is only the tokenizer's code plus the 34.8 KB of bundled CSS and JS.
@@ -280,7 +281,9 @@ These come from `tests/hostile_inputs.rs`. Every case must render or fail with a
 | --- | --- | --- |
 | 20,000-deep quotes, emphasis, links, lists (1 MiB stack) | rendered | 5–32 ms |
 | 20,000 raw `<div>` / 50,000 raw `<span>` | `Sanitizer(NestingTooDeep)` (SAN-8) | 84 / 114 ms |
-| 50,000-deep `\sqrt{` math | rendered, structural depth capped at 32 | 46 ms |
+| 50,000-deep `\sqrt{` math | rendered, element depth capped at 32 | 19 ms |
+| `[type:` × 200,000 in a C# block (review C1) | rendered | 159 ms (was quadratic: 27.2 s at × 64,000) |
+| `1 ` × 1.5 M in a C# block / `\frac{a}{b}` × 300,000 | rejected against the budget before building | 14 / 76 ms |
 | 5,000 Mermaid blocks | 64 shells, 4,936 fallbacks, 4,936 diagnostics | 449 ms |
 | 4 MiB paragraph / lines | rendered (4.23 MB page) | 87 / 462 ms |
 | 4 MiB C# code, images, math, `[type:"` | `Sanitizer(InputTooLarge)` after amplification (REND-1) | 50–1,120 ms |

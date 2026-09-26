@@ -17,7 +17,13 @@ All 7 frozen cases in `compat/fixtures/v1/rendering` match byte-for-byte, includ
 | Body HTML (after code, diagram and math passes) over 4 MiB, for example a 4 MiB paragraph or a 1.5 MiB code block (copy metadata percent-encodes it) | rendered | `RenderError::Sanitizer(InputTooLarge)`, no partial output |
 | Raw HTML nested deeper than 256 levels | rendered | `RenderError::Sanitizer(NestingTooDeep)` |
 
-The body is also checked against the 4 MiB budget after each pass, so amplification (copy metadata, diagram shells) fails early rather than building oversized strings.
+Every pass runs inside the 4 MiB budget, because the sanitizer cap binds long before the 128 MiB page limit. Before building each replacement, a pass checks a lower-bound estimate against the budget left:
+
+* code block: twice the code length plus the container;
+* diagram shell: four times the source length plus the shell;
+* math: capped while it renders.
+
+Amplifying input (copy metadata, `1 1 1` highlighting at about 15×, `\frac` chains at about 10×, diagram shells) is therefore rejected before any intermediate string grows far past 4 MiB.
 
 ## REND-2 — Only C# is highlighted
 
@@ -38,6 +44,15 @@ The copy button and its `data-copy-text` metadata are the same for every languag
 
 .NET sanitizes with remote images kept and then regex-blanks them (`src=""`, `srcset` removed). Rust does the same with `RemoteImagePolicy::AllowHttps`, applies the same blanking scanner, and sanitizes the result again under `Deny`, so the returned `SanitizedFragment` comes from the document's real policy. When the body contains no `src`, a single `Deny` pass gives the same result and is used instead. What remains different comes from SAN-3: the Rust policy removes `http://…` and `//host/…` image sources, where .NET keeps them and then blanks them. So Rust emits `<img alt="…">` where .NET emits `<img src="" alt="…">`. The fixture (`https://`) matches exactly.
 
+In two cases Rust is stricter, because the .NET blanking regex misses them and only the page CSP blocks the fetch. Both are pinned by `remote_sources_dotnet_leaks_are_removed`:
+
+| Input (remote assets off) | .NET | Rust |
+| --- | --- | --- |
+| `<input type="image" src="https://…">` (`BlockRemoteImages` only matches `<img`) | remote `src` kept | removed |
+| `<img src="https://…/a'b.png">`, a quote character inside the value (`[^"']*` stops at it) | remote `src` kept | `src` removed |
+
+**.NET fixture request:** add both inputs, plus `http://` and `//` image sources, to the exporter's rendering cases.
+
 ## REND-5 — Math renderer bounds
 
 `SimpleMathRenderer` is ported with its quirks preserved:
@@ -50,23 +65,32 @@ Two differences:
 
 | Input | .NET | Rust |
 | --- | --- | --- |
-| Structural nesting (`\frac`, `\sqrt`, `\text`, `^`, `_`) deeper than `MAX_MATH_DEPTH` (32) | unbounded recursion; stack overflow at extreme depth | deeper content is emitted as encoded literal text |
+| Structural nesting beyond an element budget of `MAX_MATH_DEPTH` (32). `^`, `_` and `\text` cost 1, `\frac` and `\sqrt` cost 2 because they emit nested spans. | unbounded recursion; stack overflow at extreme depth | deeper content is emitted as encoded literal text |
+| Math output larger than the remaining 4 MiB body budget (REND-1) | rendered | `RenderError::Sanitizer(InputTooLarge)`, stopped while rendering |
 | `^\` or `_\` at the end of an expression | `ArgumentOutOfRangeException`, and the whole render fails | argument clamped to `\` |
 
 The `ReadAtom`/`ReadGroup` mutual recursion runs as a loop, so `^{^{^{…` cannot overflow the stack.
+
+The budget counts generated elements, not recursion, so math nests at most 35 elements including its wrapper. The Markdown layer nests at most 32 block and 32 inline containers plus a few wrappers. Together that stays far below the sanitizer's 256-level limit, so deep math never turns a document into `NestingTooDeep` (`deep_math_inside_deep_markdown_stays_within_sanitizer_depth`). Only raw HTML that is already close to the limit can still reach it, and such a document fails the same way without math.
 
 ## REND-6 — .NET text primitives are approximated
 
 * **HTML decoding.** `WebUtility.HtmlDecode` (code-block and diagram source) decodes numeric references and uses the HTML5 named-reference table from `markup5ever`, a superset of the .NET HTML 4 table. HTML5-only names such as `&check;` inside raw-HTML `<pre><code>` decode in Rust but not in .NET. A numeric reference to a lone surrogate becomes U+FFFD, because Rust strings cannot hold one.
 * **Regex classes.** `\s` uses Unicode White_Space, the same set as .NET. `\w` is exact for ASCII. For non-ASCII it uses `char::is_alphanumeric`, which differs from .NET `[\p{L}\p{Mn}\p{Nd}\p{Pc}]` for some marks and other numerics (`²`). `char.IsLetter` in the math port is approximated with `char::is_alphabetic`.
 * **Case-insensitive matching.** The Mermaid and math passes and remote-image blanking are ASCII case-insensitive. .NET `RegexOptions.IgnoreCase` also treats U+212A KELVIN SIGN as `k` and U+017F LONG S as `s`, so for example `<pre><code clasſ="language-mermaid">` would be a diagram in .NET only.
-* **Leftmost-match emulation and linear time.** Every .NET regex pass is a direct scanner that reproduces the regex's leftmost-match and backtracking outcome. Scanners memoize failed searches, so inputs that are quadratic under the .NET regexes (unterminated quotes, `/*`, `[type:"`, long blank runs, unterminated math spans) stay linear.
+* **Leftmost-match emulation and linear time.** Every .NET regex pass is a direct scanner that reproduces the regex's leftmost-match and backtracking outcome. Inputs that are quadratic under the .NET regexes stay linear here because the scanners memoize their searches:
+  * unterminated quotes, `/*` and blank runs keep failure bounds;
+  * the C# attribute rule's next `]`/`"` and next `]` searches use a forward cache (`NextOf`), and its string search is cached per opening quote;
+  * unterminated math spans keep a dead-from offset per tag;
+  * remote-image blanking keeps a failed-candidate bound.
+
+  Review C1 found the attribute stop search unmemoized, which was quadratic: `[type:` repeated 64,000 times took 27.2 s. It is now linear, at 60 ms for n = 64,000 and 159 ms for n = 200,000 (release). The remaining searches were audited, and each one either consumes what it scans or scans regions that do not overlap.
 
 ## REND-7 — API shape
 
 These are additive and do not change the output:
 
-* The caller supplies the template's document id and CSP nonce (`PageIdentity`, 16 random bytes each). .NET draws them from `Guid.NewGuid()` and `RandomNumberGenerator` internally.
+* The caller supplies the template's document id and CSP nonce (`PageIdentity`, 16 bytes each, generated from the OS RNG by the host crate). .NET draws them from `Guid.NewGuid()` and `RandomNumberGenerator` internally. `PageIdentity::new` rejects an all-zero id or nonce, and its `Debug` output redacts the nonce.
 * The document directory is passed relative to the asset root. A path that escapes the root fails with `RenderError::InvalidDocumentDirectory`, as .NET throws `ArgumentException`.
 * Headings, anchors, image references and diagram sources are returned as `PlainText`, which reaches HTML only through `PlainText::encode_html`. The body is returned only as a `SanitizedFragment`.
 * Diagnostics are the Markdown layer's additive ones (`markdown-source-diagnostics.md`, `markdown-resource-limits.md`).

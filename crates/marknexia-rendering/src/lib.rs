@@ -36,7 +36,7 @@ use marknexia_security::{
 };
 
 pub use math::MAX_MATH_DEPTH;
-pub use template::PageIdentity;
+pub use template::{InvalidPageIdentity, PageIdentity};
 
 /// Resource limits. Defaults are the .NET constants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,20 +375,22 @@ impl<E: MarkdownEngine> Renderer<E> {
             .parse(source, &options)
             .map_err(|_| too_large(None))?;
 
+        // Every pass runs within the sanitizer's input budget, which binds
+        // before the page limit; passes check estimates before building each
+        // block, so intermediate strings stay near the budget.
         let sanitizer_limits = PolicyLimits::default();
-        let within_budget = |html: &str| {
-            if html.len() > sanitizer_limits.max_html_input_bytes {
-                Err(RenderError::Sanitizer(SanitizeError::InputTooLarge {
-                    kind: "HTML",
-                    limit: sanitizer_limits.max_html_input_bytes,
-                }))
-            } else {
-                Ok(())
-            }
+        let budget = sanitizer_limits.max_html_input_bytes;
+        let over_budget = |_| {
+            RenderError::Sanitizer(SanitizeError::InputTooLarge {
+                kind: "HTML",
+                limit: budget,
+            })
         };
-        within_budget(&parsed.rendered_body_html)?;
-        let body = passes::highlight_code_blocks(&parsed.rendered_body_html);
-        within_budget(&body)?;
+        if parsed.rendered_body_html.len() > budget {
+            return Err(over_budget(passes::Overflow));
+        }
+        let body = passes::highlight_code_blocks(&parsed.rendered_body_html, budget)
+            .map_err(over_budget)?;
         let (body, has_mermaid) = passes::transform_diagrams(
             &body,
             passes::DiagramSettings {
@@ -396,9 +398,10 @@ impl<E: MarkdownEngine> Renderer<E> {
                 max_count: self.limits.max_diagram_count,
                 max_source_bytes: self.limits.max_diagram_source_bytes,
             },
-        );
-        within_budget(&body)?;
-        let body = passes::render_math(&body, context.enable_math);
+            budget,
+        )
+        .map_err(over_budget)?;
+        let body = passes::render_math(&body, context.enable_math, budget).map_err(over_budget)?;
         let body = sanitize_body(&body, context.allow_remote_assets, sanitizer_limits)?;
 
         let head = template::PageHead::new(

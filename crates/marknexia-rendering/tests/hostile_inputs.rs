@@ -16,7 +16,10 @@ const ONE_MIB: usize = 1024 * 1024;
 const CASE_BUDGET: Duration = Duration::from_secs(60);
 
 fn context() -> RenderContext {
-    RenderContext::new(AppTheme::System, PageIdentity::new([7; 16], [9; 16]))
+    RenderContext::new(
+        AppTheme::System,
+        PageIdentity::new([7; 16], [9; 16]).unwrap(),
+    )
 }
 
 fn on_one_mib_stack(body: impl FnOnce() + Send + 'static) {
@@ -338,5 +341,79 @@ fn stage_timing() {
                 .map(|d| d.page_bytes().to_string())
                 .unwrap_or_else(|e| e.to_string())
         );
+    }
+}
+
+#[test]
+fn csharp_attribute_prefix_floods_stay_linear() {
+    // Review C1: every `[type:` used to rescan to the end for `]`/`"`
+    // (release: n=16,000 took 1.16 s, n=64,000 took 27.2 s). The sizes stay
+    // inside the sanitizer budget so the tokenizer really runs.
+    for n in [16_000, 64_000, 200_000] {
+        for (name, source) in [
+            ("prefixes", format!("```cs\n{}\n```\n", "[type:".repeat(n))),
+            (
+                "prefixes-quote",
+                format!("```cs\n{}\"\n```\n", "[type:".repeat(n)),
+            ),
+            (
+                "prefixes-string",
+                format!("```cs\n{}\"x\"\n```\n", "[type:".repeat(n)),
+            ),
+            (
+                "quoted-prefixes",
+                format!("```cs\n{}]\n```\n", "[type:\"x".repeat(n / 2)),
+            ),
+        ] {
+            let started = Instant::now();
+            let document = render_bounded(&format!("{name} n={n}"), &source)
+                .unwrap_or_else(|error| panic!("{name} n={n}: {error}"));
+            assert!(document.body().as_str().contains("class=\"csharp\""));
+            assert!(started.elapsed() < Duration::from_secs(10), "{name} n={n}");
+        }
+    }
+}
+
+#[test]
+fn amplifying_blocks_fail_before_building_huge_strings() {
+    // `1 ` highlights to ~30 bytes per 2 input bytes; the pass must reject
+    // against the budget instead of building tens of MiB first.
+    let digits = format!("```cs\n{}\n```\n", "1 ".repeat(1_500_000));
+    assert!(matches!(
+        render_bounded("digits", &digits),
+        Err(RenderError::Sanitizer(SanitizeError::InputTooLarge { .. }))
+    ));
+    let fractions = format!("${}$", r"\frac{a}{b}".repeat(300_000));
+    assert!(matches!(
+        render_bounded("fractions", &fractions),
+        Err(RenderError::Sanitizer(SanitizeError::InputTooLarge { .. }))
+    ));
+}
+
+#[test]
+fn deep_math_inside_deep_markdown_stays_within_sanitizer_depth() {
+    // Review I3: maximal Markdown nesting plus maximal math nesting must not
+    // reach the sanitizer's 256-level limit.
+    on_one_mib_stack(|| {
+        let math = format!("${}x{}$", r"\frac{\sqrt{".repeat(200), "}}".repeat(200));
+        let inline = format!("{}{math}{}", "*a ".repeat(40), " b*".repeat(40));
+        let source = format!("{}{inline}\n", "> - ".repeat(40));
+        let document = render_bounded("deep-math-in-markdown", &source).expect("renders");
+        assert!(document.body().as_str().contains("marknexia-fraction"));
+    });
+}
+
+#[test]
+fn remote_sources_dotnet_leaks_are_removed() {
+    // REND-4: .NET blanks only quoted `<img src>` values without a quote
+    // character inside, so these keep their remote URL there (only its CSP
+    // blocks the fetch). Rust removes them.
+    for source in [
+        "<img src=\"https://h.test/a'b.png\" alt=\"q\">",
+        "<input type=\"image\" src=\"https://h.test/i.png\">",
+    ] {
+        let document = Renderer::new().render(source, &context()).unwrap();
+        let body = document.body().as_str();
+        assert!(!body.contains("h.test"), "{source} -> {body}");
     }
 }

@@ -3,12 +3,17 @@
 //! math span (still entity-encoded by the Markdown layer), and, as in .NET,
 //! every character is encoded again, so `&lt;` renders as the text `&lt;`.
 //!
-//! The .NET recursion is unbounded; here nesting deeper than
-//! [`MAX_MATH_DEPTH`] is emitted as encoded literal text (REND-5).
+//! The .NET recursion is unbounded. Here structural nesting is limited to
+//! [`MAX_MATH_DEPTH`] generated elements, and anything deeper is emitted as
+//! encoded literal text (REND-5). The budget keeps math inside the
+//! sanitizer's 256-level depth limit even under the deepest Markdown nesting
+//! (32 block + 32 inline containers).
 
 use crate::text::html_encode;
 
-/// Deepest `^`/`_`/`\frac`/`\sqrt`/`\text` nesting rendered structurally.
+/// Element-nesting budget for rendered math: `^`, `_` and `\text` cost one
+/// level, `\frac` and `\sqrt` two (they emit nested spans). At most
+/// `MAX_MATH_DEPTH + 3` elements are ever nested, including the wrapper.
 pub const MAX_MATH_DEPTH: usize = 32;
 
 fn symbol(command: &str) -> Option<&'static str> {
@@ -86,12 +91,16 @@ fn symbol(command: &str) -> Option<&'static str> {
     })
 }
 
-/// `SimpleMathRenderer.Render(expression, mode).HtmlContent`.
-pub(crate) fn render(expression: &str, display: bool) -> String {
+/// `SimpleMathRenderer.Render(expression, mode).HtmlContent`, or `None` once
+/// the output would exceed `limit` bytes.
+pub(crate) fn render(expression: &str, display: bool, limit: usize) -> Option<String> {
     let normalized = strip_delimiters(expression).trim();
     let chars: Vec<char> = normalized.chars().collect();
     let mut html = String::with_capacity(normalized.len() + 32);
-    render_expression(&chars, 0, &mut html);
+    render_expression(&chars, 0, limit, &mut html);
+    if html.len() > limit {
+        return None;
+    }
     let accessible = if normalized.is_empty() {
         "Mathematical expression"
     } else {
@@ -114,7 +123,7 @@ pub(crate) fn render(expression: &str, display: bool) -> String {
     out.push_str("</");
     out.push_str(tag);
     out.push('>');
-    out
+    (out.len() <= limit).then_some(out)
 }
 
 /// The .NET fallback when math rendering is disabled.
@@ -154,13 +163,16 @@ fn encode_chars(chars: &[char], out: &mut String) {
     html_encode(&text, out);
 }
 
-fn render_expression(expression: &[char], depth: usize, out: &mut String) {
+fn render_expression(expression: &[char], depth: usize, limit: usize, out: &mut String) {
     if depth > MAX_MATH_DEPTH {
         encode_chars(expression, out);
         return;
     }
     let mut index = 0;
     while index < expression.len() {
+        if out.len() > limit {
+            return;
+        }
         let current = expression[index];
         if current == '^' || current == '_' {
             let argument = read_atom(expression, &mut index);
@@ -168,7 +180,7 @@ fn render_expression(expression: &[char], depth: usize, out: &mut String) {
             out.push('<');
             out.push_str(tag);
             out.push('>');
-            render_expression(argument, depth + 1, out);
+            render_expression(argument, depth + 1, limit, out);
             out.push_str("</");
             out.push_str(tag);
             out.push('>');
@@ -185,21 +197,21 @@ fn render_expression(expression: &[char], depth: usize, out: &mut String) {
                     out.push_str(
                         "<span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">",
                     );
-                    render_expression(numerator, depth + 1, out);
+                    render_expression(numerator, depth + 2, limit, out);
                     out.push_str("</span><span class=\"marknexia-denominator\">");
-                    render_expression(denominator, depth + 1, out);
+                    render_expression(denominator, depth + 2, limit, out);
                     out.push_str("</span></span>");
                 }
                 "sqrt" => {
                     skip_optional_group(expression, &mut index);
                     let radicand = read_group(expression, &mut index);
                     out.push_str("<span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">");
-                    render_expression(radicand, depth + 1, out);
+                    render_expression(radicand, depth + 2, limit, out);
                     out.push_str("</span></span>");
                 }
                 "text" | "operatorname" => {
                     let text = read_group(expression, &mut index);
-                    render_expression(text, depth + 1, out);
+                    render_expression(text, depth + 1, limit, out);
                 }
                 "left" | "right" => {
                     if index + 1 < expression.len() {
@@ -353,18 +365,29 @@ fn skip_optional_group(expression: &[char], index: &mut usize) {
 mod tests {
     use super::*;
 
+    fn render_all(expression: &str, display: bool) -> String {
+        render(expression, display, usize::MAX).unwrap()
+    }
+
+    #[test]
+    fn output_budget_stops_growth() {
+        let expression = format!("\\({}\\)", "\\frac{a}{b}".repeat(10_000));
+        assert!(render(&expression, false, 10_000).is_none());
+        assert!(render(&expression, false, usize::MAX).is_some());
+    }
+
     #[test]
     fn renders_the_supported_subset() {
         assert_eq!(
-            render("\\(x^2 + \\alpha_{i}\\)", false),
+            render_all("\\(x^2 + \\alpha_{i}\\)", false),
             "<span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2 + \\alpha_{i}\">x<sup>2</sup> + α<sub></sub></span>"
         );
         assert_eq!(
-            render("$$\\frac{a}{b}$$", true),
+            render_all("$$\\frac{a}{b}$$", true),
             "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"\\frac{a}{b}\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">a</span><span class=\"marknexia-denominator\">b</span></span></div>"
         );
         assert_eq!(
-            render("\\(\\)", false),
+            render_all("\\(\\)", false),
             "<span class=\"marknexia-math\" role=\"math\" aria-label=\"Mathematical expression\"></span>"
         );
     }
@@ -372,35 +395,35 @@ mod tests {
     #[test]
     fn double_encodes_like_dotnet() {
         assert_eq!(
-            render("\\(a &lt; b\\)", false),
+            render_all("\\(a &lt; b\\)", false),
             "<span class=\"marknexia-math\" role=\"math\" aria-label=\"a &amp;lt; b\">a &amp;lt; b</span>"
         );
     }
 
     #[test]
     fn unknown_commands_and_edges() {
-        assert!(render("\\(\\foo \\left( x \\right. \\)", false).contains("\\foo ( x "));
-        assert!(render("\\(x^\\)", false).contains("x<sup></sup>"));
-        assert!(render("\\(\\sqrt[3]{y}\\)", false).contains("marknexia-radicand\">y<"));
-        let _ = render("\\(\\\\)", false);
-        let _ = render("\\(^\\\\)", false);
+        assert!(render_all("\\(\\foo \\left( x \\right. \\)", false).contains("\\foo ( x "));
+        assert!(render_all("\\(x^\\)", false).contains("x<sup></sup>"));
+        assert!(render_all("\\(\\sqrt[3]{y}\\)", false).contains("marknexia-radicand\">y<"));
+        let _ = render_all("\\(\\\\)", false);
+        let _ = render_all("\\(^\\\\)", false);
     }
 
     #[test]
     fn deep_nesting_is_bounded() {
         // `^{` chains are read iteratively (and, as in .NET, yield `}`).
         let chain = format!("\\({}x{}\\)", "^{".repeat(100_000), "}".repeat(100_000));
-        assert_eq!(render(&chain, false).matches("<sup>").count(), 1);
+        assert_eq!(render_all(&chain, false).matches("<sup>").count(), 1);
         // Structural nesting stops at the depth limit.
         let deep = format!(
             "\\({}x{}\\)",
             "\\sqrt{".repeat(100_000),
             "}".repeat(100_000)
         );
-        let html = render(&deep, false);
+        let html = render_all(&deep, false);
         assert_eq!(
             html.matches("marknexia-radicand").count(),
-            MAX_MATH_DEPTH + 1
+            MAX_MATH_DEPTH / 2 + 1
         );
     }
 }

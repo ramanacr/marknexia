@@ -12,21 +12,55 @@ pub(crate) const GITHUB_MARKDOWN_CSS: &str = include_str!("../assets/github-mark
 pub(crate) const BRIDGE_JS: &str = include_str!("../assets/bridge.js");
 
 /// Per-document secrets the .NET template draws from `Guid.NewGuid()` and
-/// `RandomNumberGenerator`. The caller supplies them so this crate stays
-/// deterministic and free of an entropy dependency.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `RandomNumberGenerator`. The host generates them from the OS RNG and passes
+/// them in, so this crate stays deterministic and free of an entropy
+/// dependency. `Debug` never prints the nonce.
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PageIdentity {
     document_id: [u8; 16],
     nonce: [u8; 16],
 }
 
+/// A [`PageIdentity`] value that cannot be a fresh random secret.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidPageIdentity {
+    ZeroDocumentId,
+    ZeroNonce,
+}
+
+impl std::fmt::Display for InvalidPageIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroDocumentId => "page document id is all zero",
+            Self::ZeroNonce => "page nonce is all zero",
+        })
+    }
+}
+
+impl std::error::Error for InvalidPageIdentity {}
+
+impl std::fmt::Debug for PageIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageIdentity")
+            .field("origin", &self.origin())
+            .field("nonce", &"<redacted>")
+            .finish()
+    }
+}
+
 impl PageIdentity {
     /// `document_id` becomes the 32-hex-digit host label
     /// `document-{id}.marknexia.viewer`; `nonce` becomes the base64 CSP nonce.
-    /// Both must be fresh random bytes per rendered document.
-    #[must_use]
-    pub const fn new(document_id: [u8; 16], nonce: [u8; 16]) -> Self {
-        Self { document_id, nonce }
+    /// Both must be fresh OS-RNG bytes per rendered document; all-zero values
+    /// (an unfilled buffer) are rejected.
+    pub fn new(document_id: [u8; 16], nonce: [u8; 16]) -> Result<Self, InvalidPageIdentity> {
+        if document_id == [0; 16] {
+            return Err(InvalidPageIdentity::ZeroDocumentId);
+        }
+        if nonce == [0; 16] {
+            return Err(InvalidPageIdentity::ZeroNonce);
+        }
+        Ok(Self { document_id, nonce })
     }
 
     /// `https://document-{hex}.marknexia.viewer`.
@@ -183,7 +217,17 @@ mod tests {
 
     #[test]
     fn identity_formats_like_dotnet() {
-        let identity = PageIdentity::new([0xAB; 16], [0xFF; 16]);
+        let identity = PageIdentity::new([0xAB; 16], [0xFF; 16]).unwrap();
+        assert!(!format!("{identity:?}").contains(&identity.nonce()));
+        assert!(format!("{identity:?}").contains("<redacted>"));
+        assert_eq!(
+            PageIdentity::new([0; 16], [1; 16]),
+            Err(InvalidPageIdentity::ZeroDocumentId)
+        );
+        assert_eq!(
+            PageIdentity::new([1; 16], [0; 16]),
+            Err(InvalidPageIdentity::ZeroNonce)
+        );
         assert_eq!(
             identity.origin(),
             "https://document-abababababababababababababababab.marknexia.viewer"
@@ -196,7 +240,7 @@ mod tests {
 
     #[test]
     fn counter_matches_written_length() {
-        let identity = PageIdentity::new([1; 16], [2; 16]);
+        let identity = PageIdentity::new([1; 16], [2; 16]).unwrap();
         for mermaid in [false, true] {
             let head = PageHead::new(AppTheme::Dark, true, &["a b", "c"], &identity, mermaid);
             let mut page = String::new();

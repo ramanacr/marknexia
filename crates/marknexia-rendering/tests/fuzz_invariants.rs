@@ -130,7 +130,10 @@ fn random_documents_keep_the_fuzz_invariants() {
             ..RenderLimits::default()
         };
         let renderer = Renderer::with_engine(marknexia_markdown::PulldownAdapter, limits).unwrap();
-        let mut context = RenderContext::new(AppTheme::System, PageIdentity::new([1; 16], [2; 16]));
+        let mut context = RenderContext::new(
+            AppTheme::System,
+            PageIdentity::new([1; 16], [2; 16]).unwrap(),
+        );
         context.allow_remote_assets = remote;
         context.enable_diagrams = flags & 2 == 0;
         context.enable_math = flags & 4 == 0;

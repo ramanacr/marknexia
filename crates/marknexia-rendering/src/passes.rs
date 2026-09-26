@@ -11,32 +11,60 @@ use crate::{
     },
 };
 
-/// Splices replacements into `html` as a `Regex.Replace` would.
+/// A pass's output would exceed its byte budget. Passes check an estimate
+/// before building each replacement, so no intermediate string grows far
+/// past the budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Overflow;
+
+/// Splices replacements into `html` as a `Regex.Replace` would, within a
+/// byte budget for the whole output.
 struct Splicer<'a> {
     html: &'a str,
     out: String,
     copied_to: usize,
+    limit: usize,
 }
 
 impl<'a> Splicer<'a> {
-    fn new(html: &'a str) -> Self {
+    fn new(html: &'a str, limit: usize) -> Self {
         Self {
             html,
-            out: String::with_capacity(html.len() + html.len() / 4),
+            out: String::with_capacity((html.len() + html.len() / 4).min(limit)),
             copied_to: 0,
+            limit,
         }
     }
 
-    fn replace(&mut self, start: usize, end: usize, replacement: &str) {
+    /// Bytes a replacement starting at `start` may take.
+    fn remaining(&self, start: usize) -> Result<usize, Overflow> {
+        self.limit
+            .checked_sub(self.out.len() + (start - self.copied_to))
+            .ok_or(Overflow)
+    }
+
+    fn replace(&mut self, start: usize, end: usize, replacement: &str) -> Result<(), Overflow> {
         self.out.push_str(&self.html[self.copied_to..start]);
         self.out.push_str(replacement);
         self.copied_to = end;
+        if self.out.len() > self.limit {
+            return Err(Overflow);
+        }
+        Ok(())
     }
 
-    fn finish(mut self) -> String {
+    fn finish(mut self) -> Result<String, Overflow> {
         self.out.push_str(&self.html[self.copied_to..]);
-        self.out
+        if self.out.len() > self.limit {
+            return Err(Overflow);
+        }
+        Ok(self.out)
     }
+}
+
+/// Blanking passes only shrink markup, so they cannot overflow.
+fn finish_unbounded(splicer: Splicer<'_>) -> String {
+    splicer.finish().unwrap_or_default()
 }
 
 /// `\s+class="language-([a-zA-Z0-9_\+#\-]+)"` at `from`: the language and the
@@ -65,10 +93,10 @@ fn language_class(html: &str, from: usize, ignore_case: bool) -> Option<(&str, u
 
 /// Step 2, `HighlightCodeBlocks`:
 /// `<pre><code(?:\s+class="language-([a-zA-Z0-9_\+#\-]+)")?>([\s\S]*?)</code></pre>`.
-pub(crate) fn highlight_code_blocks(html: &str) -> String {
+pub(crate) fn highlight_code_blocks(html: &str, limit: usize) -> Result<String, Overflow> {
     const OPEN: &str = "<pre><code";
     const CLOSE: &str = "</code></pre>";
-    let mut splicer = Splicer::new(html);
+    let mut splicer = Splicer::new(html, limit);
     let mut search = 0;
     while let Some(offset) = html[search..].find(OPEN) {
         let start = search + offset;
@@ -88,14 +116,20 @@ pub(crate) fn highlight_code_blocks(html: &str) -> String {
         let end = content_end + CLOSE.len();
         if !language.eq_ignore_ascii_case("mermaid") {
             let code = html_decode(&html[content_start..content_end]);
-            let highlighted = highlight::highlight(&code, language);
-            let mut replacement = String::with_capacity(code.len() * 4 + highlighted.len() + 192);
+            // The copy metadata and the highlighted code each take at least
+            // `code.len()` bytes.
+            let remaining = splicer.remaining(start)?;
+            if code.len().saturating_mul(2).saturating_add(192) > remaining {
+                return Err(Overflow);
+            }
+            let highlighted = highlight::highlight(&code, language, remaining).ok_or(Overflow)?;
+            let mut replacement = String::with_capacity(code.len() * 3 + highlighted.len() + 192);
             replacement.push_str("\n<div class=\"code-container\">\n  <button type=\"button\" class=\"copy-btn\" data-marknexia-action=\"copy\" data-copy-text=\"");
             escape_data_string(&code, &mut replacement);
             replacement.push_str("\" title=\"Copy code\">Copy</button>\n  ");
             replacement.push_str(&highlighted);
             replacement.push_str("\n</div>");
-            splicer.replace(start, end, &replacement);
+            splicer.replace(start, end, &replacement)?;
         }
         search = end;
     }
@@ -113,10 +147,14 @@ pub(crate) struct DiagramSettings {
 /// Step 3: every `<pre><code\s+class="language-mermaid">…</code></pre>`
 /// (case-insensitive) becomes a diagram shell or a fallback note. Returns the
 /// new markup and whether any diagram shell was emitted (`hasMermaid`).
-pub(crate) fn transform_diagrams(html: &str, settings: DiagramSettings) -> (String, bool) {
+pub(crate) fn transform_diagrams(
+    html: &str,
+    settings: DiagramSettings,
+    limit: usize,
+) -> Result<(String, bool), Overflow> {
     const OPEN: &str = "<pre><code";
     const CLOSE: &str = "</code></pre>";
-    let mut splicer = Splicer::new(html);
+    let mut splicer = Splicer::new(html, limit);
     let mut search = 0;
     let mut counter = 0_usize;
     let mut has_mermaid = false;
@@ -137,6 +175,19 @@ pub(crate) fn transform_diagrams(html: &str, settings: DiagramSettings) -> (Stri
         let end = content_end + CLOSE.len();
         let source = html_decode(&html[content_start..content_end]);
         counter += 1;
+        let shell = settings.enabled
+            && counter <= settings.max_count
+            && source.len() <= settings.max_source_bytes;
+        // Lower bounds: a shell holds the source three times plus its
+        // percent-encoded copy; a fallback holds it once.
+        let estimate = if shell {
+            source.len().saturating_mul(4).saturating_add(2_048)
+        } else {
+            source.len().saturating_add(256)
+        };
+        if estimate > splicer.remaining(start)? {
+            return Err(Overflow);
+        }
         let replacement = if !settings.enabled {
             diagram_fallback(&source, "diagram rendering is disabled for this document")
         } else if counter > settings.max_count {
@@ -147,10 +198,10 @@ pub(crate) fn transform_diagrams(html: &str, settings: DiagramSettings) -> (Stri
             has_mermaid = true;
             mermaid_shell(&source, &format!("mermaid-{counter}"))
         };
-        splicer.replace(start, end, &replacement);
+        splicer.replace(start, end, &replacement)?;
         search = end;
     }
-    (splicer.finish(), has_mermaid)
+    Ok((splicer.finish()?, has_mermaid))
 }
 
 /// `MarkdownRenderer.RenderDiagramFallback`.
@@ -207,8 +258,8 @@ fn mermaid_shell(source: &str, id: &str) -> String {
 
 /// Step 3b, `RenderMath`, case-insensitive:
 /// `<(span|div)\s+class="math">(\s*(?:\\\(|\\\[|\$\$)[\s\S]*?(?:\\\)|\\\]|\$\$)\s*)</\k<tag>>`.
-pub(crate) fn render_math(html: &str, enabled: bool) -> String {
-    let mut splicer = Splicer::new(html);
+pub(crate) fn render_math(html: &str, enabled: bool, limit: usize) -> Result<String, Overflow> {
+    let mut splicer = Splicer::new(html, limit);
     // Lazy-body failures are monotone per tag: no match from offset `n`
     // means none from any later offset either.
     let mut dead_from = [usize::MAX; 2];
@@ -249,12 +300,16 @@ pub(crate) fn render_math(html: &str, enabled: bool) -> String {
             let trimmed = expression.trim();
             trimmed.starts_with("\\[") || trimmed.starts_with("$$")
         };
+        let remaining = splicer.remaining(start)?;
         let replacement = if enabled {
-            math::render(expression, display)
+            math::render(expression, display, remaining).ok_or(Overflow)?
         } else {
+            if expression.len().saturating_add(64) > remaining {
+                return Err(Overflow);
+            }
             math::fallback(expression, display)
         };
-        splicer.replace(start, end, &replacement);
+        splicer.replace(start, end, &replacement)?;
         search = end;
     }
     splicer.finish()
@@ -293,7 +348,7 @@ pub(crate) fn block_remote_images(html: &str) -> String {
 /// → `<img{attributes}src=""{tail}>` (case-insensitive).
 fn blank_remote_src(html: &str) -> String {
     let bytes = html.as_bytes();
-    let mut splicer = Splicer::new(html);
+    let mut splicer = Splicer::new(html, usize::MAX);
     let mut search = 0;
     // Every `src` candidate before this offset already failed: candidate
     // checks depend only on their own position.
@@ -307,7 +362,7 @@ fn blank_remote_src(html: &str) -> String {
         let mut candidate = attributes.max(failed_until);
         let found = loop {
             match bytes.get(candidate) {
-                None => return splicer.finish(),
+                None => return finish_unbounded(splicer),
                 Some(b'>') => break None,
                 _ => {}
             }
@@ -315,7 +370,7 @@ fn blank_remote_src(html: &str) -> String {
                 // `(?<tail>[^>]*)>`: without a later `>` no candidate here or
                 // in any later `<img` can complete.
                 let Some(close) = html[tail..].find('>') else {
-                    return splicer.finish();
+                    return finish_unbounded(splicer);
                 };
                 break Some((candidate, tail, tail + close));
             }
@@ -331,10 +386,10 @@ fn blank_remote_src(html: &str) -> String {
         replacement.push_str("src=\"\"");
         replacement.push_str(&html[tail..close]);
         replacement.push('>');
-        splicer.replace(start, close + 1, &replacement);
+        let _ = splicer.replace(start, close + 1, &replacement);
         search = close + 1;
     }
-    splicer.finish()
+    finish_unbounded(splicer)
 }
 
 /// `\bsrc\s*=\s*(["'])(?:https?://|//)[^"']*\1` at `at`: offset after it.
@@ -365,7 +420,7 @@ fn remote_src_at(html: &str, at: usize) -> Option<usize> {
 /// `\s+srcset\s*=\s*(?<quote>["'])(?=[^"']*(?:https?://|//))[^"']*\k<quote>`
 /// → removed (case-insensitive).
 fn blank_remote_srcset(html: &str) -> String {
-    let mut splicer = Splicer::new(html);
+    let mut splicer = Splicer::new(html, usize::MAX);
     let mut search = 0;
     while let Some(found) = find_ci(html, search, "srcset") {
         search = found + 1;
@@ -403,10 +458,10 @@ fn blank_remote_srcset(html: &str) -> String {
         if html.as_bytes()[value_end] != quote || !html[value..value_end].contains("//") {
             continue;
         }
-        splicer.replace(start, value_end + 1, "");
+        let _ = splicer.replace(start, value_end + 1, "");
         search = value_end + 1;
     }
-    splicer.finish()
+    finish_unbounded(splicer)
 }
 
 #[cfg(test)]
@@ -422,20 +477,23 @@ mod tests {
     #[test]
     fn highlight_pass_wraps_code_and_skips_mermaid() {
         let html = "<pre><code class=\"language-c#\">var value = 1;\n</code></pre>\n<pre><code class=\"language-Mermaid\">a</code></pre>";
-        let out = highlight_code_blocks(html);
+        let out = highlight_code_blocks(html, usize::MAX).unwrap();
         assert!(out.starts_with("\n<div class=\"code-container\">\n  <button type=\"button\" class=\"copy-btn\" data-marknexia-action=\"copy\" data-copy-text=\"var%20value%20%3D%201%3B%0A\" title=\"Copy code\">Copy</button>\n  <div class=\"csharp\"><pre>\n<span class=\"keyword\">var</span>"));
         assert!(out.ends_with("\n<pre><code class=\"language-Mermaid\">a</code></pre>"));
         // Case-sensitive, and an unsupported class character leaves the block.
         let raw = "<PRE><CODE>x</CODE></PRE><pre><code class=\"language-a.b\">y</code></pre>";
-        assert_eq!(highlight_code_blocks(raw), raw);
+        assert_eq!(highlight_code_blocks(raw, usize::MAX).unwrap(), raw);
         // Unterminated blocks are left alone.
-        assert_eq!(highlight_code_blocks("<pre><code>x"), "<pre><code>x");
+        assert_eq!(
+            highlight_code_blocks("<pre><code>x", usize::MAX).unwrap(),
+            "<pre><code>x"
+        );
     }
 
     #[test]
     fn diagram_pass_counts_and_limits() {
         let html = "<pre><code class=\"language-mermaid\">a--&gt;b\n</code></pre><PRE><CODE  CLASS=\"LANGUAGE-MERMAID\">c</CODE></PRE>";
-        let (out, has_mermaid) = transform_diagrams(html, DIAGRAMS);
+        let (out, has_mermaid) = transform_diagrams(html, DIAGRAMS, usize::MAX).unwrap();
         assert!(has_mermaid);
         assert!(out.contains("id=\"mermaid-1\""));
         assert!(out.contains("data-copy-text=\"a--%3Eb%0A\""));
@@ -444,7 +502,7 @@ mod tests {
             enabled: false,
             ..DIAGRAMS
         };
-        let (out, has_mermaid) = transform_diagrams(html, disabled);
+        let (out, has_mermaid) = transform_diagrams(html, disabled, usize::MAX).unwrap();
         assert!(!has_mermaid);
         assert_eq!(out.matches("diagram rendering is disabled").count(), 2);
     }
@@ -453,17 +511,20 @@ mod tests {
     fn math_pass() {
         let html =
             "<p><span class=\"math\">\\(x^2\\)</span> <DIV class=\"math\"> $$a\\)b$$ </div></p>";
-        let out = render_math(html, true);
+        let out = render_math(html, true, usize::MAX).unwrap();
         assert_eq!(
             out,
             "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2\">x<sup>2</sup></span> <div class=\"marknexia-math-display\" role=\"math\" aria-label=\"$$a\\)b$$\">$$a)b$$</div></p>"
         );
         assert_eq!(
-            render_math("<span class=\"math\">\\(a\\)</span>", false),
+            render_math("<span class=\"math\">\\(a\\)</span>", false, usize::MAX).unwrap(),
             "<span class=\"marknexia-math-fallback\" role=\"math\">\\(a\\)</span>"
         );
         let unterminated = "<span class=\"math\">\\(a".repeat(10_000);
-        assert_eq!(render_math(&unterminated, true), unterminated);
+        assert_eq!(
+            render_math(&unterminated, true, usize::MAX).unwrap(),
+            unterminated
+        );
     }
 
     #[test]
