@@ -317,6 +317,10 @@ name = "marknexia-rendering"
 version = "0.1.0"
 dependencies = [
  "marknexia-core",
+ "marknexia-markdown",
+ "marknexia-security",
+ "markup5ever",
+ "serde_json",
 ]
 
 [[package]]

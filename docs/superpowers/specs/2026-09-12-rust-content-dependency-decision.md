@@ -221,3 +221,102 @@ cargo test -p marknexia-markdown --all-features -- --ignored candidate_divergenc
 cargo tree -p marknexia-markdown --features candidate-pulldown -e normal
 cargo deny check licenses advisories
 ```
+
+## Rendering/Highlighting (Task 4, Steps 3–6)
+
+Status: **RECOMMENDATION pending review. Not approved.** Scope: `crates/marknexia-rendering` and `fuzz/fuzz_targets/markdown_and_html.rs`. Behavior differences are listed in `compat/decisions/rendering-differences.md` (REND-1 to REND-7, proposed).
+
+### What .NET does
+
+`MarkdownRenderer` runs these steps in order, each as a regex pass over the unsanitized Markdig body:
+
+1. `HighlightCodeBlocks`: every `<pre><code class="language-X">` becomes a `code-container` holding a `copy-btn` whose `data-copy-text` is `Uri.EscapeDataString` of the decoded code, followed by `ColorCodeSyntaxHighlighter.HighlightCode` (ColorCode.Core/HTML 2.0.15, `HtmlClassFormatter`).
+2. The Mermaid shell, or a fallback when diagrams are disabled or a count or source-size limit is hit.
+3. `SimpleMathRenderer`.
+4. Ganss sanitization.
+5. `BlockRemoteImages`.
+6. `TemplateEngine`: CSP with a nonce, the embedded `github-markdown.css` and `bridge.js`, and a Mermaid `<script>` only when a shell was emitted.
+7. The full-page `DocumentTooLargeException` check (128 MiB).
+
+The 50 MiB source limit sits in `FileService`, before the read.
+
+ColorCode emits `<div class="{language}"><pre>`, then the source with `<span class="{style}">` around scoped regex captures, then `</pre></div>`. Its unknown-language fallback is `<pre><code>…</code></pre>`. The only highlighted fixture is `code-copy-metadata` (`c#`), which needs exactly `<span class="keyword">var</span>` and `<span class="number">1</span>` inside `<div class="csharp"><pre>`.
+
+### Decision: a small Marknexia-owned tokenizer (C# only)
+
+| Option | Reproduces the fixture? | Cost |
+| --- | --- | --- |
+| No highlighter (plain `<pre><code>`) | **No**: `code-copy-metadata` needs the ColorCode `csharp` div and `keyword`/`number` spans | none |
+| syntect 5.x (MIT) | **No**: its scopes and classes are Sublime/TextMate (`source cs`, `keyword.other`), not ColorCode's `keyword`/`number`. Matching would need a Marknexia-written class-mapping layer on top | regex engine (onig, a C library, or fancy-regex), plus MB-scale bundled syntax/theme dumps, plus the largest dependency set of the options |
+| tree-sitter (MIT) + grammars | **No**: node kinds differ from ColorCode scopes, so a mapping layer would again be needed | C runtime and generated C parsers compiled with `cc`, one grammar crate per language |
+| **Marknexia-owned C# tokenizer** | **Yes, byte-for-byte** | about 450 lines in `src/highlight.rs`; no new crate |
+
+Evidence and design:
+
+* The C# rules are the ten ColorCode.Core 2.0.15 `CSharp` rule regexes, in string-heap order: block comment, XML doc comment, line comment, char literal, verbatim string, string, attribute target, preprocessor directive, keyword list, number. They were read from the installed package's user-string heap (`~/.nuget/packages/colorcode.core/2.0.15`). The style class names (`keyword`, `number`, `string`, `stringCSharpVerbatim`, `comment`, `xmlDocTag`, `xmlDocComment`, `preprocessorKeyword`) come from the same heap.
+* Each rule is a hand-written matcher with the same leftmost-first and backtracking outcome, including the backtracking quirk of unterminated verbatim strings. Memoized failure bounds make it linear, whereas the .NET regex is quadratic on unterminated quotes, `/*`, `[type:"` and long blank runs (unit test `hostile_shapes_stay_linear`).
+* Other ColorCode languages fall back to the .NET plain-text output (REND-2). Adding a grammar later means porting its rules the same way and adding a frozen oracle case.
+* **Dependencies.** The only dependency added to `marknexia-rendering` is `markup5ever =0.40.0`, already in the graph through html5ever. It provides the HTML5 named-entity table for the `WebUtility.HtmlDecode` emulation. `Cargo.lock` gains no package. Licenses are unchanged.
+* **Binary size.** Not measured, because a binary build is outside the allowed command set. No crate was added, so the delta is only the tokenizer's code plus the 34.8 KB of bundled CSS and JS.
+
+### Renderer result
+
+Frozen rendering fixtures: **7/7 exact, byte-for-byte including the complete templated page**, for both the pulldown and comrak candidates. There are 0 allowances. The gate is `crates/marknexia-rendering/tests/parity_v1.rs`, which uses the same strict and stale-allowance pattern as the Markdown and security gates.
+
+The public result `RenderedDocument` holds:
+
+* the body only as a `SanitizedFragment` (the shell builds `HostDocument::new` from `body()`);
+* headings, the .NET anchor index, image references and diagrams as `PlainText`;
+* diagnostics;
+* `page_html()`, which rebuilds the .NET page from trusted template text and the sanitized body. `page_bytes()` is the exact value that the output limit checks.
+
+With remote assets off, .NET sanitizes and then blanks remote images. Rust sanitizes under `AllowHttps`, blanks, and sanitizes again under `Deny`, so the output is always produced under the real policy. A body without `src` takes one pass (REND-4).
+
+### Hostile inputs and timings (release, this machine)
+
+These come from `tests/hostile_inputs.rs`. Every case must render or fail with a limit error within the time budget. A successful render must produce a sanitizer-fixed-point, script-free body.
+
+| Case | Result | Time |
+| --- | --- | --- |
+| 20,000-deep quotes, emphasis, links, lists (1 MiB stack) | rendered | 5–32 ms |
+| 20,000 raw `<div>` / 50,000 raw `<span>` | `Sanitizer(NestingTooDeep)` (SAN-8) | 84 / 114 ms |
+| 50,000-deep `\sqrt{` math | rendered, structural depth capped at 32 | 46 ms |
+| 5,000 Mermaid blocks | 64 shells, 4,936 fallbacks, 4,936 diagnostics | 449 ms |
+| 4 MiB paragraph / lines | rendered (4.23 MB page) | 87 / 462 ms |
+| 4 MiB C# code, images, math, `[type:"` | `Sanitizer(InputTooLarge)` after amplification (REND-1) | 50–1,120 ms |
+| 4 MiB `&amp;&#x41;&copy;` | `Sanitizer(TooComplex)` | 726 ms |
+| 4 MiB `<b>x</b>` raw HTML | rendered | 4.9 s, of which 4.56 s is `sanitize_fragment` alone (security crate) |
+| 2,000 mixed C# blocks | rendered, all tokens highlighted | 491 ms |
+
+The output-limit edges are exact: at `page_bytes` the page renders, and at `page_bytes - 1` it is rejected with the measured size. The source limit is exact at 50 MiB and 50 MiB + 1.
+
+### Fuzzing
+
+`fuzz/fuzz_targets/markdown_and_html.rs` feeds arbitrary UTF-8 through `HtmlPolicy::sanitize_fragment` and through `Renderer::render`, with flag bits that vary remote images, diagrams, math, the directory, and small output and diagram limits. It asserts:
+
+* no panic;
+* body within 8 MiB and page within `max_rendered_html_bytes`;
+* `page_html().len() == page_bytes()`;
+* re-sanitizing is a fixed point.
+
+The seed corpus (`fuzz/corpus/markdown_and_html`, 18 files) comes from the rendering and Markdown fixture inputs plus four hostile shapes.
+
+**The libFuzzer run did not execute on this machine.** `cargo +nightly fuzz build markdown_and_html` succeeds. The ASan-instrumented binary needs `clang_rt.asan_dynamic-x86_64.dll`: without it, the process exits with `STATUS_DLL_NOT_FOUND`. With that DLL on `PATH`, the process blocks after `INFO: Loaded 1 PC tables (94834 PCs)`, before the first execution. That happens even with an empty corpus and with `-runs=0`, using 0.16 s of CPU in 10 minutes. `-s none` does not link on MSVC (unresolved `__start___sancov_cntrs`). The block is environmental and appears before any target code runs. AV behavior monitoring is suspected but not confirmed, and no exclusion was added. The 300 s run therefore has to happen off-machine (CI). The reported executions, crashes and coverage are **none measured**.
+
+A deterministic stand-in, `crates/marknexia-rendering/tests/fuzz_invariants.rs`, checks the same invariants on 3,000 pseudo-random token soups on every `cargo test`. It adds one more check: with remote images off, no rendered `<img>` keeps an `http(s)://` or `//` source. It found two **sanitizer (`marknexia-security`) fixed-point exceptions**. Both targets now tolerate them explicitly, and a test fails once they are fixed:
+
+1. A `<pre>` whose text begins with a line feed serializes as `<pre>` + LF. Parsing drops a line feed after `<pre>`, so each re-sanitization removes one: `<pre>\n\nx</pre>` → `<pre>\nx</pre>` → `<pre>x</pre>`. A C# code block whose first line is blank produces this through the renderer.
+2. White-space-only input becomes `""` (`html::sanitize` early return). A body of `"\n"`, as from `</span>`, re-sanitizes to `""`.
+
+Neither affects safety. Both are for the security crate's owner to decide.
+
+### Reproduce
+
+```powershell
+cargo test -p marknexia-rendering --all-features
+cargo test --release -p marknexia-rendering --all-features -- --nocapture --test-threads=1
+cargo test --release -p marknexia-rendering --test hostile_inputs -- --ignored stage_timing --nocapture
+cd fuzz; cargo +nightly fuzz run markdown_and_html -- -max_total_time=300
+```
+
+On Windows the ASan runtime `clang_rt.asan_dynamic-x86_64.dll` must be on `PATH`. It ships with MSVC under `VC/Tools/MSVC/<ver>/bin/Hostx64/x64`.
