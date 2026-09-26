@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, ramana_rust_win32_feasibility]
   workflow_dispatch:
 
 permissions:
@@ -38,8 +38,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Lint (all features, both Markdown candidates)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Test (all features, both Markdown candidates)
+        run: cargo test --workspace --all-features --locked
       - name: Portable dependency boundary
         run: pwsh -NoProfile -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
       - name: Dependency policy
@@ -111,6 +115,80 @@ jobs:
           name: rust-feasibility-${{ matrix.target }}
           path: ${{ runner.temp }}/rust-feasibility-*/**/*.json
           if-no-files-found: error
+
+  rust-native-gates:
+    name: Native gates (${{ matrix.target }})
+    # Hosted Windows runners provide an interactive desktop, the shared
+    # WebView2 Evergreen runtime and UI Automation. windows-11-arm is native
+    # ARM64 hardware, which the local evidence host lacks.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            toolchain: 1.98.1-x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            toolchain: 1.98.1-aarch64-pc-windows-msvc
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Record WebView2 runtime
+        run: (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+      - name: Native gates
+        run: pwsh -NoProfile -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
+      - name: Desktop performance (empty shell, 30 cold + 30 warm)
+        if: always()
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = if ('${{ matrix.target }}' -like 'x86_64*') { 'x64' } else { 'ARM64' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'native-evidence'
+          $artifacts = Join-Path $env:RUNNER_TEMP "artifacts-$architecture"
+          New-Item -ItemType Directory -Force -Path $evidence, $artifacts | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/marknexia-win32.exe" $artifacts
+          $digest = (Get-FileHash -LiteralPath test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
+          pwsh -NoProfile -File scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifacts -NativeArtifactPath (Join-Path $artifacts 'marknexia-win32.exe') -OutputPath "$evidence/artifacts.json" -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 60
+          pwsh -NoProfile -File scripts/Collect-RustDesktopPerf.ps1 -ArtifactMeasurementPath "$evidence/artifacts.json" -ArtifactsRoot $artifacts -Scenario tests/perf/scenarios/empty-shell.json -OutputPath "$evidence/empty-shell-samples.json" -Runs 30
+          pwsh -NoProfile -File scripts/Measure-RustDesktopPerf.ps1 -Scenario tests/perf/scenarios/empty-shell.json -SamplesPath "$evidence/empty-shell-samples.json" -ArtifactMeasurementPath "$evidence/artifacts.json" -OutputPath "$evidence/empty-shell-desktop.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: rust-native-evidence-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-evidence/**/*.json
+          if-no-files-found: warn
+
+  rust-fuzz:
+    name: Fuzz markdown_and_html (300 s)
+    # The content crates are portable; libFuzzer runs reliably on Linux.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo_fuzz=$(jq -r .tools.cargoFuzz tools/rust-tools.lock)
+          cargo +nightly install cargo-fuzz --version "$cargo_fuzz" --locked
+      - name: Fuzz
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run markdown_and_html corpus/markdown_and_html -- -max_total_time=300 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: rust-fuzz-markdown-and-html
+          path: |
+            ${{ runner.temp }}/fuzz.log
+            fuzz/artifacts/**
+          if-no-files-found: warn
 
   dotnet-preservation:
     name: .NET Release preservation
