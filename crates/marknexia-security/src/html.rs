@@ -6,11 +6,19 @@
 //! Every decision is taken on the parsed DOM; markup is never rewritten with
 //! string replacement.
 
-use std::{borrow::Cow, collections::HashMap, io};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use ammonia::{Builder, UrlRelative};
 
-use crate::{ContentPolicy, SanitizeError, UrlContext, UrlPolicy, attrs, css, depth};
+use crate::{ContentPolicy, SanitizeError, UrlContext, UrlPolicy, attrs, css, depth, escape_cost};
 
 /// Ganss default `AllowedTags` + .NET additions − .NET removals (`script`,
 /// `iframe`, `object`, `embed`, `applet`, `form`, `base`, `meta`, `link`).
@@ -405,15 +413,21 @@ pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, San
     if !attrs::within_attribute_limit(input, attrs::MAX_ATTRIBUTES_PER_TAG) {
         return Err(SanitizeError::TooComplex);
     }
-    match depth::probe(input, depth::MAX_NESTING_DEPTH) {
+    let outcome = depth::measure(input, depth::MAX_NESTING_DEPTH);
+    match outcome.verdict {
         depth::Verdict::Within => {}
         depth::Verdict::TooDeep => {
             return Err(SanitizeError::NestingTooDeep {
                 limit: depth::MAX_NESTING_DEPTH,
             });
         }
-        depth::Verdict::TooMuchWork => return Err(SanitizeError::TooComplex),
+        depth::Verdict::TooMuchWork | depth::Verdict::TooExpensiveToSerialize => {
+            return Err(SanitizeError::TooComplex);
+        }
     }
+    // Attribute values are measured as ammonia finalizes them.
+    let attribute_escape_cost = Arc::new(AtomicU64::new(0));
+    let attribute_cost_sink = Arc::clone(&attribute_escape_cost);
     let mut builder = Builder::empty();
     builder
         .tags(ALLOWED_TAGS.iter().copied().collect())
@@ -428,9 +442,21 @@ pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, San
         .strip_comments(true)
         .id_prefix(None)
         .attribute_filter(move |element, attribute, value| {
-            filter_attribute(policy, element, attribute, value)
+            let kept = filter_attribute(policy, element, attribute, value);
+            if let Some(kept) = &kept {
+                attribute_cost_sink.fetch_add(escape_cost::attribute_cost(kept), Ordering::Relaxed);
+            }
+            kept
         });
     let document = builder.clean(input);
+    // html5ever's escaping is quadratic in `&`/0xC2 density; refuse before
+    // serializing when its scans would exceed the budget.
+    let serialize_cost = outcome
+        .text_escape_cost
+        .saturating_add(attribute_escape_cost.load(Ordering::Relaxed));
+    if serialize_cost > escape_cost::MAX_ESCAPE_SCAN_BYTES {
+        return Err(SanitizeError::TooComplex);
+    }
 
     let limit = policy.limits().max_html_output_bytes;
     let mut writer = BoundedWriter {

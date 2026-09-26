@@ -18,6 +18,10 @@
 //!   visit and child-list scan is charged too. The budget is linear in the
 //!   input length. Adoption-agency reparenting is capped separately.
 //!
+//! * Serializer escape cost is measured. Text nodes are merged exactly as
+//!   rcdom merges them, and each node's html5ever escape-scan length is
+//!   accumulated (see `escape_cost`).
+//!
 //! The input is fed in chunks and the probe stops at the first chunk that
 //! breaks a limit, so rejected work stays linear in the input length.
 
@@ -26,6 +30,8 @@ use std::{
     cell::{Cell, Ref, RefCell},
     rc::Rc,
 };
+
+use crate::escape_cost::{EscapeScan, MAX_ESCAPE_SCAN_BYTES};
 
 use html5ever::{
     Attribute, ParseOpts, QualName, local_name, ns, parse_fragment,
@@ -52,11 +58,30 @@ pub(crate) enum Verdict {
     Within,
     TooDeep,
     TooMuchWork,
+    TooExpensiveToSerialize,
+}
+
+/// Probe verdict plus the text-node escape-scan cost the serializer will pay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Outcome {
+    pub(crate) verdict: Verdict,
+    pub(crate) text_escape_cost: u64,
 }
 
 /// Measure `input` against the depth `limit` and the linear work budget.
+#[cfg(test)]
 pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
+    measure(input, limit).verdict
+}
+
+/// Like `probe`, also returning the text escape-scan cost.
+pub(crate) fn measure(input: &str, limit: usize) -> Outcome {
     let verdict = Rc::new(Cell::new(Verdict::Within));
+    let escape_cost = Rc::new(Cell::new(0_u64));
+    let outcome = || Outcome {
+        verdict: verdict.get(),
+        text_escape_cost: escape_cost.get(),
+    };
     let sink = DepthSink {
         nodes: RefCell::new(vec![Node::new(document_name())]),
         limit,
@@ -66,6 +91,7 @@ pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
             .saturating_add(BASE_WORK),
         work: Cell::new(0),
         reparents: Cell::new(0),
+        escape_cost: Rc::clone(&escape_cost),
         verdict: Rc::clone(&verdict),
     };
     let mut parser = parse_fragment(
@@ -84,25 +110,12 @@ pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
         let (chunk, tail) = rest.split_at(split);
         parser.process(StrTendril::from_slice(chunk));
         if verdict.get() != Verdict::Within {
-            return verdict.get();
+            return outcome();
         }
         rest = tail;
     }
     parser.finish();
-    verdict.get()
-}
-
-/// Upper bound on rcdom's front-to-back scan to reach element `position` in
-/// a child list that interleaves at most one merged text node between
-/// elements.
-fn rcdom_index_cost(position: usize) -> usize {
-    position.saturating_mul(2).saturating_add(2)
-}
-
-/// Upper bound on the length of the rcdom child list that holds `len`
-/// elements, plus one unit for the operation itself.
-fn rcdom_len_cost(len: usize) -> usize {
-    len.saturating_mul(2).saturating_add(2)
+    outcome()
 }
 
 fn document_name() -> QualName {
@@ -116,6 +129,8 @@ struct Node {
     children: Vec<usize>,
     annotation_xml_integration_point: bool,
     template_contents: Option<usize>,
+    /// Present on text nodes: the escape-scan state of the merged text.
+    text: Option<EscapeScan>,
 }
 
 impl Node {
@@ -127,6 +142,7 @@ impl Node {
             children: Vec::new(),
             annotation_xml_integration_point: false,
             template_contents: None,
+            text: None,
         }
     }
 }
@@ -137,6 +153,7 @@ struct DepthSink {
     budget: usize,
     work: Cell<usize>,
     reparents: Cell<usize>,
+    escape_cost: Rc<Cell<u64>>,
     verdict: Rc<Cell<Verdict>>,
 }
 
@@ -174,10 +191,9 @@ impl DepthSink {
         };
         let siblings = &mut nodes[parent].children;
         if let Some(position) = siblings.iter().rposition(|&c| c == child) {
-            // rcdom finds the child by scanning its parent's children from
-            // the front, and that list also holds text nodes (at most one
-            // between neighbouring elements after merging).
-            self.charge(rcdom_index_cost(position));
+            // rcdom finds the child by scanning its parent's children
+            // (text nodes included, as here) from the front.
+            self.charge(position + 1);
             siblings.remove(position);
         }
     }
@@ -197,7 +213,7 @@ impl DepthSink {
         // Appending is O(1) in rcdom. Inserting before a sibling scans for
         // the sibling from the front and shifts the tail: the whole list.
         self.charge(if before.is_some() {
-            rcdom_len_cost(siblings.len())
+            siblings.len() + 1
         } else {
             1
         });
@@ -205,6 +221,75 @@ impl DepthSink {
         nodes[child].parent = Some(parent);
         let depth = nodes[parent].depth + 1;
         self.redepth(&mut nodes, child, depth);
+    }
+
+    /// Add text to `node` (a text node) and account its escape cost.
+    fn feed_text(&self, nodes: &mut [Node], node: usize, text: &str) {
+        let Some(scan) = nodes[node].text.as_mut() else {
+            return;
+        };
+        let added = scan.feed(text.as_bytes(), false);
+        let total = self.escape_cost.get().saturating_add(added);
+        self.escape_cost.set(total);
+        if total > MAX_ESCAPE_SCAN_BYTES {
+            self.fail(Verdict::TooExpensiveToSerialize);
+        }
+    }
+
+    fn new_text_node(nodes: &mut Vec<Node>, parent: usize) -> usize {
+        let mut node = Node::new(document_name());
+        node.text = Some(EscapeScan::default());
+        node.parent = Some(parent);
+        nodes.push(node);
+        nodes.len() - 1
+    }
+
+    /// rcdom `append(AppendText)`: merge into a trailing text child, or add
+    /// a new text node.
+    fn append_text(&self, parent: usize, text: &str) {
+        if self.stopped() {
+            return;
+        }
+        let mut nodes = self.nodes.borrow_mut();
+        let target = match nodes[parent].children.last() {
+            Some(&last) if nodes[last].text.is_some() => last,
+            _ => {
+                let id = Self::new_text_node(&mut nodes, parent);
+                nodes[parent].children.push(id);
+                self.charge(1);
+                id
+            }
+        };
+        self.feed_text(&mut nodes, target, text);
+    }
+
+    /// rcdom `append_before_sibling(AppendText)`: merge into the text node
+    /// right before `sibling`, or insert a new one there.
+    fn insert_text_before(&self, parent: usize, sibling: usize, text: &str) {
+        if self.stopped() {
+            return;
+        }
+        let mut nodes = self.nodes.borrow_mut();
+        let Some(position) = nodes[parent].children.iter().rposition(|&c| c == sibling) else {
+            return;
+        };
+        // Front-to-back scan for the sibling.
+        self.charge(position + 1);
+        let previous = position
+            .checked_sub(1)
+            .map(|index| nodes[parent].children[index])
+            .filter(|&previous| nodes[previous].text.is_some());
+        let target = match previous {
+            Some(previous) => previous,
+            None => {
+                let id = Self::new_text_node(&mut nodes, parent);
+                let len = nodes[parent].children.len();
+                nodes[parent].children.insert(position, id);
+                self.charge(len - position + 1);
+                id
+            }
+        };
+        self.feed_text(&mut nodes, target, text);
     }
 
     /// Recompute depths over the subtree rooted at `root` with an explicit
@@ -220,7 +305,13 @@ impl DepthSink {
                 return;
             }
             nodes[node].depth = depth;
-            stack.extend(nodes[node].children.iter().map(|&c| (c, depth + 1)));
+            let children = &nodes[node].children;
+            stack.extend(
+                children
+                    .iter()
+                    .filter(|&&c| nodes[c].text.is_none())
+                    .map(|&c| (c, depth + 1)),
+            );
             if let Some(contents) = nodes[node].template_contents {
                 stack.push((contents, depth));
             }
@@ -260,8 +351,9 @@ impl TreeSink for DepthSink {
     }
 
     fn append(&self, parent: &usize, child: NodeOrText<usize>) {
-        if let NodeOrText::AppendNode(child) = child {
-            self.attach(child, *parent, None);
+        match child {
+            NodeOrText::AppendNode(child) => self.attach(child, *parent, None),
+            NodeOrText::AppendText(text) => self.append_text(*parent, &text),
         }
     }
 
@@ -307,13 +399,10 @@ impl TreeSink for DepthSink {
                     self.detach(&mut nodes, child);
                 }
             },
-            // Foster-parented text: rcdom still scans the parent's children
-            // for the sibling and may insert, even though the probe keeps no
-            // text nodes.
-            NodeOrText::AppendText(_) => {
+            // Foster-parented text.
+            NodeOrText::AppendText(text) => {
                 if let Some(parent) = parent {
-                    let len = self.nodes.borrow()[parent].children.len();
-                    self.charge(rcdom_len_cost(len));
+                    self.insert_text_before(parent, *sibling, &text);
                 }
             }
         }

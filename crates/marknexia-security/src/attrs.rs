@@ -15,11 +15,16 @@
 //! * after `<title>`, `<textarea>`, `<style>`, `<xmp>`, `<iframe>`,
 //!   `<noembed>`, `<noframes>`, `<script>` or `<noscript>`, the content may
 //!   be markup (foreign content, or not HTML namespace) or raw text;
-//! * comments, doctypes, CDATA sections and bogus comments (`<!`, `<?`,
-//!   `</` + non-letter) may end at any later `>`, and no later than the first
-//!   `>` preceded by `--`, `--!` or `]]`. Comments always end at the first
-//!   `-->` or `--!>`, CDATA at the first `]]>`, and the others at the first
-//!   `>`.
+//! * after `<!` the construct is tracked as each kind it can still be, and
+//!   each branch ends only on its own terminator:
+//!   - a **comment** only on exactly `<!--`, ending at `-->` or `--!>`
+//!     (or the abrupt `<!-->` / `<!--->`), per the tokenizer's
+//!     comment-start, comment-end-dash, comment-end and comment-end-bang
+//!     states;
+//!   - a **CDATA section** only on exactly `<![CDATA[` (it is CDATA in
+//!     foreign content, a bogus comment otherwise), ending at `]]>`;
+//!   - a **bogus comment or doctype** (also `<?` and `</` + non-letter),
+//!     ending at the first `>`.
 //! * raw text ends at the first matching end tag, except `<script>`, whose
 //!   escape states can skip end tags. That branch therefore never ends.
 //!
@@ -82,9 +87,24 @@ enum State {
     SelfClosing {
         raw: Option<u8>,
     },
-    /// Comment-like construct. `tail` tracks the closing sequence seen so
-    /// far: 1 = `-`, 2 = `--`, 3 = `--!`, 4 = `]`, 5 = `]]`.
-    Opaque {
+    /// Bogus comment or doctype: ends at the first `>`.
+    Bogus,
+    /// After `<!`, `dashes` of the `--` that opens a comment matched.
+    CommentOpen {
+        dashes: u8,
+    },
+    /// Comment body. `tail` mirrors the tokenizer state: 4 = comment start,
+    /// 5 = comment start dash, 0 = comment, 1 = comment end dash,
+    /// 2 = comment end, 3 = comment end bang.
+    Comment {
+        tail: u8,
+    },
+    /// After `<!`, `matched` bytes of `[CDATA[` matched.
+    CdataOpen {
+        matched: u8,
+    },
+    /// CDATA section. `tail`: 1 = `]`, 2 = `]]` (or more).
+    Cdata {
         tail: u8,
     },
     /// Raw text of `RAW_TEXT_NAMES[name]` with `progress` bytes of
@@ -185,7 +205,12 @@ fn step(
         ),
         State::TagOpen => match byte {
             b'/' => add(next, State::EndTagOpen, 0),
-            b'!' | b'?' => add(next, State::Opaque { tail: 0 }, 0),
+            b'!' => {
+                add(next, State::Bogus, 0);
+                add(next, State::CommentOpen { dashes: 0 }, 0);
+                add(next, State::CdataOpen { matched: 0 }, 0);
+            }
+            b'?' => add(next, State::Bogus, 0),
             b'<' => add(next, State::TagOpen, 0),
             letter if letter.is_ascii_alphabetic() => add(
                 next,
@@ -202,7 +227,7 @@ fn step(
             letter if letter.is_ascii_alphabetic() => {
                 add(next, State::TagName { mask: 0, len: 1 }, 0);
             }
-            _ => add(next, State::Opaque { tail: 0 }, 0),
+            _ => add(next, State::Bogus, 0),
         },
         State::TagName { mask, len } => {
             let raw = raw_of(mask, len);
@@ -284,23 +309,70 @@ fn step(
             b'/' => add(next, State::SelfClosing { raw }, count),
             _ => return new_attribute(next, raw, count, limit),
         },
-        State::Opaque { tail } => {
+        State::Bogus => {
             if byte == b'>' {
                 add(next, State::Data, 0);
-                if matches!(tail, 2 | 3 | 5) {
-                    // No interpretation extends past this point.
-                    return true;
+            } else {
+                add(next, State::Bogus, 0);
+            }
+        }
+        State::CommentOpen { dashes } => {
+            // Not `<!--`: this branch dies; the bogus branch covers it.
+            if byte == b'-' {
+                if dashes == 1 {
+                    add(next, State::Comment { tail: 4 }, 0);
+                } else {
+                    add(next, State::CommentOpen { dashes: 1 }, 0);
                 }
             }
-            let tail = match (tail, byte) {
-                (1 | 2, b'-') => 2,
-                (_, b'-') => 1,
-                (2, b'!') => 3,
-                (4 | 5, b']') => 5,
-                (_, b']') => 4,
-                _ => 0,
-            };
-            add(next, State::Opaque { tail }, 0);
+        }
+        State::Comment { tail } => {
+            let ends = byte == b'>' && matches!(tail, 2..=5);
+            if ends {
+                add(next, State::Data, 0);
+            } else {
+                let tail = match (tail, byte) {
+                    // comment start
+                    (4, b'-') => 5,
+                    // comment start dash / comment end dash
+                    (5 | 1, b'-') => 2,
+                    // comment end: extra dashes stay, `!` enters end bang
+                    (2, b'-') => 2,
+                    (2, b'!') => 3,
+                    // comment / comment end bang: a dash enters end dash
+                    (_, b'-') => 1,
+                    _ => 0,
+                };
+                add(next, State::Comment { tail }, 0);
+            }
+        }
+        State::CdataOpen { matched } => {
+            const OPEN: &[u8] = b"[CDATA[";
+            if byte == OPEN[usize::from(matched)] {
+                if usize::from(matched) + 1 == OPEN.len() {
+                    add(next, State::Cdata { tail: 0 }, 0);
+                } else {
+                    add(
+                        next,
+                        State::CdataOpen {
+                            matched: matched + 1,
+                        },
+                        0,
+                    );
+                }
+            }
+        }
+        State::Cdata { tail } => {
+            if byte == b'>' && tail == 2 {
+                add(next, State::Data, 0);
+            } else {
+                let tail = match (tail, byte) {
+                    (1 | 2, b']') => 2,
+                    (_, b']') => 1,
+                    _ => 0,
+                };
+                add(next, State::Cdata { tail }, 0);
+            }
         }
         State::RawText { name, progress } => {
             let target = RAW_TEXT_NAMES[usize::from(name)];
@@ -399,6 +471,29 @@ mod tests {
     }
 
     #[test]
+    fn comment_and_cdata_terminators_match_the_tokenizer() {
+        // Abrupt empty comments end immediately; a following tag is counted.
+        for prefix in [
+            "<!-->",
+            "<!--->",
+            "<!---->",
+            "<!-- x -->",
+            "<!-- x --!>",
+            "<!x>",
+            "<?x>",
+        ] {
+            assert!(
+                !within_attribute_limit(&format!("{prefix}{}", tag_with(300)), 256),
+                "{prefix}"
+            );
+            assert!(
+                within_attribute_limit(&format!("{prefix}{}", tag_with(10)), 256),
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
     fn raw_text_misalignment_cannot_hide_a_real_tag() {
         // Scanned as markup, `y="` opens a quote that swallows the real tag
         // start; the raw-text path resumes at `</textarea>` and sees it.
@@ -421,5 +516,16 @@ mod tests {
         assert!(!within_attribute_limit(&attack, 256));
         let attack = format!("<!x \" >{}", tag_with(300));
         assert!(!within_attribute_limit(&attack, 256));
+        // A comment does not end at `]]>`, and CDATA does not end at `-->`
+        // or `--!>`.
+        for attack in [
+            format!("<!-- ]]> <x y=\" -->{}", tag_with(300)),
+            format!("<svg><![CDATA[ --> <x y=\" ]]>{}</svg>", tag_with(300)),
+            format!("<svg><![CDATA[ --!> <x y=\" ]]>{}</svg>", tag_with(300)),
+            format!("<!--!> <x y=\" -->{}", tag_with(300)),
+            format!("<!-- --!-> <x y=\" -->{}", tag_with(300)),
+        ] {
+            assert!(!within_attribute_limit(&attack, 256), "{}", &attack[..30]);
+        }
     }
 }

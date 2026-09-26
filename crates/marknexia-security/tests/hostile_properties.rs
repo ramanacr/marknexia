@@ -974,6 +974,107 @@ fn sanitized_svg_is_inline_only_and_embeds_as_a_fragment() {
     );
 }
 
+fn many_attributes(count: usize) -> String {
+    let mut tag = String::from("<p");
+    for index in 0..count {
+        tag.push_str(&format!(" a{index}"));
+    }
+    tag.push('>');
+    tag
+}
+
+#[test]
+fn comment_and_cdata_terminators_cannot_hide_attribute_floods() {
+    // SAN-8: a comment does not end at `]]>`; CDATA does not end at `-->`
+    // or `--!>`. The quote after the wrong terminator must not swallow the
+    // real tag in the pre-scan.
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let flood = many_attributes(300);
+    for input in [
+        format!("<!-- ]]> <x y=\" -->{flood}"),
+        format!("<svg><![CDATA[ --> <x y=\" ]]>{flood}</svg>"),
+        format!("<svg><![CDATA[ --!> <x y=\" ]]>{flood}</svg>"),
+    ] {
+        assert_too_complex_fast(&input[..24], || {
+            html_policy.sanitize_fragment(&input).map(|_| ())
+        });
+    }
+}
+
+#[test]
+fn quadratic_serializer_escaping_is_rejected_before_serializing() {
+    // SAN-8: html5ever's write_escaped rescans to the next `<`/`>` (and `"`
+    // in attributes) for every `&` or 0xC2 byte.
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    let svg_policy = SvgPolicy::new(ContentPolicy::default());
+    let ampersands = "x&y ".repeat(500_000);
+    let no_break_spaces = "x\u{a0}y ".repeat(400_000);
+    let entities = "&amp ".repeat(800_000);
+    // Stray end tags create no node, so the text merges into one node.
+    let merged = "x&y</span>".repeat(150_000);
+    // Foster-parented text merges across `<tr>` into the node before the table.
+    let fostered = format!("<table>{}", "x&y<tr>".repeat(150_000));
+    let attribute = format!("<p title=\"{}\">t</p>", "&amp;".repeat(200_000));
+    for (label, input) in [
+        ("ampersands", &ampersands),
+        ("no-break spaces", &no_break_spaces),
+        ("entities", &entities),
+        ("merged text", &merged),
+        ("fostered text", &fostered),
+        ("attribute", &attribute),
+    ] {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            html_policy.sanitize_fragment(input),
+            Err(SanitizeError::TooComplex),
+            "{label}"
+        );
+        assert!(
+            started.elapsed() < rejection_bound(),
+            "{label} took {:?}",
+            started.elapsed()
+        );
+    }
+    assert_eq!(
+        svg_policy.sanitize(&format!(
+            "<svg><text>{}</text></svg>",
+            "x&y ".repeat(120_000)
+        )),
+        Err(SanitizeError::TooComplex)
+    );
+}
+
+#[test]
+fn escape_heavy_legitimate_documents_are_accepted() {
+    let html_policy = HtmlPolicy::new(ContentPolicy::default());
+    // A 1.5 MB fenced shell block full of `&&`, `&amp;` entities and
+    // redirections, as a Markdown renderer emits it.
+    let mut shell = String::from("<pre><code class=\"language-sh\">");
+    while shell.len() < 1_500_000 {
+        shell.push_str(
+            "cd build &amp;&amp; make -j8 &amp;&amp; ./run --flag &gt; out.log 2&gt;&amp;1 || echo &quot;fail&quot;\n",
+        );
+        shell.push_str("test -f a &amp;&amp; test -f b &amp;&amp; echo ok &gt;&gt; log\n");
+    }
+    shell.push_str("</code></pre>");
+    assert!(html_policy.sanitize_fragment(&shell).is_ok());
+    // 2 MB of prose with many no-break spaces, ©, ° and « » characters.
+    let mut prose = String::new();
+    while prose.len() < 2_000_000 {
+        prose.push_str(
+            "<p>Temperature 20\u{a0}\u{b0}C \u{a9}\u{a0}2026 \u{ab}quoted\u{bb} Tom &amp; Jerry &nbsp; &copy; caf\u{e9} with enough words for a paragraph.</p>\n",
+        );
+    }
+    let sanitized = html_policy.sanitize_fragment(&prose).unwrap();
+    assert!(sanitized.as_str().contains("&nbsp;\u{b0}C"));
+    // A long `&&` line block below the budget is still accepted.
+    assert!(
+        html_policy
+            .sanitize_fragment(&"x&y ".repeat(60_000))
+            .is_ok()
+    );
+}
+
 #[test]
 fn whitespace_only_input_yields_empty_output() {
     assert_eq!(html(""), "");

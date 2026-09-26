@@ -12,6 +12,7 @@
 mod attrs;
 mod css;
 mod depth;
+mod escape_cost;
 mod html;
 
 pub use attrs::MAX_ATTRIBUTES_PER_TAG;

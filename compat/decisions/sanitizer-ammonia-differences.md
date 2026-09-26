@@ -59,6 +59,14 @@ AngleSharp has no nesting or work limit. html5ever's tree builder scans the open
 * more than 4,096 adoption-agency reparent operations occur: `SanitizeError::TooComplex`. Only misnested raw HTML triggers these (Markdown output is well-formed), so a document with more than 4,096 misnesting repairs is rejected rather than sanitized. That is an accepted usability cost.
 * any start or end tag may carry more than `MAX_ATTRIBUTES_PER_TAG` (256) attributes: `SanitizeError::TooComplex`. html5ever's duplicate-attribute check is quadratic per tag and invisible to the tree sink, so a linear pre-scan runs before any html5ever parse. The pre-scan follows the tokenizer's tag and quoting states. Where the real state depends on the tree builder (raw-text elements, comments, CDATA), it tracks every possible state at once, so it can over-count but never under-count.
 
+* the serializer's escape scans would exceed 2^34 bytes: `SanitizeError::TooComplex`. html5ever 0.40.1 `write_escaped`, which ammonia's `Document::write_to` uses, rescans every `&` or 0xC2 byte (no-break space, ©, °, « and so on) up to the next `<`/`>` (plus `"` in attribute values). That is quadratic: 2 MiB of `x&y ` takes about 26 s.
+  * No newer html5ever or ammonia release exists.
+  * ammonia exposes its DOM only behind `cfg(ammonia_unstable)`, so a Marknexia-owned serializer is not reachable without a rustflags or fork change, which is not allowed here.
+  * The exact scan length is therefore computed in linear time and checked before serializing: text nodes in the probe, which merges text exactly as rcdom does, and emitted attribute values in ammonia's attribute filter.
+  * Measured in release, the serializer takes about 0.9–1.2 s at the threshold.
+  * Ordinary escape-heavy content passes: a 1.5 MB shell code block full of `&&` and redirections, and 2 MB of prose dense with no-break spaces, ©, ° and entities.
+  * A single text node or attribute value with dense `&`/0xC2 bytes and no `<` or `>` for more than about 370 KB is rejected. html5ever would spend more than a second on it; the rejection time grows linearly with the input.
+
 Foster-parented and moved nodes are charged what rcdom's front-to-back child scans cost, including text nodes. Without that charge, `<table>` followed by many `x<br>` pairs is quadratic in rcdom.
 
 Browsers cap parser nesting at 512. Ordinary Markdown output uses well under 3 work units per byte.
