@@ -99,8 +99,10 @@ $result = [ordered]@{
     fixtureDigest = $artifact.fixtureDigest
     runCount = 60
     webViewResidency = 'separate-process'
-    sampleSource = 'imported-external'
-    runtimeCollectorStatus = 'unavailable-deferred'
+    # Samples produced by Collect-RustDesktopPerf.ps1 on this machine carry
+    # collected-local; anything else remains an external import.
+    sampleSource = if ($samples.sampleSource -ceq 'collected-local') { 'collected-local' } else { 'imported-external' }
+    runtimeCollectorStatus = if ($samples.sampleSource -ceq 'collected-local') { 'available' } else { 'unavailable-deferred' }
     sampleProvenance = $provenance
     scenario = [ordered]@{
         id = $scenarioData.id

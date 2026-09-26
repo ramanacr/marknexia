@@ -112,4 +112,4 @@ if ($outputDirectory) {
     [IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
 }
 $measurement | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedOutput -Encoding utf8NoBOM
-Write-Host "Rust artifact measurement written to $resolvedOutput ($totalBytes bytes across $($records.Count) files)."
+Write-Host "Rust artifact measurement written to $resolvedOutput ($totalBytes bytes across $(@($records).Count) files)."

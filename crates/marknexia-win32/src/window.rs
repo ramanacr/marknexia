@@ -191,7 +191,6 @@ pub fn run() -> Result<(), WindowError> {
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(error);
     }
-    let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     let mut msg = MSG::default();
     loop {
         let status = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -309,6 +308,14 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
         state.accessibility = Some(accessibility);
         state.uia_selection = Some(select_callback);
     }
+    // Lay out and paint the native shell before WebView2 startup so the
+    // window appears without waiting for the browser process.
+    update_theme(hwnd);
+    reflow(hwnd, dpi);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+    }
     match StaApartment::enter() {
         Ok(apartment) => {
             // Until the session is stored, a reentrant UIA Select must not
@@ -381,6 +388,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE) -> Result<(), WindowError> {
             state.borrow_mut().last_error = Some(format!("COM STA unavailable: {error:?}"))
         }
     }
+    // Apply theme and bounds to the WebView session created above.
     update_theme(hwnd);
     reflow(hwnd, dpi);
     Ok(())
@@ -807,6 +815,8 @@ fn poll_webview(hwnd: HWND) {
 struct Readiness {
     webview_ready: Option<HANDLE>,
     first_render: Option<HANDLE>,
+    webview_signaled: bool,
+    render_signaled: bool,
 }
 
 impl Readiness {
@@ -815,15 +825,17 @@ impl Readiness {
         Self {
             webview_ready: named_event(&format!(r"Local\Marknexia.WebViewReady.{pid}")),
             first_render: named_event(&format!(r"Local\Marknexia.FirstRender.{pid}")),
+            webview_signaled: false,
+            render_signaled: false,
         }
     }
 
     fn observe(&mut self, controller_ready: bool, document_loaded: bool) {
         if controller_ready {
-            signal_once(&mut self.webview_ready);
+            signal_once(&mut self.webview_ready, &mut self.webview_signaled);
         }
         if document_loaded {
-            signal_once(&mut self.first_render);
+            signal_once(&mut self.first_render, &mut self.render_signaled);
         }
     }
 }
@@ -846,13 +858,12 @@ fn named_event(name: &str) -> Option<HANDLE> {
     unsafe { CreateEventW(None, true, false, PCWSTR::from_raw(name.as_ptr())) }.ok()
 }
 
-/// Sets the event, then closes it: each milestone fires once per process.
-fn signal_once(slot: &mut Option<HANDLE>) {
-    if let Some(handle) = slot.take() {
-        unsafe {
-            let _ = SetEvent(handle);
-            let _ = CloseHandle(handle);
-        }
+/// Sets the event once. The handle stays open until the process tears down
+/// so a harness that opens the name late still observes the signal.
+fn signal_once(slot: &mut Option<HANDLE>, signaled: &mut bool) {
+    if let (Some(handle), false) = (slot.as_ref(), *signaled) {
+        *signaled = true;
+        let _ = unsafe { SetEvent(*handle) };
     }
 }
 
@@ -1130,6 +1141,14 @@ fn high_contrast() -> bool {
 }
 
 fn webview_folder() -> PathBuf {
+    // Measurement harnesses may isolate the WebView2 profile (cold starts);
+    // only an absolute path is honored.
+    if let Some(folder) = std::env::var_os("MARKNEXIA_WEBVIEW2_USER_DATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return folder;
+    }
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)

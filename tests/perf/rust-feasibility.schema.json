@@ -64,8 +64,8 @@
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
-    "sampleSource": { "const": "imported-external" },
-    "runtimeCollectorStatus": { "const": "unavailable-deferred" },
+    "sampleSource": { "enum": ["imported-external", "collected-local"] },
+    "runtimeCollectorStatus": { "enum": ["unavailable-deferred", "available"] },
     "sampleProvenance": {
       "type": "object", "additionalProperties": false,
       "required": ["commit", "fixtureDigest", "scenario", "architecture", "nativeArtifact", "nativeArtifactSha256", "hardware", "operatingSystem"],
