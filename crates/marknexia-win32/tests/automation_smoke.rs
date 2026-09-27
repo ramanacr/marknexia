@@ -270,20 +270,31 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
 
     // Keyboard handoff: with focus inside the active WebView document, the
     // shell-owned Ctrl+Tab must still switch tabs (AcceleratorKeyPressed).
-    let _ = unsafe { SetForegroundWindow(hwnd) };
     let document = wait_for("a focusable visible document", || {
         visible_document_element(&automation, &root)
     });
+    // SetForegroundWindow is refused when this test process is not itself in
+    // the foreground (e.g. on CI runners). UI Automation SetFocus may activate
+    // the target window, so try both until the launched shell owns the
+    // foreground.
+    let shell_is_foreground = || {
+        let foreground = unsafe { GetForegroundWindow() };
+        let mut owner = 0;
+        unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
+        owner == shell.0.id()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !shell_is_foreground() && Instant::now() < deadline {
+        let _ = unsafe { SetForegroundWindow(hwnd) };
+        let _ = unsafe { root.SetFocus() };
+        thread::sleep(Duration::from_millis(200));
+    }
     unsafe { document.SetFocus() }.expect("focus WebView document");
     thread::sleep(Duration::from_millis(300));
     // Never inject keys unless the launched shell owns the foreground, so a
     // failed activation cannot type into another application.
-    let foreground = unsafe { GetForegroundWindow() };
-    let mut owner = 0;
-    unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
-    assert_eq!(
-        owner,
-        shell.0.id(),
+    assert!(
+        shell_is_foreground(),
         "shell must be foreground before SendInput"
     );
     send_chord(&[VK_CONTROL, VK_TAB]);
