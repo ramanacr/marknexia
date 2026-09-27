@@ -23,6 +23,38 @@ fn is_reserved_component(segment: &str) -> bool {
     )
 }
 
+/// Case-fold one character for containment, merging only simple 1:1 case
+/// pairs that Windows also treats as equal.
+///
+/// Full Unicode lowercasing merges characters that NTFS and .NET
+/// `OrdinalIgnoreCase` keep distinct (KELVIN SIGN U+212A with `k`, OHM SIGN
+/// U+2126 with `ω`, ANGSTROM SIGN U+212B with `å`, `İ` with `i`). Merging them
+/// would let a sibling directory pass containment. A character therefore folds
+/// to its lowercase form only when that form is a single BMP character whose
+/// uppercase is exactly the original. Everything else is kept as is, which can
+/// only make two spellings compare as different (fail closed). Characters
+/// outside the BMP never fold: the NTFS upcase table covers UTF-16 code units.
+fn fold_char(c: char) -> char {
+    if c.is_ascii() {
+        return c.to_ascii_lowercase();
+    }
+    if u32::from(c) > 0xFFFF {
+        return c;
+    }
+    let mut lower = c.to_lowercase();
+    let (Some(folded), None) = (lower.next(), lower.next()) else {
+        return c;
+    };
+    if folded == c || u32::from(folded) > 0xFFFF {
+        return c;
+    }
+    let mut upper = folded.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(round_trip), None) if round_trip == c => folded,
+        _ => c,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalPath(String);
 
@@ -67,7 +99,7 @@ impl CanonicalPath {
                 {
                     return Err(PathError::InvalidComponent);
                 }
-                _ => segments.push(segment.to_lowercase()),
+                _ => segments.push(segment.chars().map(fold_char).collect::<String>()),
             }
         }
         let drive = (source[0] as char).to_ascii_lowercase();

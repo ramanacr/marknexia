@@ -392,3 +392,116 @@ fn case_changes_never_escape_the_repository_scope() {
         assert_eq!(result.file_system_probe_count, 0, "{destination}");
     }
 }
+
+fn rooted_context(root: &str) -> ResolutionContext {
+    ResolutionContext {
+        current_file: format!("{root}/README.md"),
+        repository_root: Some(root.into()),
+        allow_external_links: true,
+        enforce_repository_sandbox: true,
+    }
+}
+
+/// (root component, look-alike that NTFS and .NET OrdinalIgnoreCase keep
+/// distinct, true case variant that both treat as equal).
+const UNICODE_CASE_TRAPS: [(&str, &str, &str); 4] = [
+    ("key", "\u{212A}ey", "KEY"),       // KELVIN SIGN vs k
+    ("\u{3C9}", "\u{2126}", "\u{3A9}"), // OHM SIGN vs small omega; capital omega
+    ("\u{E5}", "\u{212B}", "\u{C5}"),   // ANGSTROM SIGN vs a-ring; capital A-ring
+    ("ix", "\u{130}x", "IX"),           // capital I with dot vs i
+];
+
+#[test]
+fn unicode_case_look_alike_siblings_are_rejected_before_probe() {
+    for (root, look_alike, _) in UNICODE_CASE_TRAPS {
+        let context = rooted_context(&format!("C:/{root}"));
+        // The virtual file system folds with full lowercasing, so it would
+        // report the sibling as present: only containment stops it.
+        let vfs = VirtualFileSystem {
+            files: vec![format!("C:/{look_alike}/secret.md").to_lowercase()],
+        };
+        for destination in [
+            format!("C:/{look_alike}/secret.md"),
+            format!("file:///C:/{look_alike}/secret.md"),
+            format!("../{look_alike}/secret.md"),
+            format!("/../{look_alike}/secret.md"),
+        ] {
+            let result = resolve(Some(&destination), &context, &vfs);
+            assert_eq!(result.intent.kind, "BlockedOrInvalid", "{destination}");
+            assert_eq!(result.intent.target_document, None, "{destination}");
+            assert_eq!(result.file_system_probe_count, 0, "{destination}");
+        }
+    }
+}
+
+#[test]
+fn true_unicode_case_variants_of_the_root_still_resolve() {
+    for (root, _, variant) in UNICODE_CASE_TRAPS {
+        let context = rooted_context(&format!("C:/{root}"));
+        let vfs = VirtualFileSystem {
+            files: vec![
+                format!("C:/{root}/README.md"),
+                format!("C:/{root}/docs/api.md"),
+            ],
+        };
+        for (destination, probes) in [
+            (format!("C:/{variant}/docs/api.md"), 1),
+            (format!("../{variant}/docs/api.md"), 2),
+        ] {
+            let result = resolve(Some(&destination), &context, &vfs);
+            assert_eq!(result.intent.kind, "CrossDocument", "{destination}");
+            assert_eq!(
+                result.intent.target_document,
+                Some(format!("C:/{variant}/docs/api.md")),
+                "{destination}"
+            );
+            assert_eq!(result.file_system_probe_count, probes, "{destination}");
+        }
+    }
+}
+
+/// Decision NAV-2: an absolute destination that climbs above the drive root
+/// resolves in .NET (clamped to `C:\repo\docs\api.md`); Rust cannot
+/// canonicalize it and reports it as an invalid local path before any probe.
+#[test]
+fn nav_2_absolute_traversal_above_the_drive_root_is_an_invalid_local_path() {
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/repo/README.md".into(), "c:/repo/docs/api.md".into()],
+    };
+    for destination in ["C:/../repo/docs/api.md", "file:///C:/../repo/docs/api.md"] {
+        let result = resolve(
+            Some(destination),
+            &absolute_context("C:/repo/README.md"),
+            &vfs,
+        );
+        assert_eq!(result.intent.kind, "BlockedOrInvalid", "{destination}");
+        assert_eq!(
+            result.intent.diagnostic.as_deref(),
+            Some("Access blocked: Network file paths and invalid local paths are not supported."),
+            "{destination}"
+        );
+        assert_eq!(result.file_system_probe_count, 0, "{destination}");
+    }
+}
+
+/// Decision NAV-3: .NET resolves relative links from a current file of `C:\`
+/// against `C:\` itself; Rust treats a drive root as an invalid current file.
+#[test]
+fn nav_3_drive_root_current_file_is_rejected_before_probe() {
+    let context = ResolutionContext {
+        current_file: "C:/".into(),
+        repository_root: Some("C:/".into()),
+        allow_external_links: true,
+        enforce_repository_sandbox: true,
+    };
+    let vfs = VirtualFileSystem {
+        files: vec!["c:/docs/api.md".into()],
+    };
+    let result = resolve(Some("docs/api.md"), &context, &vfs);
+    assert_eq!(result.intent.kind, "BlockedOrInvalid");
+    assert_eq!(
+        result.intent.diagnostic.as_deref(),
+        Some("Access blocked: Current file is invalid; cannot enforce repository sandbox.")
+    );
+    assert_eq!(result.file_system_probe_count, 0);
+}

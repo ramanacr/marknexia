@@ -193,6 +193,24 @@ public sealed class ParityExporterTests
         exception.Should().NotBeAssignableTo<InvalidDataException>().And.NotBeAssignableTo<InvalidOperationException>();
     }
 
+    [Theory]
+    [InlineData("HEAD")]
+    [InlineData("38b39f6")]
+    [InlineData("--output=elsewhere")]
+    [InlineData("38b39f668ce52026261ac4802602c0cf7e0711a3 --no-index")]
+    [InlineData("zzb39f668ce52026261ac4802602c0cf7e0711a3")]
+    public async Task FrozenExport_RejectsRevisionThatIsNotAFullCommitIdBeforeRunningGit(string revision)
+    {
+        string output = ParityTestSupport.CreateTempDirectory();
+        try
+        {
+            await FluentActions.Invoking(() => new Exporter(ParityTestSupport.FindRepositoryRoot(), revision).ExportAsync(output, CancellationToken.None))
+                .Should().ThrowAsync<ArgumentException>();
+            Directory.EnumerateFileSystemEntries(output).Should().BeEmpty();
+        }
+        finally { ParityTestSupport.DeleteTempDirectory(output); }
+    }
+
     [Fact]
     public async Task Cli_ReturnsNonzeroAndWritesConciseErrorInsteadOfThrowing()
     {

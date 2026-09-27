@@ -592,6 +592,11 @@ public sealed class ParityExporter
 
     private static string ResolveSourceRevision(string repositoryRoot, string? frozenSourceRevision)
     {
+        // The frozen revision comes from fixture JSON or the command line and is
+        // interpolated into git arguments, so accept only a full object id.
+        if (frozenSourceRevision is not null && !IsFullCommitId(frozenSourceRevision))
+            throw new ArgumentException("A frozen parity source revision must be exactly 40 hexadecimal characters.", nameof(frozenSourceRevision));
+
         string revision = string.IsNullOrWhiteSpace(frozenSourceRevision)
             ? RunGit(repositoryRoot, "rev-parse HEAD")
             : RunGit(repositoryRoot, $"rev-parse {frozenSourceRevision}^{{commit}}");
@@ -609,6 +614,9 @@ public sealed class ParityExporter
 
         return revision;
     }
+
+    internal static bool IsFullCommitId(string value) =>
+        value.Length == 40 && value.All(Uri.IsHexDigit);
 
     private static string RunGit(string repositoryRoot, string arguments)
     {

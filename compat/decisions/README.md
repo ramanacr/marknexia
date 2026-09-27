@@ -8,4 +8,10 @@ These decisions are deliberately outside the frozen .NET baseline and must not a
 * **Markdown source diagnostics — proposed.** See `markdown-source-diagnostics.md`: an additive, non-serialized diagnostics field; HTML output and fixtures are unchanged.
 * **Markdown resource limits — proposed.** See `markdown-resource-limits.md`: container and inline nesting flattened beyond depth 32, and a rendered-body output cap (default 128 MiB) that fails the parse.
 * **Rendering differences (REND-1 to REND-7) — proposed.** See `rendering-differences.md`: size caps (to be raised to .NET parity), C#-only highlighting, LF page bytes, remote-image blanking, math depth clamp, text-handling approximations, and API shape.
-* **Navigation probe order (NAV-1 to NAV-2) — proposed.** See `navigation-probe-order.md`: a relative escape is rejected before the current-file probe, with no current-path fallback, and `..` above the drive root is rejected rather than clamped. The positive navigation fixtures match .NET exactly.
+* **Navigation probe order (NAV-1 to NAV-3) — proposed.** See `navigation-probe-order.md`:
+  * A relative escape is rejected before the current-file probe.
+  * `..` above the drive root is rejected rather than clamped.
+  * A drive-root current file is rejected.
+  * Containment case folding keeps Unicode look-alikes distinct.
+
+  The positive navigation fixtures match .NET exactly.
