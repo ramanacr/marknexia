@@ -83,10 +83,10 @@ jobs:
           $env:CARGO_INCREMENTAL = '0'
           $first = (Resolve-Path source-a).Path
           $second = (Resolve-Path source-b).Path
-          $env:RUSTFLAGS = "-C link-arg=/Brepro --remap-path-prefix=$first=/workspace"
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$first=/workspace"
           cargo build --manifest-path source-a/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:RUSTFLAGS = "-C link-arg=/Brepro --remap-path-prefix=$second=/workspace"
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$second=/workspace"
           cargo build --manifest-path source-b/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compare unsigned hashes and validate PE machine

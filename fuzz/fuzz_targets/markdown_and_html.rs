@@ -1,50 +1,40 @@
 #![no_main]
 
 //! Arbitrary text through `Renderer::render` and `HtmlPolicy::sanitize_fragment`.
-//! Invariants: no panic, output limits hold, and sanitized output is a fixed
-//! point of the sanitizer (re-sanitizing changes nothing beyond two known
-//! sanitizer behaviors, see `fixed_point`).
+//! Invariants: no panic, output limits hold, sanitized output is an exact
+//! fixed point of the sanitizer (SAN-10, SAN-11), and chunked sanitization
+//! equals one-chunk sanitization (SAN-8).
+//!
+//! marknexia-security needs `--cfg ammonia_unstable`. `cargo fuzz` sets
+//! `RUSTFLAGS`, which replaces the workspace `.cargo/config.toml` rustflags,
+//! so run it as `RUSTFLAGS="--cfg ammonia_unstable" cargo +nightly fuzz run
+//! markdown_and_html` (cargo-fuzz appends its own flags to `RUSTFLAGS`).
 
 use libfuzzer_sys::fuzz_target;
 use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, RenderLimits, Renderer};
 use marknexia_security::{
     ContentPolicy, HtmlPolicy, MAX_HTML_OUTPUT_BYTES, PolicyLimits, RemoteImagePolicy,
+    testing::sanitize_with_chunking,
 };
 
-fn policy(remote: bool) -> HtmlPolicy {
+fn content_policy(flags: u8) -> ContentPolicy {
+    let remote = match flags & 0x41 {
+        0x01 | 0x41 => RemoteImagePolicy::AllowHttps,
+        0x40 => RemoteImagePolicy::Deny,
+        _ => RemoteImagePolicy::Blank,
+    };
+    ContentPolicy::try_new(PolicyLimits::default(), remote).unwrap()
+}
+
+/// The renderer's policy for a document with remote assets on or off.
+fn render_policy(remote: bool) -> HtmlPolicy {
     let remote = if remote {
         RemoteImagePolicy::AllowHttps
     } else {
-        RemoteImagePolicy::Deny
+        RemoteImagePolicy::Blank
     };
     HtmlPolicy::new(ContentPolicy::try_new(PolicyLimits::default(), remote).unwrap())
-}
-
-/// The expected result of re-sanitizing sanitized `html`: itself, except for
-/// two known sanitizer behaviors (see `tests/fuzz_invariants.rs` in
-/// marknexia-rendering): white-space-only input becomes "", and one line feed
-/// right after each `<pre>` is dropped by the HTML parser.
-fn fixed_point(html: &str) -> String {
-    if html.trim().is_empty() {
-        return String::new();
-    }
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("<pre") {
-        let Some(close) = rest[start..].find('>') else {
-            break;
-        };
-        let end = start + close + 1;
-        let is_pre = matches!(rest.as_bytes().get(start + 4), Some(b'>' | b' '));
-        out.push_str(&rest[..end]);
-        rest = &rest[end..];
-        if is_pre && let Some(stripped) = rest.strip_prefix('\n') {
-            rest = stripped;
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 fuzz_target!(|bytes: &[u8]| {
@@ -57,18 +47,22 @@ fuzz_target!(|bytes: &[u8]| {
     let remote = flags & 1 != 0;
 
     // Raw HTML straight through the sanitizer.
-    let html = policy(remote);
-    if let Ok(clean) = html.sanitize_fragment(input) {
+    let policy = content_policy(flags);
+    let html = HtmlPolicy::new(policy);
+    let clean = html.sanitize_fragment(input);
+    if let Ok(clean) = &clean {
         assert!(clean.as_str().len() <= MAX_HTML_OUTPUT_BYTES);
         let again = html
             .sanitize_fragment(clean.as_str())
             .expect("sanitized output must be accepted again");
-        assert_eq!(
-            again.as_str(),
-            fixed_point(clean.as_str()),
-            "sanitizer is not idempotent"
-        );
+        assert_eq!(&again, clean, "sanitizer is not a fixed point");
     }
+    // Chunk at every possible split point: identical output and errors.
+    assert_eq!(
+        sanitize_with_chunking(policy, input, Some(1), 2),
+        sanitize_with_chunking(policy, input, None, 1),
+        "chunked sanitization differs"
+    );
 
     // Markdown through the renderer, with small limits so edges are reached.
     let limits = RenderLimits {
@@ -99,12 +93,12 @@ fuzz_target!(|bytes: &[u8]| {
         assert!(body.len() <= MAX_HTML_OUTPUT_BYTES);
         assert!(document.page_bytes() <= limits.max_rendered_html_bytes);
         assert_eq!(document.page_html().len(), document.page_bytes());
-        let again = policy(remote)
+        let again = render_policy(remote)
             .sanitize_fragment(body)
             .expect("rendered body must be accepted again");
         assert_eq!(
             again.as_str(),
-            fixed_point(body),
+            body,
             "rendered body is not a sanitizer fixed point"
         );
     }
