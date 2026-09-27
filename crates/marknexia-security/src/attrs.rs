@@ -31,6 +31,13 @@
 //! The real tokenizer path is always one of the tracked paths, so its
 //! attribute count never exceeds the scanner's. The state set is finite
 //! (about a hundred states at most, usually a handful), so the scan is linear.
+//!
+//! The same scan reports **split candidates** for chunked sanitization: every
+//! offset right after a `>` + `\n` pair at which the tracked set is exactly
+//! the data state. Because the real tokenizer state is always in the tracked
+//! set, the tokenizer is then provably in the data state with no token in
+//! progress. Whether the tree builder is back at its initial state is decided
+//! separately by the depth probe (`depth::plan`).
 
 /// Maximum attributes on one tag accepted by the sanitizer.
 pub const MAX_ATTRIBUTES_PER_TAG: usize = 256;
@@ -120,30 +127,164 @@ const fn is_space(byte: u8) -> bool {
 }
 
 /// Returns `false` when some tag may carry more than `limit` attributes.
+#[cfg(test)]
 pub(crate) fn within_attribute_limit(input: &str, limit: usize) -> bool {
+    scan(input, limit).is_some()
+}
+
+/// Split candidates found by [`scan`], as sorted offsets.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Candidates {
+    /// Every offset right after `>\n` where the tokenizer is certainly in
+    /// the data state.
+    pub(crate) all: Vec<usize>,
+    /// The subset right after the end tag of a block element that closes
+    /// Markdown's top-level blocks (`</p>`, `</table>`, `</ul>`, `</pre>`,
+    /// `</div>` and so on) or after `<hr>`, and not followed by another end
+    /// tag: the likely places for the parser to be back at its initial
+    /// state. Only a performance hint.
+    pub(crate) likely: Vec<usize>,
+}
+
+/// Elements whose end tag (or, for `hr`, start tag) likely ends a top-level
+/// block.
+const BLOCK_ENDS: &[&[u8]] = &[
+    b"p",
+    b"h1",
+    b"h2",
+    b"h3",
+    b"h4",
+    b"h5",
+    b"h6",
+    b"ul",
+    b"ol",
+    b"dl",
+    b"table",
+    b"pre",
+    b"blockquote",
+    b"div",
+    b"details",
+    b"section",
+    b"figure",
+    b"article",
+    b"aside",
+    b"header",
+    b"footer",
+    b"nav",
+    b"main",
+    b"address",
+    b"fieldset",
+];
+
+/// Whether the complete tag `tag` (from `<` to `>`) likely ends a block.
+fn ends_block(tag: &[u8]) -> bool {
+    let (name, end_tag) = match tag {
+        [b'<', b'/', rest @ ..] => (rest, true),
+        [b'<', rest @ ..] => (rest, false),
+        _ => return false,
+    };
+    let length = name
+        .iter()
+        .position(|&byte| !byte.is_ascii_alphanumeric())
+        .unwrap_or(name.len());
+    let name = &name[..length];
+    if end_tag {
+        BLOCK_ENDS
+            .iter()
+            .any(|block| block.eq_ignore_ascii_case(name))
+    } else {
+        name.eq_ignore_ascii_case(b"hr")
+    }
+}
+
+/// Checks the attribute limit and collects the split candidates.
+/// Returns `None` when some tag may carry more than `limit` attributes.
+pub(crate) fn scan(input: &str, limit: usize) -> Option<Candidates> {
     let bytes = input.as_bytes();
+    let mut candidates = Candidates::default();
+    // Where the current tag started, while the tracked set is one state.
+    let mut tag_start = None;
     let mut current: Vec<(State, usize)> = vec![(State::Data, 0)];
     let mut next: Vec<(State, usize)> = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        // Fast path: in plain data only `<` changes state.
-        if current.len() == 1 && current[0].0 == State::Data {
-            match bytes[index..].iter().position(|&byte| byte == b'<') {
-                Some(offset) => index += offset,
-                None => return true,
+        // Fast path: with a single tracked state, skip the bytes that keep
+        // it unchanged (none of them is a `>` that could end in data).
+        if current.len() == 1 {
+            let skipped = match current[0].0 {
+                // In plain data only `<` changes state.
+                State::Data => match bytes[index..].iter().position(|&byte| byte == b'<') {
+                    Some(offset) => offset,
+                    None => return Some(candidates),
+                },
+                State::DoubleQuoted { .. } => skip_until(&bytes[index..], |byte| byte == b'"'),
+                State::SingleQuoted { .. } => skip_until(&bytes[index..], |byte| byte == b'\''),
+                State::Bogus => skip_until(&bytes[index..], |byte| byte == b'>'),
+                State::TagName { mask: 0, .. } => skip_until(&bytes[index..], |byte| {
+                    is_space(byte) || matches!(byte, b'/' | b'>')
+                }),
+                State::AttrName { .. } => skip_until(&bytes[index..], |byte| {
+                    is_space(byte) || matches!(byte, b'/' | b'>' | b'=')
+                }),
+                State::Unquoted { .. } => {
+                    skip_until(&bytes[index..], |byte| is_space(byte) || byte == b'>')
+                }
+                State::Comment { tail: 0 } => skip_until(&bytes[index..], |byte| byte == b'-'),
+                State::RawText { progress: 0, .. } => {
+                    skip_until(&bytes[index..], |byte| byte == b'<')
+                }
+                State::Cdata { tail: 0 } => skip_until(&bytes[index..], |byte| byte == b']'),
+                _ => 0,
+            };
+            index += skipped;
+            if index >= bytes.len() {
+                return Some(candidates);
             }
         }
         let byte = bytes[index];
+        if byte == b'<' && current.len() == 1 && current[0].0 == State::Data {
+            tag_start = Some(index);
+        }
         index += 1;
         next.clear();
         for &(state, count) in &current {
             if !step(state, count, byte, limit, &mut next) {
-                return false;
+                return None;
             }
         }
         std::mem::swap(&mut current, &mut next);
+        if current.len() > 1 {
+            tag_start = None;
+        }
+        if byte == b'>'
+            && bytes.get(index) == Some(&b'\n')
+            && current.len() == 1
+            && current[0].0 == State::Data
+        {
+            candidates.all.push(index + 1);
+            // An end tag right after means an enclosing element closes
+            // here too, so the parser is not back at its initial state.
+            let next_tag = bytes[index + 1..]
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .map(|offset| &bytes[index + 1 + offset..]);
+            if tag_start.is_some_and(|start| ends_block(&bytes[start..index]))
+                && !next_tag.is_some_and(|rest| rest.starts_with(b"</"))
+            {
+                candidates.likely.push(index + 1);
+            }
+            tag_start = None;
+        }
     }
-    true
+    Some(candidates)
+}
+
+/// Bytes before the first one for which `stop` holds (all when none does).
+fn skip_until(bytes: &[u8], stop: impl Fn(u8) -> bool) -> usize {
+    bytes
+        .iter()
+        .position(|&byte| stop(byte))
+        .unwrap_or(bytes.len())
 }
 
 fn add(next: &mut Vec<(State, usize)>, state: State, count: usize) {
@@ -179,11 +320,9 @@ fn emit(next: &mut Vec<(State, usize)>, raw: Option<u8>) {
 }
 
 fn raw_of(mask: u16, len: u8) -> Option<u8> {
-    RAW_TEXT_NAMES
-        .iter()
-        .enumerate()
-        .find(|(index, name)| mask & (1 << index) != 0 && name.len() == usize::from(len))
-        .and_then(|(index, _)| u8::try_from(index).ok())
+    let matching = mask & NAME_LENGTH.get(usize::from(len)).copied().unwrap_or(0);
+    // At most one name has a given length and prefix.
+    (matching != 0).then(|| matching.trailing_zeros() as u8)
 }
 
 fn step(
@@ -426,18 +565,43 @@ fn step(
     true
 }
 
-fn match_mask(mask: u16, position: usize, byte: u8) -> u16 {
-    let mut result = 0;
-    for (index, name) in RAW_TEXT_NAMES.iter().enumerate() {
-        if mask & (1 << index) != 0
-            && name
-                .get(position)
-                .is_some_and(|expected| expected.eq_ignore_ascii_case(&byte))
-        {
-            result |= 1 << index;
+/// Longest raw-text element name.
+const MAX_RAW_NAME: usize = 8;
+
+/// `NAME_BYTE[position][byte]`: the raw-text names whose byte at `position`
+/// is `byte`, ASCII case-insensitively.
+const NAME_BYTE: [[u16; 256]; MAX_RAW_NAME] = {
+    let mut table = [[0_u16; 256]; MAX_RAW_NAME];
+    let mut name = 0;
+    while name < RAW_TEXT_NAMES.len() {
+        let bytes = RAW_TEXT_NAMES[name];
+        let mut position = 0;
+        while position < bytes.len() {
+            let lower = bytes[position].to_ascii_lowercase();
+            table[position][lower as usize] |= 1 << name;
+            table[position][lower.to_ascii_uppercase() as usize] |= 1 << name;
+            position += 1;
         }
+        name += 1;
     }
-    result
+    table
+};
+
+/// `NAME_LENGTH[len]`: the raw-text names of exactly `len` bytes.
+const NAME_LENGTH: [u16; MAX_RAW_NAME + 1] = {
+    let mut table = [0_u16; MAX_RAW_NAME + 1];
+    let mut name = 0;
+    while name < RAW_TEXT_NAMES.len() {
+        table[RAW_TEXT_NAMES[name].len()] |= 1 << name;
+        name += 1;
+    }
+    table
+};
+
+fn match_mask(mask: u16, position: usize, byte: u8) -> u16 {
+    NAME_BYTE
+        .get(position)
+        .map_or(0, |row| mask & row[usize::from(byte)])
 }
 
 #[cfg(test)]
@@ -460,6 +624,37 @@ mod tests {
         assert!(within_attribute_limit(&tag_with(200).repeat(1_000), 256));
         assert!(!within_attribute_limit("<p a=1 b='x' c=\"y\" d/e>", 4));
         assert!(within_attribute_limit("<p a=1 b='x' c=\"y\" d>", 4));
+    }
+
+    #[test]
+    fn split_candidates_are_only_certain_data_states() {
+        let input = "<p>a</p>\n<p title=\">\n\">b</p>\n<!-- x>\n -->\n<textarea>\n</textarea>\n";
+        let candidates = scan(input, 256).unwrap();
+        let after: Vec<&str> = candidates.all.iter().map(|&at| &input[at..]).collect();
+        // Not inside the quoted value, the comment or the raw-text element
+        // (whose content may also be markup, so both paths stay tracked).
+        assert_eq!(
+            after,
+            [
+                "<p title=\">\n\">b</p>\n<!-- x>\n -->\n<textarea>\n</textarea>\n",
+                "<!-- x>\n -->\n<textarea>\n</textarea>\n",
+                "<textarea>\n</textarea>\n",
+                "",
+            ]
+        );
+        // Only the `</p>` candidates are likely block ends here.
+        assert_eq!(candidates.likely, [candidates.all[0], candidates.all[1]]);
+        // A script data branch never ends, so no candidate follows `<script>`.
+        assert!(
+            scan("<script>x</script>\n<p>a</p>\n", 256)
+                .unwrap()
+                .all
+                .is_empty()
+        );
+        let likely = scan("<td>a</td>\n</TABLE>\n<hr />\n<ul>\n</ul >\n<p/>\n", 256)
+            .unwrap()
+            .likely;
+        assert_eq!(likely, [20, 27, 39]);
     }
 
     #[test]

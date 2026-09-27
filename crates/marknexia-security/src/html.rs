@@ -9,16 +9,16 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    ops::Range,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use ammonia::{Builder, UrlRelative};
 
-use crate::{ContentPolicy, SanitizeError, UrlContext, UrlPolicy, attrs, css, depth, escape_cost};
+use crate::{
+    ContentPolicy, RemoteImagePolicy, SanitizeError, UrlContext, UrlPolicy, attrs, css, depth,
+    serialize::{self, OutputBudget},
+};
 
 /// Ganss default `AllowedTags` + .NET additions − .NET removals (`script`,
 /// `iframe`, `object`, `embed`, `applet`, `form`, `base`, `meta`, `link`).
@@ -404,30 +404,389 @@ const ALLOWED_ATTRIBUTES: &[&str] = &[
 /// they can never be emitted.
 const PASS_THROUGH_SCHEMES: &[&str] = &["http", "https", "mailto", "tel", "javascript", "vbscript"];
 
-pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, SanitizeError> {
-    if input.trim().is_empty() {
+/// Chunks are aimed at this size (they end at the first possible split point
+/// after it). The chunk is the unit of ammonia's parse and of the DOM kept in
+/// memory at once per worker.
+pub(crate) const CHUNK_TARGET_BYTES: usize = 256 * 1024;
+
+/// Segments are aimed at this size. The probe runs over the segments in
+/// parallel, each from a fresh parser; see [`sanitize`].
+pub(crate) const SEGMENT_TARGET_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on sanitizer worker threads for one document.
+const MAX_WORKERS: usize = 8;
+
+/// Per-call settings. None of them changes the output; the chunk and
+/// segment targets can change which budget error a hostile input gets.
+#[derive(Clone, Copy)]
+pub(crate) struct Run<'c> {
+    /// Polled between parser pieces and chunks; `true` stops with
+    /// [`SanitizeError::Cancelled`].
+    pub(crate) cancel: Option<&'c (dyn Fn() -> bool + Sync)>,
+    /// Chunk size target; `usize::MAX` keeps the input in one chunk.
+    pub(crate) chunk_target: usize,
+    /// Segment size target; `usize::MAX` probes the input in one run.
+    pub(crate) segment_target: usize,
+    /// Upper bound on worker threads (1 runs everything on the caller).
+    pub(crate) max_workers: usize,
+}
+
+impl Run<'_> {
+    pub(crate) const DEFAULT: Run<'static> = Run {
+        cancel: None,
+        chunk_target: CHUNK_TARGET_BYTES,
+        segment_target: SEGMENT_TARGET_BYTES,
+        max_workers: MAX_WORKERS,
+    };
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(|cancel| cancel())
+    }
+}
+
+/// Sanitize `input` under `policy`.
+///
+/// 1. The attribute pre-scan bounds attributes per tag and finds the split
+///    candidates, where the tokenizer is certainly in the data state
+///    (`attrs::scan`).
+/// 2. The input is cut into segments of about [`SEGMENT_TARGET_BYTES`] at
+///    split candidates, preferably at likely block ends. Each segment is
+///    probed from a fresh parser, in parallel (`depth::Planner`); the probe
+///    checks depth and work and plans the chunks inside the segment.
+/// 3. The segment results are confirmed in order (`plan_chunks`): a probe is
+///    the real parse from the first point where both are at the initial
+///    state, and from there its chunks are accepted and its work is charged
+///    to the document's budget. Between such points the real parse runs
+///    sequentially, with what is left of the budget.
+/// 4. ammonia cleans every accepted chunk as its own fragment, in parallel,
+///    and the Marknexia serializer writes it (`serialize`). Outputs are
+///    joined in input order.
+///
+/// The result is byte-identical to cleaning the whole input as one fragment,
+/// and independent of the number of threads. It is returned only when the
+/// whole input passed every budget; otherwise no partial output exists.
+pub(crate) fn sanitize(
+    input: &str,
+    policy: ContentPolicy,
+    run: Run<'_>,
+) -> Result<String, SanitizeError> {
+    // Only empty input short-circuits (M1): white space is parsed like any
+    // other text, so sanitizing is a fixed point.
+    if input.is_empty() {
         return Ok(String::new());
     }
     // Bound the tokenizer's per-tag O(k²) duplicate-attribute check before
     // any html5ever parse (probe or ammonia) runs.
-    if !attrs::within_attribute_limit(input, attrs::MAX_ATTRIBUTES_PER_TAG) {
-        return Err(SanitizeError::TooComplex);
+    let candidates =
+        attrs::scan(input, attrs::MAX_ATTRIBUTES_PER_TAG).ok_or(SanitizeError::TooComplex)?;
+    let workers = run
+        .max_workers
+        .min(std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+        .max(1);
+    let chunks = plan_chunks(input, &candidates, run, workers)?;
+    drop(candidates);
+    clean_chunks(input, &chunks, policy, run, workers)
+}
+
+/// Steps 1 to 3 of [`sanitize`]: the chunks of `input`.
+pub(crate) fn chunk_ranges(input: &str, run: Run<'_>) -> Result<Vec<Range<usize>>, SanitizeError> {
+    if input.is_empty() {
+        return Ok(Vec::new());
     }
-    let outcome = depth::measure(input, depth::MAX_NESTING_DEPTH);
-    match outcome.verdict {
-        depth::Verdict::Within => {}
-        depth::Verdict::TooDeep => {
-            return Err(SanitizeError::NestingTooDeep {
-                limit: depth::MAX_NESTING_DEPTH,
-            });
+    let candidates =
+        attrs::scan(input, attrs::MAX_ATTRIBUTES_PER_TAG).ok_or(SanitizeError::TooComplex)?;
+    plan_chunks(input, &candidates, run, run.max_workers)
+}
+
+/// Segment boundaries: 0, then the first likely candidate at least `target`
+/// bytes after the previous boundary, and the input length. Without likely
+/// candidates the input stays one segment: a speculative probe that starts
+/// inside open markup would only be parsed again.
+fn segment_bounds(input: &str, candidates: &attrs::Candidates, target: usize) -> Vec<usize> {
+    let likely = &candidates.likely;
+    let mut bounds = vec![0_usize];
+    loop {
+        let from = bounds[bounds.len() - 1].saturating_add(target);
+        if from >= input.len() {
+            break;
         }
-        depth::Verdict::TooMuchWork | depth::Verdict::TooExpensiveToSerialize => {
+        let index = likely.partition_point(|&candidate| candidate < from);
+        match likely.get(index) {
+            Some(&candidate) if candidate < input.len() => bounds.push(candidate),
+            _ => break,
+        }
+    }
+    bounds.push(input.len());
+    bounds
+}
+
+/// One segment's probe from a fresh parser.
+struct SegmentProbe {
+    verdict: depth::Verdict,
+    /// The parser was at its initial state at the end of the segment.
+    ends_initial: bool,
+    /// Closed chunks, each with the budget used when it was closed.
+    chunks: Vec<(Range<usize>, depth::Budget)>,
+    /// Budget used by `chunks`.
+    used: depth::Budget,
+    /// Budget used when the probe stopped.
+    total: depth::Budget,
+    /// Start of the unclosed tail after `chunks`.
+    tail: usize,
+}
+
+fn probe_segment(
+    input: &str,
+    candidates: &[usize],
+    start: usize,
+    end: usize,
+    run: Run<'_>,
+) -> SegmentProbe {
+    let mut planner = depth::Planner::new(
+        input,
+        candidates,
+        start,
+        run.chunk_target,
+        depth::MAX_NESTING_DEPTH,
+        depth::Budget::for_input(end - start),
+    );
+    let mut verdict = planner.advance(end, &|| run.cancelled());
+    let mut ends_initial = false;
+    if verdict == depth::Verdict::Within {
+        if end == input.len() {
+            verdict = planner.finish();
+            ends_initial = verdict == depth::Verdict::Within;
+        } else if planner.at_initial_state() {
+            planner.close_chunk();
+            ends_initial = true;
+        }
+    }
+    SegmentProbe {
+        verdict,
+        ends_initial,
+        used: planner.used_at_last_cut(),
+        total: planner.used(),
+        tail: planner.chunk_start(),
+        chunks: planner.take_chunks(),
+    }
+}
+
+fn verdict_result(verdict: depth::Verdict) -> Result<(), SanitizeError> {
+    match verdict {
+        depth::Verdict::Within => Ok(()),
+        depth::Verdict::TooDeep => Err(SanitizeError::NestingTooDeep {
+            limit: depth::MAX_NESTING_DEPTH,
+        }),
+        depth::Verdict::TooMuchWork => Err(SanitizeError::TooComplex),
+        depth::Verdict::Cancelled => Err(SanitizeError::Cancelled),
+    }
+}
+
+/// Steps 2 and 3 of [`sanitize`]: the accepted chunks, covering the input.
+///
+/// A segment probe is the real parse from any point at which both it and the
+/// real parse are at the initial state: its start, when the previous segment
+/// ended there, or else one of its own chunk boundaries. From such a point
+/// both parse the same bytes from the same state. So where a segment ends
+/// inside open markup, the real parse continues sequentially only until it
+/// meets the next segment's probe at such a point, usually within one chunk.
+fn plan_chunks(
+    input: &str,
+    candidates: &attrs::Candidates,
+    run: Run<'_>,
+    workers: usize,
+) -> Result<Vec<Range<usize>>, SanitizeError> {
+    // Segments start where the parser is likely back at its initial state,
+    // so that most probes are the real parse from their start.
+    let bounds = segment_bounds(input, candidates, run.segment_target);
+    let candidates = &candidates.all;
+    let segments = bounds.len() - 1;
+    let probes = in_parallel(segments, workers, |_, segment| {
+        probe_segment(input, candidates, bounds[segment], bounds[segment + 1], run)
+    });
+    let cancelled = || run.cancelled();
+    let cap = depth::Budget::for_input(input.len());
+    let mut used = depth::Budget::ZERO;
+    let mut chunks = Vec::new();
+    let mut segment = 0;
+    // `None`: `bounds[segment]` is at the initial state in the real parse.
+    // `Some(i)`: the end of the probe's chunk `i` is (and so is the probe).
+    let mut synced_at: Option<usize> = None;
+    while segment < segments {
+        let probe = &probes[segment];
+        let (base, first) = match synced_at {
+            None => (depth::Budget::ZERO, 0),
+            Some(index) => (probe.chunks[index].1, index + 1),
+        };
+        // Everything the probe found after the synchronization point is
+        // what the real parse finds there.
+        if matches!(
+            probe.verdict,
+            depth::Verdict::TooDeep | depth::Verdict::Cancelled
+        ) {
+            verdict_result(probe.verdict)?;
+        }
+        let at_stop = probe.total.since(base);
+        if probe.verdict == depth::Verdict::TooMuchWork
+            && (used.work.saturating_add(at_stop.work) > cap.work
+                || used.reparents.saturating_add(at_stop.reparents) > cap.reparents)
+        {
+            // The segment's own allowance ran out, and the document's would
+            // have run out by the same point of the same parse.
             return Err(SanitizeError::TooComplex);
         }
+        let left = charge(&mut used, cap, probe.used.since(base))?;
+        chunks.extend(probe.chunks[first..].iter().map(|(range, _)| range.clone()));
+        synced_at = None;
+        if probe.ends_initial {
+            segment += 1;
+            continue;
+        }
+        // The segment ended inside open markup (or its own allowance ran
+        // out): continue the real parse from its last chunk boundary, within
+        // what is left of the document budget.
+        let mut planner = depth::Planner::new(
+            input,
+            candidates,
+            probe.tail,
+            run.chunk_target,
+            depth::MAX_NESTING_DEPTH,
+            left,
+        );
+        verdict_result(planner.advance(bounds[segment + 1], &cancelled))?;
+        loop {
+            segment += 1;
+            if segment == segments {
+                verdict_result(planner.finish())?;
+                charge(&mut used, cap, planner.used_at_last_cut())?;
+                chunks.extend(planner.take_chunks().into_iter().map(|(range, _)| range));
+                break;
+            }
+            // Look for a point where the real parse meets this probe.
+            let next = &probes[segment];
+            let mut met = planner.at_initial_state().then_some(None);
+            if met.is_none() {
+                for (index, (range, _)) in next.chunks.iter().enumerate() {
+                    verdict_result(planner.advance(range.end, &cancelled))?;
+                    if planner.at_initial_state() {
+                        met = Some(Some(index));
+                        break;
+                    }
+                }
+            }
+            if let Some(point) = met {
+                #[cfg(test)]
+                if point.is_some() {
+                    tests::SYNCED_INSIDE_A_SEGMENT.fetch_add(1, Ordering::Relaxed);
+                }
+                planner.close_chunk();
+                charge(&mut used, cap, planner.used_at_last_cut())?;
+                chunks.extend(planner.take_chunks().into_iter().map(|(range, _)| range));
+                synced_at = point;
+                break;
+            }
+            verdict_result(planner.advance(bounds[segment + 1], &cancelled))?;
+        }
     }
-    // Attribute values are measured as ammonia finalizes them.
-    let attribute_escape_cost = Arc::new(AtomicU64::new(0));
-    let attribute_cost_sink = Arc::clone(&attribute_escape_cost);
+    debug_assert!(
+        chunks.first().is_some_and(|first| first.start == 0)
+            && chunks.windows(2).all(|pair| pair[0].end == pair[1].start)
+            && chunks.last().is_some_and(|last| last.end == input.len())
+    );
+    Ok(chunks)
+}
+
+/// Add `more` to `used`; the budget left under `cap`, or `TooComplex`.
+fn charge(
+    used: &mut depth::Budget,
+    cap: depth::Budget,
+    more: depth::Budget,
+) -> Result<depth::Budget, SanitizeError> {
+    used.work = used.work.saturating_add(more.work);
+    used.reparents = used.reparents.saturating_add(more.reparents);
+    if used.work > cap.work || used.reparents > cap.reparents {
+        Err(SanitizeError::TooComplex)
+    } else {
+        Ok(depth::Budget {
+            work: cap.work - used.work,
+            reparents: cap.reparents - used.reparents,
+        })
+    }
+}
+
+/// Step 4 of [`sanitize`].
+fn clean_chunks(
+    input: &str,
+    chunks: &[Range<usize>],
+    policy: ContentPolicy,
+    run: Run<'_>,
+    workers: usize,
+) -> Result<String, SanitizeError> {
+    let budget = OutputBudget::new(policy.limits().max_html_output_bytes);
+    let failed = AtomicBool::new(false);
+    let workers = workers.min(chunks.len()).max(1);
+    // One builder per worker; building one costs microseconds.
+    let builders: Vec<Builder<'static>> = (0..workers).map(|_| builder(policy)).collect();
+    let outputs = in_parallel(chunks.len(), workers, |worker, index| {
+        if failed.load(Ordering::Relaxed) {
+            return Err(SanitizeError::Serialization);
+        }
+        if run.cancelled() {
+            failed.store(true, Ordering::Relaxed);
+            return Err(SanitizeError::Cancelled);
+        }
+        let result = clean_chunk(&builders[worker], &input[chunks[index].clone()], &budget);
+        if result.is_err() {
+            failed.store(true, Ordering::Relaxed);
+        }
+        result
+    });
+    {
+        // The first real error in input order; `Serialization` placeholders
+        // only stand for chunks skipped after an earlier failure.
+        let mut first_error = None;
+        for output in &outputs {
+            if let Err(error) = output {
+                let rank = |error: &SanitizeError| match error {
+                    SanitizeError::Cancelled => 0,
+                    SanitizeError::Serialization => 2,
+                    _ => 1,
+                };
+                if first_error
+                    .as_ref()
+                    .is_none_or(|first: &SanitizeError| rank(error) < rank(first))
+                {
+                    first_error = Some(error.clone());
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        let total = outputs
+            .iter()
+            .map(|output| output.as_ref().map_or(0, String::len))
+            .sum();
+        let mut joined = String::with_capacity(total);
+        for output in outputs.into_iter().flatten() {
+            joined.push_str(&output);
+        }
+        Ok(joined)
+    }
+}
+
+/// Clean one chunk as a fragment and serialize it.
+fn clean_chunk(
+    builder: &Builder<'static>,
+    chunk: &str,
+    budget: &OutputBudget,
+) -> Result<String, SanitizeError> {
+    let document = builder.clean(chunk);
+    let capacity = chunk.len() + chunk.len() / 8;
+    serialize::serialize_children(&document.to_dom_node(), budget, capacity)
+}
+
+fn builder(policy: ContentPolicy) -> Builder<'static> {
     let mut builder = Builder::empty();
     builder
         .tags(ALLOWED_TAGS.iter().copied().collect())
@@ -442,34 +801,50 @@ pub(crate) fn sanitize(input: &str, policy: ContentPolicy) -> Result<String, San
         .strip_comments(true)
         .id_prefix(None)
         .attribute_filter(move |element, attribute, value| {
-            let kept = filter_attribute(policy, element, attribute, value);
-            if let Some(kept) = &kept {
-                attribute_cost_sink.fetch_add(escape_cost::attribute_cost(kept), Ordering::Relaxed);
-            }
-            kept
+            filter_attribute(policy, element, attribute, value)
         });
-    let document = builder.clean(input);
-    // html5ever's escaping is quadratic in `&`/0xC2 density; refuse before
-    // serializing when its scans would exceed the budget.
-    let serialize_cost = outcome
-        .text_escape_cost
-        .saturating_add(attribute_escape_cost.load(Ordering::Relaxed));
-    if serialize_cost > escape_cost::MAX_ESCAPE_SCAN_BYTES {
-        return Err(SanitizeError::TooComplex);
-    }
+    builder
+}
 
-    let limit = policy.limits().max_html_output_bytes;
-    let mut writer = BoundedWriter {
-        buffer: Vec::new(),
-        limit,
-        exceeded: false,
-    };
-    let written = document.write_to(&mut writer);
-    if writer.exceeded {
-        return Err(SanitizeError::OutputTooLarge { limit });
+/// Run `job(worker, index)` for every index in `0..count` on up to `workers`
+/// threads (the caller's thread is worker 0) and return the results in index
+/// order.
+fn in_parallel<T: Send>(
+    count: usize,
+    workers: usize,
+    job: impl Fn(usize, usize) -> T + Sync,
+) -> Vec<T> {
+    let workers = workers.min(count);
+    if workers <= 1 {
+        return (0..count).map(|index| job(0, index)).collect();
     }
-    written.map_err(|_| SanitizeError::Serialization)?;
-    String::from_utf8(writer.buffer).map_err(|_| SanitizeError::Serialization)
+    let next = AtomicUsize::new(0);
+    let work = |worker: usize| {
+        let mut done = Vec::new();
+        loop {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            if index >= count {
+                return done;
+            }
+            done.push((index, job(worker, index)));
+        }
+    };
+    let mut results: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let work = &work;
+        let handles: Vec<_> = (1..workers)
+            .map(|worker| scope.spawn(move || work(worker)))
+            .collect();
+        let mut all = work(0);
+        for handle in handles {
+            match handle.join() {
+                Ok(done) => all.extend(done),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        all
+    });
+    results.sort_unstable_by_key(|&(index, _)| index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// Final authority for every surviving attribute value (already
@@ -519,6 +894,16 @@ fn filter_url<'u>(
     if value.is_empty() {
         return Some(Cow::Borrowed(value));
     }
+    // The .NET renderer's `BlockRemoteImages` turns a remote `<img src>`
+    // into `src=""` after sanitizing; here the same decision is taken on the
+    // parsed, entity-decoded value in one pass.
+    if policy.remote_images() == RemoteImagePolicy::Blank
+        && element == "img"
+        && attribute == "src"
+        && is_remote_reference(value)
+    {
+        return Some(Cow::Borrowed(""));
+    }
     // Parity with the .NET pre-filter, which rewrites script-scheme href/src
     // to "#". The scheme comes from the WHATWG URL parser, so whitespace,
     // tab/newline and case obfuscation are normalized exactly as a browser
@@ -539,38 +924,72 @@ fn filter_url<'u>(
         .map(|_| Cow::Borrowed(value))
 }
 
+/// `(?:https?://|//)` at the start, ASCII case-insensitive, as the .NET
+/// blanking pattern matches it.
+fn is_remote_reference(value: &str) -> bool {
+    ["http://", "https://", "//"].iter().any(|prefix| {
+        value
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    })
+}
+
 fn is_script_scheme(value: &str) -> bool {
     url::Url::parse(value)
         .map(|url| matches!(url.scheme(), "javascript" | "vbscript"))
         .unwrap_or(false)
 }
 
-/// Writer that refuses to grow past the output budget, so an expanding
-/// document is rejected while it is being serialized instead of afterwards.
-struct BoundedWriter {
-    buffer: Vec<u8>,
-    limit: usize,
-    exceeded: bool,
-}
-
-impl io::Write for BoundedWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.buffer.len().saturating_add(bytes.len()) > self.limit {
-            self.exceeded = true;
-            return Err(io::Error::other("sanitized output budget exceeded"));
-        }
-        self.buffer.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How often the real parse met a later probe at one of its chunk
+    /// boundaries rather than at a segment start.
+    pub(super) static SYNCED_INSIDE_A_SEGMENT: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_segment_inside_open_markup_is_rejoined_at_a_probe_chunk_boundary() {
+        // Segment boundaries fall inside the `<div>`: those probes start
+        // speculatively, and the real parse meets them after `</div>`.
+        let input = format!(
+            "{}<div>
+{}</div>
+{}",
+            "<p>a</p>
+"
+            .repeat(40),
+            "<p>b</p>
+"
+            .repeat(40),
+            "<p>c</p>
+"
+            .repeat(40)
+        );
+        let policy = ContentPolicy::default();
+        let whole = sanitize(
+            &input,
+            policy,
+            Run {
+                chunk_target: usize::MAX,
+                segment_target: usize::MAX,
+                ..Run::DEFAULT
+            },
+        );
+        let before = SYNCED_INSIDE_A_SEGMENT.load(Ordering::Relaxed);
+        for workers in [1, 4] {
+            let run = Run {
+                chunk_target: 20,
+                segment_target: 200,
+                max_workers: workers,
+                cancel: None,
+            };
+            assert_eq!(sanitize(&input, policy, run), whole);
+            let chunks = chunk_ranges(&input, run).unwrap();
+            assert!(chunks.len() > 20, "{}", chunks.len());
+        }
+        assert!(SYNCED_INSIDE_A_SEGMENT.load(Ordering::Relaxed) > before);
+    }
 
     #[test]
     fn allowed_and_removed_sets_are_disjoint() {

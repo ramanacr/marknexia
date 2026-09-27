@@ -8,12 +8,28 @@
 //! (ammonia/html5ever with the .NET-equivalent allowlists) or as plain text
 //! through [`HtmlPolicy::encode_text`]. Inline CSS is decided on `cssparser`
 //! tokens. No security decision is made with string replacement on markup.
+//!
+//! Large fragments are cut into chunks at points where the HTML parser is
+//! provably back at its initial state and cleaned in parallel; the output is
+//! byte-identical to cleaning the whole fragment at once (see `depth` and
+//! `compat/decisions/sanitizer-ammonia-differences.md`, SAN-8 and SAN-10).
+//!
+//! This crate needs ammonia's DOM (`Document::to_dom_node`), which ammonia
+//! only exposes under `--cfg ammonia_unstable`. The workspace
+//! `.cargo/config.toml` sets that flag; a build that replaces the configured
+//! rustflags (for example with `RUSTFLAGS`) must pass it too.
+
+#[cfg(not(ammonia_unstable))]
+compile_error!(
+    "marknexia-security needs `--cfg ammonia_unstable` (set in the workspace .cargo/config.toml; \
+     add it to RUSTFLAGS when overriding rustflags)"
+);
 
 mod attrs;
 mod css;
 mod depth;
-mod escape_cost;
 mod html;
+mod serialize;
 
 pub use attrs::MAX_ATTRIBUTES_PER_TAG;
 pub use depth::MAX_NESTING_DEPTH;
@@ -22,8 +38,11 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 
-pub const MAX_HTML_INPUT_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_HTML_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Largest HTML fragment accepted: the .NET `MarkdownRenderer.MaxRenderedHtmlBytes`
+/// (128 MiB), so a rendered Markdown body up to the .NET page limit fits.
+pub const MAX_HTML_INPUT_BYTES: usize = 128 * 1024 * 1024;
+/// Largest sanitized output: also the .NET page limit.
+pub const MAX_HTML_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_SVG_INPUT_BYTES: usize = 512 * 1024;
 pub const MAX_CSS_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 8 * 1024;
@@ -52,8 +71,15 @@ impl Default for PolicyLimits {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteImagePolicy {
+    /// Remote image sources are removed.
     Deny,
+    /// Valid `https://` image sources are kept.
     AllowHttps,
+    /// A remote `<img src>` (a value starting with `http://`, `https://` or
+    /// `//`, in any case) becomes `src=""`, as the .NET renderer's
+    /// `BlockRemoteImages` leaves it; every other remote image source is
+    /// removed as under [`Self::Deny`].
+    Blank,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,13 +140,25 @@ impl Default for ContentPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SanitizeError {
-    LimitExceedsHardCap { kind: &'static str, cap: usize },
-    InputTooLarge { kind: &'static str, limit: usize },
-    OutputTooLarge { limit: usize },
-    NestingTooDeep { limit: usize },
+    LimitExceedsHardCap {
+        kind: &'static str,
+        cap: usize,
+    },
+    InputTooLarge {
+        kind: &'static str,
+        limit: usize,
+    },
+    OutputTooLarge {
+        limit: usize,
+    },
+    NestingTooDeep {
+        limit: usize,
+    },
     TooComplex,
     Serialization,
     UnsafeUrl,
+    /// The caller's cancellation callback returned `true`.
+    Cancelled,
 }
 
 impl fmt::Display for SanitizeError {
@@ -141,6 +179,7 @@ impl fmt::Display for SanitizeError {
             Self::TooComplex => f.write_str("markup exceeds the tree-construction work budget"),
             Self::Serialization => f.write_str("sanitized output could not be serialized"),
             Self::UnsafeUrl => f.write_str("URL rejected by content policy"),
+            Self::Cancelled => f.write_str("sanitization was cancelled"),
         }
     }
 }
@@ -211,7 +250,24 @@ impl HtmlPolicy {
     /// failure returns an error and no partial output.
     pub fn sanitize_fragment(&self, html: &str) -> Result<SanitizedFragment, SanitizeError> {
         enforce_input_limit(html, "HTML", self.policy.limits.max_html_input_bytes)?;
-        html::sanitize(html, self.policy).map(SanitizedFragment)
+        html::sanitize(html, self.policy, html::Run::DEFAULT).map(SanitizedFragment)
+    }
+
+    /// [`Self::sanitize_fragment`] that polls `cancel` between parser pieces
+    /// and chunks (at most about 16 KiB of input apart) and returns
+    /// [`SanitizeError::Cancelled`], with no partial output, once it returns
+    /// `true`. `cancel` may be called from several threads.
+    pub fn sanitize_fragment_cancellable(
+        &self,
+        html: &str,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<SanitizedFragment, SanitizeError> {
+        enforce_input_limit(html, "HTML", self.policy.limits.max_html_input_bytes)?;
+        let run = html::Run {
+            cancel: Some(cancel),
+            ..html::Run::DEFAULT
+        };
+        html::sanitize(html, self.policy, run).map(SanitizedFragment)
     }
 
     /// Encode untrusted plain text as inert HTML. This is not an HTML sanitizer.
@@ -254,7 +310,7 @@ impl SvgPolicy {
     /// references are removed. Output is bounded by the HTML output budget.
     pub fn sanitize(&self, svg: &str) -> Result<SanitizedSvg, SanitizeError> {
         enforce_input_limit(svg, "SVG", self.policy.limits.max_svg_input_bytes)?;
-        html::sanitize(svg, self.policy).map(SanitizedSvg)
+        html::sanitize(svg, self.policy, html::Run::DEFAULT).map(SanitizedSvg)
     }
 }
 
@@ -401,6 +457,36 @@ fn valid_tel(value: &str) -> bool {
         && value.chars().all(|character| {
             character.is_ascii_digit() || matches!(character, '+' | '-' | '(' | ')' | '.' | ' ')
         })
+}
+
+/// Test hooks for the chunking differential tests. Not part of the API.
+#[doc(hidden)]
+pub mod testing {
+    use crate::{ContentPolicy, SanitizeError, html};
+
+    /// Sanitize with an explicit chunk target (`None`: the whole input as one
+    /// chunk) and worker bound, returning the plain string. The input limit
+    /// is not checked.
+    pub fn sanitize_with_chunking(
+        policy: ContentPolicy,
+        input: &str,
+        chunk_target: Option<usize>,
+        max_workers: usize,
+    ) -> Result<String, SanitizeError> {
+        let target = chunk_target.unwrap_or(usize::MAX);
+        let run = html::Run {
+            cancel: None,
+            chunk_target: target,
+            segment_target: target,
+            max_workers,
+        };
+        html::sanitize(input, policy, run)
+    }
+
+    /// The chunks the default settings cut `input` into (byte ranges).
+    pub fn chunk_ranges(input: &str) -> Result<Vec<std::ops::Range<usize>>, SanitizeError> {
+        html::chunk_ranges(input, html::Run::DEFAULT)
+    }
 }
 
 fn enforce_input_limit(input: &str, kind: &'static str, limit: usize) -> Result<(), SanitizeError> {

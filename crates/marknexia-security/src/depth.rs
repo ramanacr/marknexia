@@ -16,27 +16,39 @@
 //! * Work is budgeted. Every node placement is charged its depth, which
 //!   stands in for the tree builder's own open-stack scans. Every re-depth
 //!   visit and child-list scan is charged too. The budget is linear in the
-//!   input length. Adoption-agency reparenting is capped separately.
+//!   input length. Adoption-agency reparenting is capped separately, also
+//!   linearly in the input length.
 //!
-//! * Serializer escape cost is measured. Text nodes are merged exactly as
-//!   rcdom merges them, and each node's html5ever escape-scan length is
-//!   accumulated (see `escape_cost`).
+//! The probe also **plans the chunks** that the sanitizer parses
+//! independently. A chunk may end only at a split candidate from the
+//! attribute pre-scan (the tokenizer is then certainly in the data state with
+//! no token in progress) at which the tree builder holds no handle except the
+//! document, the `<html>` root and the context element
+//! (`TreeBuilder::trace_handles`). Then the stack of open elements is just the
+//! root, the list of active formatting elements holds no element, and neither
+//! a form nor a head element pointer is set, so the insertion mode is "in
+//! body" again and no later token can reach a node before the split. Parsing
+//! the rest from scratch therefore builds the same top-level nodes, except
+//! that text on both sides of the split is not merged into one text node,
+//! which serializes to the same bytes. At every chunk boundary the sink
+//! forgets the finished top-level subtrees, exactly as a fresh parse would,
+//! so the charged work models the chunked parses and the probe's memory stays
+//! proportional to one chunk.
 //!
-//! The input is fed in chunks and the probe stops at the first chunk that
+//! The input is fed in pieces and the probe stops at the first piece that
 //! breaks a limit, so rejected work stays linear in the input length.
 
 use std::{
     borrow::Cow,
     cell::{Cell, Ref, RefCell},
+    ops::Range,
     rc::Rc,
 };
-
-use crate::escape_cost::{EscapeScan, MAX_ESCAPE_SCAN_BYTES};
 
 use html5ever::{
     Attribute, ParseOpts, QualName, local_name, ns, parse_fragment,
     tendril::{StrTendril, TendrilSink},
-    tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
+    tree_builder::{ElementFlags, NodeOrText, QuirksMode, Tracer, TreeSink},
 };
 
 /// Maximum element nesting accepted by the sanitizer.
@@ -48,74 +60,282 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 pub(crate) const WORK_PER_INPUT_BYTE: usize = 8;
 pub(crate) const BASE_WORK: usize = 256 * 1024;
 
-/// Maximum adoption-agency `reparent_children` calls per input.
-pub(crate) const MAX_REPARENTS: usize = 4_096;
+/// Adoption-agency `reparent_children` calls allowed regardless of size.
+pub(crate) const BASE_REPARENTS: usize = 4_096;
+/// One more reparent call is allowed per this many input bytes.
+pub(crate) const BYTES_PER_REPARENT: usize = 256;
 
-const CHUNK_BYTES: usize = 16 * 1024;
+/// Largest piece fed to the parser between limit and cancellation checks.
+const FEED_BYTES: usize = 16 * 1024;
+
+/// Node ids the fragment parser creates first: the context `<div>` and the
+/// `<html>` root (the document is 0).
+const CONTEXT: usize = 1;
+const ROOT: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Verdict {
     Within,
     TooDeep,
     TooMuchWork,
-    TooExpensiveToSerialize,
+    Cancelled,
 }
 
-/// Probe verdict plus the text-node escape-scan cost the serializer will pay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Outcome {
-    pub(crate) verdict: Verdict,
-    pub(crate) text_escape_cost: u64,
+/// Reparent calls allowed for an input of `input_bytes`.
+pub(crate) const fn max_reparents(input_bytes: usize) -> usize {
+    BASE_REPARENTS + input_bytes / BYTES_PER_REPARENT
+}
+
+/// Work units allowed for an input of `input_bytes`.
+pub(crate) const fn max_work(input_bytes: usize) -> usize {
+    input_bytes
+        .saturating_mul(WORK_PER_INPUT_BYTE)
+        .saturating_add(BASE_WORK)
 }
 
 /// Measure `input` against the depth `limit` and the linear work budget.
 #[cfg(test)]
 pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
-    measure(input, limit).verdict
+    let mut planner = Planner::new(
+        input,
+        &[],
+        0,
+        usize::MAX,
+        limit,
+        Budget::for_input(input.len()),
+    );
+    match planner.advance(input.len(), &|| false) {
+        Verdict::Within => planner.finish(),
+        verdict => verdict,
+    }
 }
 
-/// Like `probe`, also returning the text escape-scan cost.
-pub(crate) fn measure(input: &str, limit: usize) -> Outcome {
-    let verdict = Rc::new(Cell::new(Verdict::Within));
-    let escape_cost = Rc::new(Cell::new(0_u64));
-    let outcome = || Outcome {
-        verdict: verdict.get(),
-        text_escape_cost: escape_cost.get(),
+/// Work and reparent allowances for one probe run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Budget {
+    pub(crate) work: usize,
+    pub(crate) reparents: usize,
+}
+
+impl Budget {
+    pub(crate) const ZERO: Self = Self {
+        work: 0,
+        reparents: 0,
     };
-    let sink = DepthSink {
-        nodes: RefCell::new(vec![Node::new(document_name())]),
-        limit,
-        budget: input
-            .len()
-            .saturating_mul(WORK_PER_INPUT_BYTE)
-            .saturating_add(BASE_WORK),
-        work: Cell::new(0),
-        reparents: Cell::new(0),
-        escape_cost: Rc::clone(&escape_cost),
-        verdict: Rc::clone(&verdict),
-    };
-    let mut parser = parse_fragment(
-        sink,
-        ParseOpts::default(),
-        QualName::new(None, ns!(html), local_name!("div")),
-        Vec::new(),
-        false,
-    );
-    let mut rest = input;
-    while !rest.is_empty() {
-        let mut split = rest.len().min(CHUNK_BYTES);
-        while !rest.is_char_boundary(split) {
-            split += 1;
+
+    /// What was used after `earlier`, a reading of the same counters.
+    pub(crate) const fn since(self, earlier: Self) -> Self {
+        Self {
+            work: self.work.saturating_sub(earlier.work),
+            reparents: self.reparents.saturating_sub(earlier.reparents),
         }
-        let (chunk, tail) = rest.split_at(split);
-        parser.process(StrTendril::from_slice(chunk));
-        if verdict.get() != Verdict::Within {
-            return outcome();
-        }
-        rest = tail;
     }
-    parser.finish();
-    outcome()
+
+    /// The allowance for a whole input of `input_bytes`.
+    pub(crate) const fn for_input(input_bytes: usize) -> Self {
+        Self {
+            work: max_work(input_bytes),
+            reparents: max_reparents(input_bytes),
+        }
+    }
+}
+
+/// An incremental probe over `input`, starting at a point where the parser
+/// is at its initial state.
+///
+/// It plans the chunks the sanitizer parses independently: a chunk ends at
+/// the first split candidate at least `chunk_target` bytes after its start at
+/// which the parser is back at its initial state (see the module
+/// documentation). The caller decides at the end of each `advance` whether to
+/// close the current chunk there (`at_initial_state` + `close_chunk`).
+pub(crate) struct Planner<'i> {
+    input: &'i str,
+    candidates: &'i [usize],
+    parser: html5ever::driver::Parser<DepthSink>,
+    verdict: Rc<Cell<Verdict>>,
+    chunk_target: usize,
+    chunk_start: usize,
+    position: usize,
+    next_candidate: usize,
+    /// Closed chunks, each with the budget used when it was closed.
+    chunks: Vec<(Range<usize>, Budget)>,
+    used_at_cut: Budget,
+}
+
+impl<'i> Planner<'i> {
+    /// `candidates` are absolute, sorted offsets into `input`; `start` must
+    /// be 0 or a split candidate at which the parser is at its initial
+    /// state.
+    pub(crate) fn new(
+        input: &'i str,
+        candidates: &'i [usize],
+        start: usize,
+        chunk_target: usize,
+        limit: usize,
+        budget: Budget,
+    ) -> Self {
+        let verdict = Rc::new(Cell::new(Verdict::Within));
+        let sink = DepthSink {
+            nodes: RefCell::new(vec![Node::new(document_name())]),
+            limit,
+            budget: budget.work,
+            work: Cell::new(0),
+            reparents: Cell::new(0),
+            max_reparents: budget.reparents,
+            verdict: Rc::clone(&verdict),
+        };
+        let parser = parse_fragment(
+            sink,
+            ParseOpts::default(),
+            QualName::new(None, ns!(html), local_name!("div")),
+            Vec::new(),
+            false,
+        );
+        Self {
+            input,
+            candidates,
+            parser,
+            verdict,
+            chunk_target,
+            chunk_start: start,
+            position: start,
+            next_candidate: candidates.partition_point(|&candidate| candidate <= start),
+            chunks: Vec::new(),
+            used_at_cut: Budget::ZERO,
+        }
+    }
+
+    /// Parse up to `end` (a split candidate or the input length), closing
+    /// chunks at candidates before it. Stops at the first piece (at most
+    /// `FEED_BYTES`) that breaks a limit or after which `cancelled` returns
+    /// `true`.
+    pub(crate) fn advance(&mut self, end: usize, cancelled: &dyn Fn() -> bool) -> Verdict {
+        // One buffer per call; the pieces share it (no copy per piece).
+        let base = self.position;
+        let buffer = u32::try_from(end - base)
+            .is_ok()
+            .then(|| StrTendril::from_slice(&self.input[base..end]));
+        while self.position < end {
+            let earliest = self
+                .chunk_start
+                .saturating_add(self.chunk_target)
+                .max(self.position + 1);
+            while self
+                .candidates
+                .get(self.next_candidate)
+                .is_some_and(|&candidate| candidate < earliest)
+            {
+                self.next_candidate += 1;
+            }
+            let mut piece_end = (self.position + FEED_BYTES).min(end);
+            while !self.input.is_char_boundary(piece_end) {
+                piece_end += 1;
+            }
+            let at_candidate = match self.candidates.get(self.next_candidate) {
+                Some(&candidate) if candidate <= piece_end => {
+                    piece_end = candidate;
+                    true
+                }
+                _ => false,
+            };
+            let piece = match &buffer {
+                // Both fit in u32: the whole range does.
+                Some(buffer) => buffer.subtendril(
+                    (self.position - base) as u32,
+                    (piece_end - self.position) as u32,
+                ),
+                None => StrTendril::from_slice(&self.input[self.position..piece_end]),
+            };
+            self.parser.process(piece);
+            self.position = piece_end;
+            if self.verdict.get() != Verdict::Within {
+                return self.verdict.get();
+            }
+            if cancelled() {
+                return Verdict::Cancelled;
+            }
+            if at_candidate && self.position < end && self.at_initial_state() {
+                self.close_chunk();
+            }
+        }
+        Verdict::Within
+    }
+
+    /// The tree builder holds exactly the document, the `<html>` root (the
+    /// only open element) and the context element: no other open element, no
+    /// active formatting element, and no form or head element pointer.
+    pub(crate) fn at_initial_state(&self) -> bool {
+        let census = Census::default();
+        self.parser.tokenizer.sink.trace_handles(&census);
+        census.handles.get() == 3 && !census.beyond_root.get()
+    }
+
+    /// End the current chunk at the current position, which must be a split
+    /// candidate at which `at_initial_state` holds.
+    pub(crate) fn close_chunk(&mut self) {
+        self.used_at_cut = self.used();
+        if self.chunk_start < self.position {
+            self.chunks
+                .push((self.chunk_start..self.position, self.used_at_cut));
+        }
+        self.chunk_start = self.position;
+        self.parser.tokenizer.sink.sink.forget_finished_nodes();
+    }
+
+    /// Process the end of the input (the position must be the input length)
+    /// and close the last chunk.
+    pub(crate) fn finish(&mut self) -> Verdict {
+        debug_assert_eq!(self.position, self.input.len());
+        // `Parser::finish` consumes the parser; end the input in place.
+        self.parser.tokenizer.end();
+        if self.verdict.get() == Verdict::Within {
+            self.close_chunk();
+        }
+        self.verdict.get()
+    }
+
+    /// Where the current (unclosed) chunk starts.
+    pub(crate) const fn chunk_start(&self) -> usize {
+        self.chunk_start
+    }
+
+    /// Closed chunks so far, in order, each with the budget used when it
+    /// was closed.
+    pub(crate) fn take_chunks(&mut self) -> Vec<(Range<usize>, Budget)> {
+        std::mem::take(&mut self.chunks)
+    }
+
+    /// Budget used so far, including the unclosed chunk.
+    pub(crate) fn used(&self) -> Budget {
+        let sink = &self.parser.tokenizer.sink.sink;
+        Budget {
+            work: sink.work.get(),
+            reparents: sink.reparents.get(),
+        }
+    }
+
+    /// Budget used by the closed chunks.
+    pub(crate) const fn used_at_last_cut(&self) -> Budget {
+        self.used_at_cut
+    }
+}
+
+/// Counts the handles the tree builder holds.
+#[derive(Default)]
+struct Census {
+    handles: Cell<usize>,
+    beyond_root: Cell<bool>,
+}
+
+impl Tracer for Census {
+    type Handle = usize;
+
+    fn trace_handle(&self, node: &usize) {
+        self.handles.set(self.handles.get() + 1);
+        if *node > ROOT {
+            self.beyond_root.set(true);
+        }
+    }
 }
 
 fn document_name() -> QualName {
@@ -129,8 +349,7 @@ struct Node {
     children: Vec<usize>,
     annotation_xml_integration_point: bool,
     template_contents: Option<usize>,
-    /// Present on text nodes: the escape-scan state of the merged text.
-    text: Option<EscapeScan>,
+    is_text: bool,
 }
 
 impl Node {
@@ -142,7 +361,7 @@ impl Node {
             children: Vec::new(),
             annotation_xml_integration_point: false,
             template_contents: None,
-            text: None,
+            is_text: false,
         }
     }
 }
@@ -153,7 +372,7 @@ struct DepthSink {
     budget: usize,
     work: Cell<usize>,
     reparents: Cell<usize>,
-    escape_cost: Rc<Cell<u64>>,
+    max_reparents: usize,
     verdict: Rc<Cell<Verdict>>,
 }
 
@@ -223,22 +442,18 @@ impl DepthSink {
         self.redepth(&mut nodes, child, depth);
     }
 
-    /// Add text to `node` (a text node) and account its escape cost.
-    fn feed_text(&self, nodes: &mut [Node], node: usize, text: &str) {
-        let Some(scan) = nodes[node].text.as_mut() else {
-            return;
-        };
-        let added = scan.feed(text.as_bytes(), false);
-        let total = self.escape_cost.get().saturating_add(added);
-        self.escape_cost.set(total);
-        if total > MAX_ESCAPE_SCAN_BYTES {
-            self.fail(Verdict::TooExpensiveToSerialize);
-        }
+    /// Drop every node below the root after a chunk boundary, where the
+    /// tree builder holds only the document, the context and the root.
+    fn forget_finished_nodes(&self) {
+        let mut nodes = self.nodes.borrow_mut();
+        nodes.truncate(ROOT + 1);
+        nodes[ROOT].children.clear();
+        debug_assert!(nodes[CONTEXT].children.is_empty());
     }
 
     fn new_text_node(nodes: &mut Vec<Node>, parent: usize) -> usize {
         let mut node = Node::new(document_name());
-        node.text = Some(EscapeScan::default());
+        node.is_text = true;
         node.parent = Some(parent);
         nodes.push(node);
         nodes.len() - 1
@@ -246,26 +461,21 @@ impl DepthSink {
 
     /// rcdom `append(AppendText)`: merge into a trailing text child, or add
     /// a new text node.
-    fn append_text(&self, parent: usize, text: &str) {
+    fn append_text(&self, parent: usize) {
         if self.stopped() {
             return;
         }
         let mut nodes = self.nodes.borrow_mut();
-        let target = match nodes[parent].children.last() {
-            Some(&last) if nodes[last].text.is_some() => last,
-            _ => {
-                let id = Self::new_text_node(&mut nodes, parent);
-                nodes[parent].children.push(id);
-                self.charge(1);
-                id
-            }
-        };
-        self.feed_text(&mut nodes, target, text);
+        if !matches!(nodes[parent].children.last(), Some(&last) if nodes[last].is_text) {
+            let id = Self::new_text_node(&mut nodes, parent);
+            nodes[parent].children.push(id);
+            self.charge(1);
+        }
     }
 
     /// rcdom `append_before_sibling(AppendText)`: merge into the text node
     /// right before `sibling`, or insert a new one there.
-    fn insert_text_before(&self, parent: usize, sibling: usize, text: &str) {
+    fn insert_text_before(&self, parent: usize, sibling: usize) {
         if self.stopped() {
             return;
         }
@@ -275,26 +485,29 @@ impl DepthSink {
         };
         // Front-to-back scan for the sibling.
         self.charge(position + 1);
-        let previous = position
+        let merges = position
             .checked_sub(1)
-            .map(|index| nodes[parent].children[index])
-            .filter(|&previous| nodes[previous].text.is_some());
-        let target = match previous {
-            Some(previous) => previous,
-            None => {
-                let id = Self::new_text_node(&mut nodes, parent);
-                let len = nodes[parent].children.len();
-                nodes[parent].children.insert(position, id);
-                self.charge(len - position + 1);
-                id
-            }
-        };
-        self.feed_text(&mut nodes, target, text);
+            .is_some_and(|index| nodes[nodes[parent].children[index]].is_text);
+        if !merges {
+            let id = Self::new_text_node(&mut nodes, parent);
+            let len = nodes[parent].children.len();
+            nodes[parent].children.insert(position, id);
+            self.charge(len - position + 1);
+        }
     }
 
     /// Recompute depths over the subtree rooted at `root` with an explicit
     /// stack, stopping at the first node beyond the limit.
     fn redepth(&self, nodes: &mut [Node], root: usize, depth: usize) {
+        // Most placements attach a fresh leaf: no stack needed.
+        if nodes[root].children.is_empty() && nodes[root].template_contents.is_none() {
+            if depth > self.limit {
+                self.fail(Verdict::TooDeep);
+            } else if self.charge(depth.max(1)) {
+                nodes[root].depth = depth;
+            }
+            return;
+        }
         let mut stack = vec![(root, depth)];
         while let Some((node, depth)) = stack.pop() {
             if depth > self.limit {
@@ -309,7 +522,7 @@ impl DepthSink {
             stack.extend(
                 children
                     .iter()
-                    .filter(|&&c| nodes[c].text.is_none())
+                    .filter(|&&c| !nodes[c].is_text)
                     .map(|&c| (c, depth + 1)),
             );
             if let Some(contents) = nodes[node].template_contents {
@@ -353,7 +566,7 @@ impl TreeSink for DepthSink {
     fn append(&self, parent: &usize, child: NodeOrText<usize>) {
         match child {
             NodeOrText::AppendNode(child) => self.attach(child, *parent, None),
-            NodeOrText::AppendText(text) => self.append_text(*parent, &text),
+            NodeOrText::AppendText(_) => self.append_text(*parent),
         }
     }
 
@@ -400,9 +613,9 @@ impl TreeSink for DepthSink {
                 }
             },
             // Foster-parented text.
-            NodeOrText::AppendText(text) => {
+            NodeOrText::AppendText(_) => {
                 if let Some(parent) = parent {
-                    self.insert_text_before(parent, *sibling, &text);
+                    self.insert_text_before(parent, *sibling);
                 }
             }
         }
@@ -421,7 +634,7 @@ impl TreeSink for DepthSink {
         }
         let reparents = self.reparents.get() + 1;
         self.reparents.set(reparents);
-        if reparents > MAX_REPARENTS {
+        if reparents > self.max_reparents {
             self.fail(Verdict::TooMuchWork);
             return;
         }
@@ -486,7 +699,9 @@ mod tests {
     fn adoption_agency_reparenting_is_capped() {
         // Shallow but repeated misnesting: each `</b>` runs the adoption
         // agency without deepening the tree.
-        let input = "<b><p>x</b></p>".repeat(MAX_REPARENTS + 1);
+        let copies = BASE_REPARENTS * 2;
+        let input = "<b><p>x</b></p>".repeat(copies);
+        assert!(copies > max_reparents(input.len()));
         assert_eq!(probe(&input, MAX_NESTING_DEPTH), Verdict::TooMuchWork);
     }
 

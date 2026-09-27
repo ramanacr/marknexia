@@ -727,6 +727,56 @@ fn link_and_remote_image_policies_are_independent() {
 }
 
 #[test]
+fn blank_policy_empties_remote_image_sources_like_dotnet() {
+    // SAN-3 / REND-4: .NET's `BlockRemoteImages` turns a quoted remote
+    // `<img src>` into `src=""` after sanitizing; `Blank` decides the same on
+    // the parsed value, in the sanitizer's single pass.
+    let blank = HtmlPolicy::new(
+        ContentPolicy::try_new(PolicyLimits::default(), RemoteImagePolicy::Blank).unwrap(),
+    );
+    for (input, expected) in [
+        (
+            "<img src=\"https://example.test/i.png\" alt=\"i\">",
+            "<img src=\"\" alt=\"i\">",
+        ),
+        ("<IMG SRC=\"HTTP://example.test/i.png\">", "<img src=\"\">"),
+        ("<img src='//example.test/i.png'>", "<img src=\"\">"),
+        // Blanked whatever the URL policy would say about the value.
+        (
+            "<img src=\"https://example.test:8443/i.png\">",
+            "<img src=\"\">",
+        ),
+        (
+            "<img src=\"&#104;ttps://example.test/x\">",
+            "<img src=\"\">",
+        ),
+        // Stricter than .NET, whose pattern stops at the quote inside.
+        (
+            "<img src=\"https://example.test/a'b.png\">",
+            "<img src=\"\">",
+        ),
+        ("<img src=\"local.png\">", "<img src=\"local.png\">"),
+        ("<img src=\"\">", "<img src=\"\">"),
+        // Not a remote prefix: the deny rules remove it.
+        ("<img src=\" https://example.test/x\">", "<img>"),
+        ("<img src=\"javascript:alert(1)\">", "<img src=\"#\">"),
+        // Only `<img>` is blanked; other remote sources are removed.
+        (
+            "<input type=\"image\" src=\"https://example.test/i.png\">",
+            "<input type=\"image\">",
+        ),
+        (
+            "<a href=\"https://example.test/\">l</a>",
+            "<a href=\"https://example.test/\">l</a>",
+        ),
+    ] {
+        let output = blank.sanitize_fragment(input).unwrap();
+        assert_eq!(output.as_str(), expected, "{input}");
+        assert_eq!(blank.sanitize_fragment(output.as_str()).unwrap(), output);
+    }
+}
+
+#[test]
 fn unknown_elements_are_unwrapped_and_known_ones_removed_with_content() {
     // compat/decisions/sanitizer-ammonia-differences.md SAN-6.
     // SAN-6: an unknown element keeps its sanitized children.
@@ -1002,9 +1052,11 @@ fn comment_and_cdata_terminators_cannot_hide_attribute_floods() {
 }
 
 #[test]
-fn quadratic_serializer_escaping_is_rejected_before_serializing() {
+fn formerly_quadratic_escaping_serializes_in_linear_time() {
     // SAN-8: html5ever's write_escaped rescans to the next `<`/`>` (and `"`
-    // in attributes) for every `&` or 0xC2 byte.
+    // in attributes) for every `&` or 0xC2 byte; 2 MiB of `x&y ` took about
+    // 26 s. The Marknexia serializer escapes in one pass, so these inputs,
+    // which the escape-cost budget used to reject, are now sanitized.
     let html_policy = HtmlPolicy::new(ContentPolicy::default());
     let svg_policy = SvgPolicy::new(ContentPolicy::default());
     let ampersands = "x&y ".repeat(500_000);
@@ -1015,32 +1067,38 @@ fn quadratic_serializer_escaping_is_rejected_before_serializing() {
     // Foster-parented text merges across `<tr>` into the node before the table.
     let fostered = format!("<table>{}", "x&y<tr>".repeat(150_000));
     let attribute = format!("<p title=\"{}\">t</p>", "&amp;".repeat(200_000));
-    for (label, input) in [
-        ("ampersands", &ampersands),
-        ("no-break spaces", &no_break_spaces),
-        ("entities", &entities),
-        ("merged text", &merged),
-        ("fostered text", &fostered),
-        ("attribute", &attribute),
+    for (label, input, expected_bytes) in [
+        ("ampersands", &ampersands, ampersands.len() + 4 * 500_000),
+        (
+            "no-break spaces",
+            &no_break_spaces,
+            no_break_spaces.len() + 4 * 400_000,
+        ),
+        ("entities", &entities, 800_000 * 6),
+        ("merged text", &merged, 150_000 * 7),
+        ("fostered text", &fostered, 0),
+        ("attribute", &attribute, 200_000 * 5 + 17),
     ] {
         let started = std::time::Instant::now();
-        assert_eq!(
-            html_policy.sanitize_fragment(input),
-            Err(SanitizeError::TooComplex),
-            "{label}"
-        );
+        let output = html_policy
+            .sanitize_fragment(input)
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
         assert!(
-            started.elapsed() < rejection_bound(),
+            started.elapsed() < rejection_bound() * 3,
             "{label} took {:?}",
             started.elapsed()
         );
+        if expected_bytes > 0 {
+            assert_eq!(output.as_str().len(), expected_bytes, "{label}");
+        }
     }
-    assert_eq!(
-        svg_policy.sanitize(&format!(
-            "<svg><text>{}</text></svg>",
-            "x&y ".repeat(120_000)
-        )),
-        Err(SanitizeError::TooComplex)
+    assert!(
+        svg_policy
+            .sanitize(&format!(
+                "<svg><text>{}</text></svg>",
+                "x&y ".repeat(120_000)
+            ))
+            .is_ok()
     );
 }
 
@@ -1076,8 +1134,15 @@ fn escape_heavy_legitimate_documents_are_accepted() {
 }
 
 #[test]
-fn whitespace_only_input_yields_empty_output() {
+fn only_empty_input_short_circuits() {
+    // M1 / SAN-10: white space is parsed like other text, so sanitizing stays
+    // a fixed point. (The .NET service returns "" for any white-space-only
+    // input; the renderer keeps that rule for its body.)
     assert_eq!(html(""), "");
-    assert_eq!(html(" \n\t "), "");
-    assert_eq!(svg("  "), "");
+    assert_eq!(html(" \n\t "), " \n\t ");
+    assert_eq!(html("\u{a0}"), "&nbsp;");
+    assert_eq!(html("\u{3000}"), "\u{3000}");
+    assert_eq!(html("<x-widget> </x-widget>"), " ");
+    assert_eq!(svg("  "), "  ");
+    assert_eq!(svg(""), "");
 }
