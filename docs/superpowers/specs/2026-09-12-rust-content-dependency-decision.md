@@ -271,11 +271,11 @@ The public result `RenderedDocument` holds:
 * diagnostics;
 * `page_html()`, which rebuilds the .NET page from trusted template text and the sanitized body. `page_bytes()` is the exact value that the output limit checks.
 
-With remote assets off, .NET sanitizes and then blanks remote images. Rust sanitizes under `AllowHttps`, blanks, and sanitizes again under `Deny`, so the output is always produced under the real policy. A body without `src` takes one pass (REND-4).
+With remote assets off, .NET sanitizes and then blanks remote images. Rust sanitizes once, under `RemoteImagePolicy::Blank`, whose attribute filter turns a remote `<img src>` into `src=""` (REND-4). The output is always produced under the real policy.
 
 ### Hostile inputs and timings (release, this machine)
 
-These come from `tests/hostile_inputs.rs`. Every case must render or fail with a limit error within the time budget. A successful render must produce a sanitizer-fixed-point, script-free body.
+These come from `tests/hostile_inputs.rs`, measured at `44be9ba`, before the sanitizer limits were raised to 128 MiB (see "Large documents" below for the current behavior of the 4 MiB rows). Every case must render or fail with a limit error within the time budget. A successful render must produce a sanitizer-fixed-point, script-free body.
 
 | Case | Result | Time |
 | --- | --- | --- |
@@ -298,7 +298,7 @@ The output-limit edges are exact: at `page_bytes` the page renders, and at `page
 `fuzz/fuzz_targets/markdown_and_html.rs` feeds arbitrary UTF-8 through `HtmlPolicy::sanitize_fragment` and through `Renderer::render`, with flag bits that vary remote images, diagrams, math, the directory, and small output and diagram limits. It asserts:
 
 * no panic;
-* body within 8 MiB and page within `max_rendered_html_bytes`;
+* body within `MAX_HTML_OUTPUT_BYTES` (8 MiB then, 128 MiB now) and page within `max_rendered_html_bytes`;
 * `page_html().len() == page_bytes()`;
 * re-sanitizing is a fixed point.
 
@@ -311,7 +311,23 @@ A deterministic stand-in, `crates/marknexia-rendering/tests/fuzz_invariants.rs`,
 1. A `<pre>` whose text begins with a line feed serializes as `<pre>` + LF. Parsing drops a line feed after `<pre>`, so each re-sanitization removes one: `<pre>\n\nx</pre>` → `<pre>\nx</pre>` → `<pre>x</pre>`. A C# code block whose first line is blank produces this through the renderer.
 2. White-space-only input becomes `""` (`html::sanitize` early return). A body of `"\n"`, as from `</span>`, re-sanitizes to `""`.
 
-Neither affects safety. Both are for the security crate's owner to decide.
+Neither affects safety. Both are now fixed in the security crate (SAN-10, SAN-11), and `fuzz_invariants.rs` asserts an exact fixed point. The libFuzzer target `fuzz/fuzz_targets/markdown_and_html.rs` still applies the old tolerance (`fixed_point`) and must be updated with it. Fuzz builds replace the rustflags, so they also need `RUSTFLAGS="--cfg ammonia_unstable"` (see "Large documents").
+
+### Large documents (2026-09-27)
+
+The owner decided that the Rust edition must accept what .NET accepts: 50 MiB of Markdown source and a 128 MiB page. The changes:
+
+* **Limits.** `MAX_HTML_INPUT_BYTES` and `MAX_HTML_OUTPUT_BYTES` are 128 MiB, and the renderer's passes run within a 128 MiB budget (REND-1, SAN-8).
+* **Chunked, parallel sanitization.** The sanitizer cuts the body where html5ever is provably back at its initial state: the tokenizer is in the data state (from the attribute pre-scan) and `TreeBuilder::trace_handles` shows no open element except the root, no active formatting element, and no form or head pointer. It probes 1 MiB segments in parallel, confirms them in order, and cleans 256 KiB chunks on up to 8 threads (`std::thread::scope`). The output is byte-identical to one-chunk sanitization, and differential tests over the fixtures, the renderer's bodies and 5,500 generated documents check that (SAN-8). Every budget is charged for the whole document and fails closed in linear time at 50 MiB (`crates/marknexia-security/tests/scale_budgets.rs`).
+* **A Marknexia-owned serializer.** It writes ammonia's cleaned DOM exactly as html5ever does, but escapes in linear time, which retires the escape-cost budget. It also restores the leading line feed of `<pre>`/`<textarea>`, so sanitizing is a fixed point (SAN-8, SAN-11). It needs ammonia's `Document::to_dom_node`, which exists only under `--cfg ammonia_unstable`:
+  * The workspace `.cargo/config.toml` sets the flag for `build.rustflags` and for both Windows target tables. Cargo uses a matching target table instead of `build.rustflags`, so the flag is repeated there.
+  * `marknexia-security` has a `compile_error!` without the flag, so a build that loses it fails instead of behaving differently.
+  * **Implication:** any build that sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` replaces all configured rustflags and must add `--cfg ammonia_unstable` itself. That includes `.github/workflows/rust-feasibility.yml`, whose reproducible-build step sets `RUSTFLAGS` (`-C link-arg=/Brepro --remap-path-prefix=…`), and `cargo fuzz`, which sets `RUSTFLAGS`.
+  * The flag changes no other crate in the graph: only ammonia reads it, and only to make its `rcdom` module and `to_dom_node` public. Upgrading ammonia must re-check that API, because ammonia keeps it outside semver.
+  * No crate was added, and `Cargo.lock` is unchanged.
+* **Single-pass remote-image blanking** (`RemoteImagePolicy::Blank`, REND-4), the .NET white-space rule kept in the renderer only (SAN-10), exact pass budgets (review M5), and `Renderer::render_cancellable`.
+
+Measured results: .NET timed out (600 s) on every 50 MiB shape and on several at 16 MiB and 4 MiB. Rust renders the 50 MiB shapes that fit the page limit in 0.5 to 28 s. Most of that time and memory is now the Markdown model (REND-1).
 
 ### Reproduce
 
@@ -319,6 +335,8 @@ Neither affects safety. Both are for the security crate's owner to decide.
 cargo test -p marknexia-rendering --all-features
 cargo test --release -p marknexia-rendering --all-features -- --nocapture --test-threads=1
 cargo test --release -p marknexia-rendering --test hostile_inputs -- --ignored stage_timing --nocapture
+cargo test --release -p marknexia-rendering --test scale -- --ignored scale_report --nocapture --test-threads=1
+cargo test --release -p marknexia-security --test scale_budgets -- --ignored --nocapture --test-threads=1
 cd fuzz; cargo +nightly fuzz run markdown_and_html -- -max_total_time=300
 ```
 

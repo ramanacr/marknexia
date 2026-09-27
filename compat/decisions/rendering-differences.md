@@ -8,22 +8,55 @@ Scope: `crates/marknexia-rendering` (`Renderer`, both Markdown candidates). It r
 
 All 7 frozen cases in `compat/fixtures/v1/rendering` match byte-for-byte, including the complete templated page, for `rendering-pulldown` and `rendering-comrak` (`tests/parity_v1.rs`). This file therefore has no `parity-allowance` blocks. Every difference below lies outside the frozen corpus. The .NET exporter should add cases for them so they are recorded against the oracle.
 
-## REND-1 — Sanitizer and host budgets are lower than .NET's page limit
+## REND-1 — The .NET size limits apply; sanitizer budgets remain
 
-.NET renders any page up to `MaxRenderedHtmlBytes` (128 MiB) after reading a source of up to 50 MiB. Rust keeps both limits (`RenderLimits`, with exact edges tested), but the body also passes `HtmlPolicy`, which has hard caps of 4 MiB input and 8 MiB output (SAN-8 adds depth 256 and a work budget). The WebView `HostDocument` has an 8 MiB cap.
+.NET renders any page up to `MaxRenderedHtmlBytes` (128 MiB) after reading a source of up to 50 MiB (`FileService.LargeFileThresholdBytes`). Rust applies the same two limits (`RenderLimits`, with exact edges tested) and no lower one. The sanitizer accepts a 128 MiB body and writes up to 128 MiB (SAN-8), and every pass runs within that 128 MiB budget. What remains different:
 
 | Input | .NET | Rust |
 | --- | --- | --- |
-| Body HTML (after code, diagram and math passes) over 4 MiB, for example a 4 MiB paragraph or a 1.5 MiB code block (copy metadata percent-encodes it) | rendered | `RenderError::Sanitizer(InputTooLarge)`, no partial output |
 | Raw HTML nested deeper than 256 levels | rendered | `RenderError::Sanitizer(NestingTooDeep)` |
+| Raw HTML beyond the tree-construction work or reparent budget (SAN-8): flat content under about 250 open elements, or misnesting repaired more than once per 256 bytes | rendered, slowly | `RenderError::Sanitizer(TooComplex)` |
+| A pass (copy metadata, C# highlighting at about 15×, diagram shells, `\frac` chains at about 10×) that takes the body past 128 MiB | builds the page, then `DocumentTooLargeException` | `RenderError::Sanitizer(InputTooLarge)` before building that block |
+| A body over 128 MiB after the passes that sanitizing would shrink under the page limit (megabytes of removed `<script>` or `<style>` content) | rendered | `RenderError::Sanitizer(InputTooLarge)` |
 
-Every pass runs inside the 4 MiB budget, because the sanitizer cap binds long before the 128 MiB page limit. Before building each replacement, a pass checks a lower-bound estimate against the budget left:
+Before building a code-block, diagram or math replacement, a pass checks its exact size against the budget left. For highlighted C# the check uses an exact lower bound. The sizes are derived from the replacements' template text (review M5: the old constants were 7 to 54 bytes too large, so blocks at the edge were rejected early). `passes::tests::*_budget_edges_are_exact` check that a block needing `n` bytes is accepted at a budget of `n` and rejected at `n - 1`. Each pass takes the body by value and returns it without a copy when nothing matched, so only one intermediate body is alive at a time.
 
-* code block: twice the code length plus the container;
-* diagram shell: four times the source length plus the shell;
-* math: capped while it renders.
+**Display.** The WebView `HostDocument` (`crates/marknexia-webview`, another lane) still caps a hosted document at 8 MiB. Rust renders larger pages, but the shell cannot display them until that cap is raised.
 
-Amplifying input (copy metadata, `1 1 1` highlighting at about 15×, `\frac` chains at about 10×, diagram shells) is therefore rejected before any intermediate string grows far past 4 MiB.
+**Speed and memory.** `crates/marknexia-rendering/tests/scale.rs` (`scale_report`, ignored, release) renders generated Markdown shapes at 4, 16 and 50 MiB. .NET was timed on the same files through `MarkdownRenderer.RenderAsync` (Release build, .NET 10.0.401), one process per file with a 600 s timeout. Rust "before" is the double-sanitizing pipeline of `44be9ba` with only its 4/8 MiB caps raised. Times are seconds. Rust memory is the peak heap from a counting allocator; .NET memory is the peak working set. The .NET runs overlapped with Rust builds on the same 8-thread machine, so they are an upper bound.
+
+| Shape | MiB | .NET | Rust before | Rust after |
+| --- | --- | --- | --- | --- |
+| prose | 4 | 8.3 s, 237 MiB | 1.96 s, 78 MiB | 0.36 s, 67 MiB |
+| prose | 16 | 82.3 s, 799 MiB | 9.1 s, 315 MiB | 1.30 s, 269 MiB |
+| prose | 50 | timeout (> 600 s) | not run | 4.0 s, 857 MiB (58.8 MiB page) |
+| tables | 4 | 37.9 s, 749 MiB | 10.1 s, 330 MiB | 1.74 s, 257 MiB |
+| tables | 16 | timeout | 49.5 s, 1,320 MiB | 7.0 s, 1,029 MiB |
+| tables | 50 | timeout | not run | `RenderedTooLarge` (body over 128 MiB) in 6.7 s |
+| code | 4 | 42.3 s, 848 MiB | 11.6 s, 416 MiB | 1.58 s, 95 MiB (28 MiB page) |
+| code | 16 | timeout | 47.6 s, 1,639 MiB | 6.2 s, 383 MiB (112 MiB page) |
+| code | 50 | timeout | not run | `Sanitizer(InputTooLarge)` (copy metadata over 128 MiB) in 1.9 s |
+| lists | 4 | 42.4 s, 733 MiB | — | 2.15 s, 310 MiB |
+| lists | 16 | timeout | — | 8.7 s, 1,240 MiB |
+| lists | 50 | timeout | — | `RenderedTooLarge` in 8.5 s |
+| links | 4 / 16 / 50 | 12.1 s / 90.6 s / timeout | — | 0.93 s / 2.6 s / 8.1 s (1,414 MiB) |
+| raw `<b>x</b>` | 4 | timeout | 5.3 s, 356 MiB | 1.87 s, 356 MiB |
+| raw `<b>x</b>` | 16 | timeout | 20.5 s, 1,424 MiB | 8.3 s, 1,424 MiB |
+| raw `<b>x</b>` | 50 | timeout | not run | 27.6 s, 5,010 MiB |
+| raw HTML blocks | 4 / 16 / 50 | 44.2 s / timeout / not run | — | 0.55 s / 2.3 s / 7.0 s (1,318 MiB) |
+| mixed | 4 | 32.8 s, 616 MiB | 9.8 s, 318 MiB | 1.19 s, 144 MiB |
+| mixed | 16 | 250 s, 1,788 MiB | 39.8 s, 1,272 MiB | 4.5 s, 579 MiB |
+| mixed | 50 | not run | not run | `Sanitizer(InputTooLarge)` (passes over 128 MiB) in 4.4 s |
+| one raw `<div>` around everything | 4 / 16 / 50 | 8.8 s / 74.5 s / not run | 1.73 s / 6.9 s / — | 0.68 s / 2.5 s / 7.9 s (857 MiB) |
+| one paragraph | 4 / 16 / 50 | 1.16 s / 1.23 s / not run | — | 0.04 s / 0.15 s / 0.47 s |
+
+Where the Rust time and memory now go at 50 MiB:
+
+* **The Markdown parse is the largest part.** `marknexia-markdown` builds a full document model: 1.8 to 8.5 s, and 17 to 100 bytes of heap per source byte (5.0 GiB for 50 MiB of `<b>x</b>`, 3.9 GiB for lists). It is outside this change.
+* **The sanitizer is parallel.** It keeps one chunk's DOM per worker (under 220 MiB at 50 MiB) and cleans about 10 to 30 MB of body per second.
+* **Single chunks are sequential.** A document with no split point, such as a single 50 MiB paragraph of raw inline HTML or everything inside one raw `<div>`, is one chunk (SAN-8): it is sanitized on one thread and its whole DOM is in memory (2.3 GiB for 50 MiB of `<b>x</b>`).
+
+**Cancellation.** `Renderer::render_cancellable(source, context, cancel)` polls `cancel` between stages and inside the sanitizer, at most about 16 KiB of body apart, and returns `RenderError::Cancelled`. Only the Markdown parse cannot be interrupted.
 
 ## REND-2 — Only C# is highlighted
 
@@ -40,18 +73,19 @@ The copy button and its `data-copy-text` metadata are the same for every languag
 
 `TemplateEngine` uses `AppendLine`. On Windows that writes `\r\n`, and the embedded assets are CRLF in the Windows working copy. The frozen fixtures are newline-normalized, so Rust writes `\n` throughout. `max_rendered_html_bytes` is checked against the LF page (`RenderedDocument::page_bytes`, exact). On Windows the .NET page is larger by one byte per line break, so .NET rejects slightly earlier near the limit. The rendered DOM is the same.
 
-## REND-4 — Remote-image blanking runs on a permissive pass, then sanitizes again
+## REND-4 — Remote-image blanking happens in the sanitizer's single pass
 
-.NET sanitizes with remote images kept and then regex-blanks them (`src=""`, `srcset` removed). Rust does the same with `RemoteImagePolicy::AllowHttps`, applies the same blanking scanner, and sanitizes the result again under `Deny`, so the returned `SanitizedFragment` comes from the document's real policy. When the body contains no `src`, a single `Deny` pass gives the same result and is used instead. What remains different comes from SAN-3: the Rust policy removes `http://…` and `//host/…` image sources, where .NET keeps them and then blanks them. So Rust emits `<img alt="…">` where .NET emits `<img src="" alt="…">`. The fixture (`https://`) matches exactly.
+.NET sanitizes with remote images kept, then regex-blanks the sanitized markup: a quoted `<img src>` starting with `http://`, `https://` or `//` becomes `src=""`, and a remote `srcset` is removed. With remote assets off, Rust sanitizes once under `RemoteImagePolicy::Blank`. Its attribute filter takes the same decision on the parsed, entity-decoded value: an `<img src>` that starts with one of those prefixes, in any case, becomes `src=""` (SAN-3). `srcset` is never an allowed attribute. The returned `SanitizedFragment` therefore comes straight from the document's real policy, with no permissive pass, no string pass and no second sanitization. With remote assets on, the policy is `AllowHttps`, as before.
 
-In two cases Rust is stricter, because the .NET blanking regex misses them and only the page CSP blocks the fetch. Both are pinned by `remote_sources_dotnet_leaks_are_removed`:
+The frozen fixtures (`remote-images-off`, `remote-images-on`) match exactly. `http://` and `//host/…` sources are now blanked to `src=""` as in .NET; the old double pass removed them. What still differs is stricter than .NET, where the .NET pattern misses a source and only the page CSP blocks the fetch. Both cases are pinned by `remote_sources_dotnet_leaks_are_removed`, and the .NET-identical cases by `remote_image_sources_are_blanked_like_dotnet`:
 
 | Input (remote assets off) | .NET | Rust |
 | --- | --- | --- |
-| `<input type="image" src="https://…">` (`BlockRemoteImages` only matches `<img`) | remote `src` kept | removed |
-| `<img src="https://…/a'b.png">`, a quote character inside the value (`[^"']*` stops at it) | remote `src` kept | `src` removed |
+| `<input type="image" src="https://…">` (`BlockRemoteImages` only matches `<img`) | remote `src` kept | `src` removed |
+| `<img src="https://…/a'b.png">`, a quote character inside the value (`[^"']*` stops at it) | remote `src` kept | `src=""` |
+| `<img src=" https://…">`, leading white space | remote `src` kept | `src` removed (SAN-3) |
 
-**.NET fixture request:** add both inputs, plus `http://` and `//` image sources, to the exporter's rendering cases.
+**.NET fixture request:** add these inputs, plus `http://` and `//` image sources, to the exporter's rendering cases.
 
 ## REND-5 — Math renderer bounds
 
@@ -66,7 +100,7 @@ Two differences:
 | Input | .NET | Rust |
 | --- | --- | --- |
 | Structural nesting beyond an element budget of `MAX_MATH_DEPTH` (32). `^`, `_` and `\text` cost 1, `\frac` and `\sqrt` cost 2 because they emit nested spans. | unbounded recursion; stack overflow at extreme depth | deeper content is emitted as encoded literal text |
-| Math output larger than the remaining 4 MiB body budget (REND-1) | rendered | `RenderError::Sanitizer(InputTooLarge)`, stopped while rendering |
+| Math output larger than the remaining 128 MiB body budget (REND-1) | rendered | `RenderError::Sanitizer(InputTooLarge)`, stopped while rendering |
 | `^\` or `_\` at the end of an expression | `ArgumentOutOfRangeException`, and the whole render fails | argument clamped to `\` |
 
 The `ReadAtom`/`ReadGroup` mutual recursion runs as a loop, so `^{^{^{…` cannot overflow the stack.
@@ -95,12 +129,13 @@ These are additive and do not change the output:
 * Headings, anchors, image references and diagram sources are returned as `PlainText`, which reaches HTML only through `PlainText::encode_html`. The body is returned only as a `SanitizedFragment`.
 * Diagnostics are the Markdown layer's additive ones (`markdown-source-diagnostics.md`, `markdown-resource-limits.md`).
 * The 50 MiB pre-read check is `Renderer::check_source_size`. `render` also applies it to the string length.
+* `Renderer::render_cancellable` takes a `&(dyn Fn() -> bool + Sync)` and returns `RenderError::Cancelled` once it returns `true` (REND-1). .NET's `RenderAsync` takes a `CancellationToken` and checks it between regex matches; `render` keeps its signature.
 
 ## Approval needed
 
 Task 8 must approve or change:
 
-1. The REND-1 budgets, or raise the sanitizer caps.
+1. The REND-1 remaining budget differences (nesting, work and reparent budgets; a pre-sanitizer body over 128 MiB).
 2. C#-only highlighting (REND-2), or a decision to add more grammars.
 3. The LF page measurement (REND-3).
 4. The math bounds (REND-5).
