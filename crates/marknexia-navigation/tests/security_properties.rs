@@ -402,29 +402,37 @@ fn rooted_context(root: &str) -> ResolutionContext {
     }
 }
 
-/// (root component, look-alike that NTFS and .NET OrdinalIgnoreCase keep
-/// distinct, true case variant that both treat as equal).
-const UNICODE_CASE_TRAPS: [(&str, &str, &str); 4] = [
-    ("key", "\u{212A}ey", "KEY"),       // KELVIN SIGN vs k
-    ("\u{3C9}", "\u{2126}", "\u{3A9}"), // OHM SIGN vs small omega; capital omega
-    ("\u{E5}", "\u{212B}", "\u{C5}"),   // ANGSTROM SIGN vs a-ring; capital A-ring
-    ("ix", "\u{130}x", "IX"),           // capital I with dot vs i
+/// Pairs that must never compare equal for containment. The first four are
+/// look-alikes that NTFS and .NET keep distinct. The rest are real Unicode
+/// case pairs, some added after older NTFS `$UpCase` tables were fixed.
+/// Rust keeps all of them distinct (a false block, never an escape).
+const NEVER_MERGED: [(&str, &str); 9] = [
+    ("key", "\u{212A}ey"),      // KELVIN SIGN vs k
+    ("\u{3C9}", "\u{2126}"),    // OHM SIGN vs small omega
+    ("\u{E5}", "\u{212B}"),     // ANGSTROM SIGN vs a-ring
+    ("ix", "\u{130}x"),         // capital I with dot vs i
+    ("\u{10D0}", "\u{1C90}"),   // Georgian Mkhedruli vs Mtavruli (Unicode 11)
+    ("\u{AB70}", "\u{13A0}"),   // Cherokee small vs capital (Unicode 8)
+    ("\u{A7C1}", "\u{A7C0}"),   // Latin Extended-D old Polish o (Unicode 14)
+    ("\u{3C3}", "\u{3A3}"),     // Greek sigma
+    ("caf\u{E9}", "CAF\u{C9}"), // Latin-1 accented letter
 ];
 
 #[test]
-fn unicode_case_look_alike_siblings_are_rejected_before_probe() {
-    for (root, look_alike, _) in UNICODE_CASE_TRAPS {
-        let context = rooted_context(&format!("C:/{root}"));
-        // The virtual file system folds with full lowercasing, so it would
-        // report the sibling as present: only containment stops it.
+fn non_ascii_case_variant_siblings_are_rejected_before_probe() {
+    for (root, other) in NEVER_MERGED {
+        let context = rooted_context(&format!("C:/src/{root}"));
+        // The virtual file system folds with full lowercasing, so for most
+        // pairs it would report the sibling as present: only containment
+        // stops it.
         let vfs = VirtualFileSystem {
-            files: vec![format!("C:/{look_alike}/secret.md").to_lowercase()],
+            files: vec![format!("C:/src/{other}/secret.md").to_lowercase()],
         };
         for destination in [
-            format!("C:/{look_alike}/secret.md"),
-            format!("file:///C:/{look_alike}/secret.md"),
-            format!("../{look_alike}/secret.md"),
-            format!("/../{look_alike}/secret.md"),
+            format!("C:/src/{other}/secret.md"),
+            format!("file:///C:/src/{other}/secret.md"),
+            format!("../{other}/secret.md"),
+            format!("/../{other}/secret.md"),
         ] {
             let result = resolve(Some(&destination), &context, &vfs);
             assert_eq!(result.intent.kind, "BlockedOrInvalid", "{destination}");
@@ -435,26 +443,37 @@ fn unicode_case_look_alike_siblings_are_rejected_before_probe() {
 }
 
 #[test]
-fn true_unicode_case_variants_of_the_root_still_resolve() {
-    for (root, _, variant) in UNICODE_CASE_TRAPS {
-        let context = rooted_context(&format!("C:/{root}"));
+fn exact_non_ascii_and_ascii_case_variants_of_the_root_still_resolve() {
+    let mut roots: Vec<(String, String)> = NEVER_MERGED
+        .iter()
+        .map(|(root, _)| (format!("C:/src/{root}"), format!("C:/SRC/{root}")))
+        .collect();
+    roots.push(("C:/key".into(), "C:/KEY".into()));
+    roots.push(("C:/ix".into(), "C:/iX".into()));
+    for (root, variant) in roots {
+        let context = rooted_context(&root);
         let vfs = VirtualFileSystem {
-            files: vec![
-                format!("C:/{root}/README.md"),
-                format!("C:/{root}/docs/api.md"),
-            ],
+            files: vec![format!("{root}/README.md"), format!("{root}/docs/api.md")],
         };
-        for (destination, probes) in [
-            (format!("C:/{variant}/docs/api.md"), 1),
-            (format!("../{variant}/docs/api.md"), 2),
+        let relative_variant = variant.rsplit_once('/').unwrap().1;
+        for (destination, target, probes) in [
+            (
+                format!("{variant}/docs/api.md"),
+                format!("{variant}/docs/api.md"),
+                1,
+            ),
+            (
+                format!("../{relative_variant}/docs/api.md"),
+                format!(
+                    "{}/{relative_variant}/docs/api.md",
+                    root.rsplit_once('/').unwrap().0
+                ),
+                2,
+            ),
         ] {
             let result = resolve(Some(&destination), &context, &vfs);
             assert_eq!(result.intent.kind, "CrossDocument", "{destination}");
-            assert_eq!(
-                result.intent.target_document,
-                Some(format!("C:/{variant}/docs/api.md")),
-                "{destination}"
-            );
+            assert_eq!(result.intent.target_document, Some(target), "{destination}");
             assert_eq!(result.file_system_probe_count, probes, "{destination}");
         }
     }

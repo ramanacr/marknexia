@@ -1,4 +1,4 @@
-# Navigation probe order and drive-root traversal
+# Navigation probe order, drive-root traversal and case folding
 
 Status: **proposed — requires Task 8 approval**
 
@@ -8,7 +8,7 @@ Scope: `crates/marknexia-navigation` and `marknexia-files` path containment, for
 
 The four `navigation/positive-*` fixtures are exported from the real .NET `NavigationResolver` and `PathCanonicalizer`, running against an in-memory file set. Rust matches them exactly:
 
-* **Case:** the target keeps the caller's case, as `Path.GetFullPath` does. Only the separator changes, from `\` to `/`. For example, `C:\REPO\docs\api.md` stays `C:/REPO/docs/api.md`. Containment is still checked on case-folded components (see "Case folding for containment").
+* **Case:** the target keeps the caller's case, as `Path.GetFullPath` does. Only the separator changes, from `\` to `/`. For example, `C:\REPO\docs\api.md` stays `C:/REPO/docs/api.md`. Containment is still checked on case-folded components (ASCII only; see NAV-4).
 * **Relative destinations:** the current file is probed first, then the target, for 2 probes. If the current file is missing, the current path itself is the base directory, as in .NET.
 * **Repository-root and absolute destinations:** only the target is probed, for 1 probe.
 * **Missing targets:** the diagnostic uses the .NET prefix for its branch (`Target file not found: `, `Repository-relative file not found: `, `Absolute target file not found: `), followed by the Windows spelling of the path.
@@ -29,39 +29,51 @@ NAV-2 diagnostics by destination form:
 | Repository root | `/../../repo/docs/api.md` | `Access blocked: Repository root traversal outside sandbox boundary.` |
 | Absolute or `file:///` | `C:/../repo/docs/api.md` | `Access blocked: Network file paths and invalid local paths are not supported.` The path cannot be canonicalized, so it is not a valid local path. |
 
-None of these conditions is in the v1 corpus. Each one is asserted in `crates/marknexia-navigation/tests/security_properties.rs` (`nav_1_*`, `nav_2_*`, `nav_3_*`).
+None of these conditions is in the v1 corpus. Each one is asserted in `crates/marknexia-navigation/tests/security_properties.rs` (`nav_1_*`, `nav_2_*`, `nav_3_*`). NAV-4 is described in its own section below.
 
-## Case folding for containment
+## NAV-4: case folding for containment
 
-This section describes no observable difference. It records how containment folds case.
+Containment compares case-folded components (`CanonicalPath` in `crates/marknexia-files/src/path.rs`). Only ASCII `A`-`Z` fold to `a`-`z`. Every non-ASCII character must match exactly. The fold does not depend on any Unicode or NTFS `$UpCase` table version, so it cannot merge two names that a volume keeps distinct.
 
-Containment compares case-folded components. The fold (`fold_char` in `crates/marknexia-files/src/path.rs`) merges only simple 1:1 case pairs in the Basic Multilingual Plane. Look-alikes that NTFS and .NET `OrdinalIgnoreCase` keep distinct also stay distinct in Rust:
+| Pair | .NET `IsWithinRoot` / NTFS | Rust |
+| --- | --- | --- |
+| `key` and `KEY` (ASCII) | Equal | Equal: resolves |
+| KELVIN SIGN U+212A and `k`; OHM SIGN U+2126 and `ω`; ANGSTROM SIGN U+212B and `å`; `İ` U+0130 and `i` | Distinct | Distinct: blocked, as in .NET |
+| `σ` and `Σ`; `é` and `É`; `д` and `Д` | Equal | Distinct: blocked, a **false block** |
+| Georgian Mkhedruli U+10D0-10FF and Mtavruli U+1C90-1CBF (Unicode 11); Cherokee U+13A0-13F5 and U+AB70-ABBF, U+13F8-13FD (Unicode 8); Latin Extended-D U+A7C0 and above (Unicode 12-16); Glagolitic U+2C2F / U+2C5F (Unicode 14) | Equal in current .NET tables. Distinct on volumes whose `$UpCase` table predates the pair | Distinct: blocked, a false block that is never an escape |
 
-* KELVIN SIGN U+212A and `k`
-* OHM SIGN U+2126 and `ω`
-* ANGSTROM SIGN U+212B and `å`
-* `İ` and `i`
+Look-alikes and case variants are blocked before any probe. For example:
 
-For example, with root `C:/key`, both `C:/` + U+212A + `ey/secret.md` and `../` + U+212A + `ey/secret.md` are rejected before any probe, as .NET `IsWithinRoot` rejects them.
+* with root `C:/key`, the link `C:/` + U+212A + `ey/secret.md` is blocked;
+* with root `C:/src/` + U+10D0, both `C:/src/` + U+1C90 + `/secret.md` and `../` + U+1C90 + `/secret.md` are blocked.
 
-Rust keeps some characters distinct that .NET folds together, which can only fail closed:
+A link that spells the non-ASCII part of the root exactly still resolves, as does any ASCII case variant.
 
-* final sigma `ς` and `σ`
-* dotless `ı` and `I`
-* characters outside the Basic Multilingual Plane
+The rationale is that merging a pair the volume keeps distinct lets a sibling directory pass containment, and the display target then names that sibling. With ASCII-only folding, the worst case is a document with a non-ASCII case variant in its link that fails to open.
 
-One residual risk is shared with .NET. A case pair added in a newer Unicode version than a volume's NTFS upcase table is merged by the fold but not by that volume.
+Tests: `crates/marknexia-files/tests/path_properties.rs` covers `contains` and `contains_opened_target` in both directions. `crates/marknexia-navigation/tests/security_properties.rs` covers links in absolute, `file:///`, relative and repository-root form, each blocked with 0 probes.
 
-The tests are in `crates/marknexia-files/tests/path_properties.rs` and `crates/marknexia-navigation/tests/security_properties.rs`.
+## Requirements for a native file adapter
+
+These requirements are not implemented yet. They must hold before any production adapter ships.
+
+* **Replace the virtual file lookup.** `VirtualFileSystem` in `crates/marknexia-files/src/virtual_fs.rs` is a test and probe-counting model only. Its lookup folds with full Unicode `to_lowercase` and merges names that NTFS keeps distinct. A production adapter must not reuse it. Gate the type to tests, or replace it with a probe trait whose native implementation asks the file system.
+* **Confirm containment on the opened handle.** Lexical containment is necessary but not sufficient, because reparse points, junctions, 8.3 short names and per-directory case sensitivity can all redirect a path. After opening the target, the adapter must:
+  1. obtain `GetFinalPathNameByHandle` for the opened target, and for the repository root opened as a directory handle;
+  2. compare the two final paths component by component with an ordinal comparison, folding ASCII case only (the NAV-4 fold);
+  3. authorize the target only if the root's final path is a prefix of it, through `RepositoryScope::contains_opened_target` with both lexical and final paths.
+
+  Otherwise it must close the handle and block.
 
 ## Rationale
 
-The Rust sandbox checks canonical containment before any probe the destination could influence. All three differences fail closed:
+The Rust sandbox checks canonical containment before any probe the destination could influence. All four differences fail closed:
 
 * **NAV-1** only delays a probe of the trusted current file. It also refuses a fallback base that .NET reaches only when the current document no longer exists.
 * **NAV-2** keeps `CanonicalPath` strict. A path that names a directory above the drive root is a traversal attempt, not a path to normalize.
 * **NAV-3** treats a drive root as not being a document, so it cannot anchor a relative link.
+* **NAV-4** trades false blocks on non-ASCII case variants for independence from Unicode and `$UpCase` table versions.
 
 ## Approval needed
 
-Task 8 must accept NAV-1 to NAV-3, or require exact .NET ordering, clamping and drive-root bases. Either way, no v1 fixture changes.
+Task 8 must accept NAV-1 to NAV-4, or require exact .NET ordering, clamping, drive-root bases and Unicode case folding. Either way, no v1 fixture changes.

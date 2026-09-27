@@ -62,71 +62,58 @@ fn opened_file_scope_requires_both_lexical_and_final_handle_paths_inside_root() 
     assert!(!scope.contains_opened_target(&lexical_outside, &final_inside));
 }
 
-/// (root component, look-alike that NTFS and .NET OrdinalIgnoreCase keep
-/// distinct, true case variant that both treat as equal).
-const UNICODE_CASE_TRAPS: [(&str, &str, &str); 4] = [
-    ("key", "\u{212A}ey", "KEY"),       // KELVIN SIGN vs k
-    ("\u{3C9}", "\u{2126}", "\u{3A9}"), // OHM SIGN vs small omega; capital omega
-    ("\u{E5}", "\u{212B}", "\u{C5}"),   // ANGSTROM SIGN vs a-ring; capital A-ring
-    ("ix", "\u{130}x", "IX"),           // capital I with dot vs i
+/// Pairs that must never compare equal for containment. The first four are
+/// look-alikes that NTFS and .NET keep distinct. The rest are real Unicode
+/// case pairs, some added after older NTFS `$UpCase` tables were fixed.
+/// Rust keeps all of them distinct (a false block, never an escape).
+const NEVER_MERGED: [(&str, &str); 9] = [
+    ("key", "\u{212A}ey"),      // KELVIN SIGN vs k
+    ("\u{3C9}", "\u{2126}"),    // OHM SIGN vs small omega
+    ("\u{E5}", "\u{212B}"),     // ANGSTROM SIGN vs a-ring
+    ("ix", "\u{130}x"),         // capital I with dot vs i
+    ("\u{10D0}", "\u{1C90}"),   // Georgian Mkhedruli vs Mtavruli (Unicode 11)
+    ("\u{AB70}", "\u{13A0}"),   // Cherokee small vs capital (Unicode 8)
+    ("\u{A7C1}", "\u{A7C0}"),   // Latin Extended-D old Polish o (Unicode 14)
+    ("\u{3C3}", "\u{3A3}"),     // Greek sigma
+    ("caf\u{E9}", "CAF\u{C9}"), // Latin-1 accented letter
 ];
 
 #[test]
-fn containment_does_not_merge_unicode_compatibility_case_look_alikes() {
-    for (root, look_alike, variant) in UNICODE_CASE_TRAPS {
+fn containment_folds_only_ascii_letters() {
+    for (root, other) in NEVER_MERGED {
+        for (scope_root, candidate) in [(root, other), (other, root)] {
+            let scope = RepositoryScope::new(&format!("C:/src/{scope_root}")).unwrap();
+            let outside = CanonicalPath::new(&format!("C:/src/{candidate}/secret.md")).unwrap();
+            let exact = CanonicalPath::new(&format!("C:/SRC/{scope_root}/secret.md")).unwrap();
+            assert!(!scope.contains(&outside), "{scope_root} vs {candidate}");
+            assert!(scope.contains(&exact), "{scope_root}");
+        }
+    }
+    for (root, variant) in [("key", "KEY"), ("ix", "IX"), ("Repo", "rEPO")] {
         let scope = RepositoryScope::new(&format!("C:/{root}")).unwrap();
-        let outside = CanonicalPath::new(&format!("C:/{look_alike}/secret.md")).unwrap();
-        let inside = CanonicalPath::new(&format!("C:/{variant}/secret.md")).unwrap();
-        assert!(!scope.contains(&outside), "{look_alike}");
+        let inside = CanonicalPath::new(&format!("c:/{variant}/secret.md")).unwrap();
         assert!(scope.contains(&inside), "{variant}");
-        // A root spelled with the look-alike does not contain the plain name.
-        let look_alike_scope = RepositoryScope::new(&format!("C:/{look_alike}")).unwrap();
-        let plain = CanonicalPath::new(&format!("C:/{root}/secret.md")).unwrap();
-        assert!(!look_alike_scope.contains(&plain), "{look_alike}");
     }
 }
 
 #[test]
-fn opened_target_check_does_not_merge_unicode_compatibility_case_look_alikes() {
-    for (root, look_alike, variant) in UNICODE_CASE_TRAPS {
-        let scope = RepositoryScope::new(&format!("C:/{root}")).unwrap();
-        let lexical = CanonicalPath::new(&format!("C:/{root}/alias.md")).unwrap();
-        let final_outside = CanonicalPath::new(&format!("C:/{look_alike}/secret.md")).unwrap();
-        let final_inside = CanonicalPath::new(&format!("C:/{variant}/actual.md")).unwrap();
+fn opened_target_check_folds_only_ascii_letters() {
+    for (root, other) in NEVER_MERGED {
+        let scope = RepositoryScope::new(&format!("C:/src/{root}")).unwrap();
+        let lexical = CanonicalPath::new(&format!("C:/src/{root}/alias.md")).unwrap();
+        let final_outside = CanonicalPath::new(&format!("C:/src/{other}/secret.md")).unwrap();
+        let final_inside = CanonicalPath::new(&format!("c:/SRC/{root}/actual.md")).unwrap();
         assert!(
             !scope.contains_opened_target(&lexical, &final_outside),
-            "{look_alike}"
+            "{other}"
         );
-        assert!(!scope.contains_opened_target(&final_outside, &lexical));
+        assert!(
+            !scope.contains_opened_target(&final_outside, &lexical),
+            "{other}"
+        );
         assert!(
             scope.contains_opened_target(&lexical, &final_inside),
-            "{variant}"
+            "{root}"
         );
-    }
-}
-
-#[test]
-fn only_simple_bmp_case_pairs_fold() {
-    // Final sigma and small sigma both uppercase to capital sigma but are
-    // not a 1:1 pair; dotless i uppercases to ASCII I; Deseret is outside the
-    // BMP. All stay distinct, which fails closed.
-    for (root, other) in [
-        ("\u{3C3}", "\u{3C2}"),
-        ("i", "\u{131}"),
-        ("\u{10428}", "\u{10400}"),
-    ] {
-        let scope = RepositoryScope::new(&format!("C:/{root}")).unwrap();
-        let candidate = CanonicalPath::new(&format!("C:/{other}/file.md")).unwrap();
-        assert!(!scope.contains(&candidate), "{other}");
-    }
-    // Ordinary accented and Greek/Cyrillic case pairs still fold.
-    for (root, other) in [
-        ("caf\u{E9}", "CAF\u{C9}"),
-        ("\u{3C3}", "\u{3A3}"),
-        ("\u{434}", "\u{414}"),
-    ] {
-        let scope = RepositoryScope::new(&format!("C:/{root}")).unwrap();
-        let candidate = CanonicalPath::new(&format!("C:/{other}/file.md")).unwrap();
-        assert!(scope.contains(&candidate), "{other}");
     }
 }
