@@ -50,8 +50,12 @@ pub(crate) fn parse<F: Frontend>(
         document
     };
     let mut document = parse_fragment(&source);
-    let lines: Vec<&str> = source.split('\n').collect();
-    grid_table::apply(&mut document, &lines, &parse_fragment);
+    // Grid tables start with a `+` line; most documents have none, and the
+    // line list costs 16 bytes per line.
+    if source.starts_with('+') || source.contains("\n+") {
+        let lines: Vec<&str> = source.split('\n').collect();
+        grid_table::apply(&mut document, &lines, &parse_fragment);
+    }
     let limit = options.max_rendered_body_bytes;
     let capacity = source.len().saturating_mul(2).min(limit);
     let too_large = || {

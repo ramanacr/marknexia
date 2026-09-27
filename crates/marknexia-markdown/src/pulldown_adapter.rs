@@ -424,8 +424,11 @@ impl Builder<'_> {
                 heading,
                 line,
                 end_line,
-                inlines,
+                mut inlines,
             } => {
+                // Growth slack is up to half of every inline list; the model
+                // lives until rendering, so give it back.
+                inlines.shrink_to_fit();
                 if matches!(tag, TagEnd::TableCell) {
                     if let Some(Frame::Table { row: Some(row), .. }) = self.stack.last_mut() {
                         row.cells.push(vec![Block::Paragraph(Paragraph {
@@ -450,7 +453,8 @@ impl Builder<'_> {
                 });
             }
             Frame::Container { kind, mut state } => {
-                let blocks = state.finish();
+                let mut blocks = state.finish();
+                blocks.shrink_to_fit();
                 match kind {
                     Container::Document => {}
                     Container::BlockQuote => self.push_block(Block::Quote(blocks)),
@@ -471,11 +475,14 @@ impl Builder<'_> {
             Frame::List {
                 start,
                 loose,
-                items,
+                mut items,
             } => self.push_block(Block::List(List {
                 start,
                 tight: !loose,
-                items,
+                items: {
+                    items.shrink_to_fit();
+                    items
+                },
             })),
             Frame::Table {
                 alignments, rows, ..
@@ -494,24 +501,29 @@ impl Builder<'_> {
                 line,
             }),
             Frame::Html { literal, line } => self.push_block(Block::Html { literal, line }),
-            Frame::Span { kind, inlines } => {
+            Frame::Span { kind, mut inlines } => {
+                inlines.shrink_to_fit();
                 let inline = match kind {
                     Span::Emphasis => Inline::Emphasis(inlines),
                     Span::Strong => Inline::Strong(inlines),
                     Span::Strikethrough => Inline::Strikethrough(inlines),
                     Span::Superscript => Inline::Superscript(inlines),
                     Span::Subscript => Inline::Subscript(inlines),
-                    Span::Link { kind, url, title } => Inline::Link {
-                        kind,
-                        url,
-                        title,
-                        children: inlines,
-                    },
-                    Span::Image { url, title } => Inline::Image {
-                        url,
-                        title,
-                        children: inlines,
-                    },
+                    Span::Link { kind, url, title } => {
+                        Inline::Link(Box::new(crate::extensions::model::Link {
+                            kind,
+                            url,
+                            title,
+                            children: inlines,
+                        }))
+                    }
+                    Span::Image { url, title } => {
+                        Inline::Image(Box::new(crate::extensions::model::Image {
+                            url,
+                            title,
+                            children: inlines,
+                        }))
+                    }
                 };
                 self.push_inline_to_parent(inline);
             }

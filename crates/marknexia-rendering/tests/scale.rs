@@ -275,6 +275,15 @@ fn scale_report() {
             let body = parsed.unwrap_or_default();
             let (sanitized, sanitize_s, sanitize_peak) =
                 measure(|| policy.sanitize_fragment(&body).map(|f| f.as_str().len()));
+            let nodes = marknexia_security::testing::chunk_ranges(&body).map(|chunks| {
+                let total: usize = chunks.iter().map(|(_, nodes)| nodes).sum();
+                let largest = chunks.iter().map(|(_, nodes)| *nodes).max().unwrap_or(0);
+                format!(
+                    "{} chunks, {:.3} nodes/B, largest {largest}",
+                    chunks.len(),
+                    total as f64 / body.len().max(1) as f64
+                )
+            });
             drop(body);
             let (rendered, render_s, render_peak) =
                 measure(|| renderer.render(&source, &context()).map(|d| d.page_bytes()));
@@ -289,6 +298,10 @@ fn scale_report() {
                     Ok(bytes) => format!("page {:.1} MiB", bytes as f64 / MIB as f64),
                     Err(error) => format!("{error:?}"),
                 },
+            );
+            eprintln!(
+                "NODES {name:<18} {:>5.1} MiB | {nodes:?}",
+                source.len() as f64 / MIB as f64
             );
         }
     }

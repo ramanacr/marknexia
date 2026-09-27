@@ -282,7 +282,7 @@ impl Translator<'_> {
                         .offset(start.0, start.1)
                         .and_then(|offset| self.source.as_bytes().get(offset))
                         .is_some_and(|byte| *byte == b'<');
-                    Inline::Link {
+                    Inline::Link(Box::new(crate::extensions::model::Link {
                         kind: if angle {
                             LinkKind::Autolink
                         } else {
@@ -291,13 +291,15 @@ impl Translator<'_> {
                         url: link.url,
                         title: link.title,
                         children,
-                    }
+                    }))
                 }
-                NodeValue::Image(link) => Inline::Image {
-                    url: link.url,
-                    title: link.title,
-                    children,
-                },
+                NodeValue::Image(link) => {
+                    Inline::Image(Box::new(crate::extensions::model::Image {
+                        url: link.url,
+                        title: link.title,
+                        children,
+                    }))
+                }
                 // Unenabled inline containers keep their children.
                 _ => {
                     inlines.extend(children);

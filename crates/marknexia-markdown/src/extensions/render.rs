@@ -112,16 +112,11 @@ fn collect_references(blocks: &[Block], labels: &mut Vec<String>) {
         for item in items {
             match item {
                 Inline::FootnoteReference(label) => labels.push(label.clone()),
-                Inline::Emphasis(children)
-                | Inline::Strong(children)
-                | Inline::Strikethrough(children)
-                | Inline::Mark(children)
-                | Inline::Subscript(children)
-                | Inline::Superscript(children)
-                | Inline::Inserted(children)
-                | Inline::Link { children, .. }
-                | Inline::Image { children, .. } => inlines(children, labels),
-                _ => {}
+                other => {
+                    if let Some(children) = other.children() {
+                        inlines(children, labels);
+                    }
+                }
             }
         }
     }
@@ -443,28 +438,22 @@ impl Renderer<'_> {
     fn collect(&mut self, inlines: &[Inline], line: usize) {
         for inline in inlines {
             match inline {
-                Inline::Link {
-                    kind: LinkKind::Standard,
-                    url,
-                    ..
-                } if !url.is_empty() => self.result.links.push(url.clone()),
-                Inline::Image { url, .. } if !url.is_empty() => {
+                Inline::Link(link) if link.kind == LinkKind::Standard && !link.url.is_empty() => {
+                    self.result.links.push(link.url.clone());
+                }
+                Inline::Image(image) if !image.url.is_empty() => {
+                    let url = &image.url;
                     self.result.images.push(url.clone());
                 }
                 Inline::Html(tag) => extract_anchors(tag, line, &mut self.result.custom_anchors),
                 _ => {}
             }
             match inline {
-                Inline::Emphasis(children)
-                | Inline::Strong(children)
-                | Inline::Strikethrough(children)
-                | Inline::Mark(children)
-                | Inline::Subscript(children)
-                | Inline::Superscript(children)
-                | Inline::Inserted(children)
-                | Inline::Link { children, .. }
-                | Inline::Image { children, .. } => self.collect(children, line),
-                _ => {}
+                other => {
+                    if let Some(children) = other.children() {
+                        self.collect(children, line);
+                    }
+                }
             }
         }
     }
@@ -523,12 +512,8 @@ impl Renderer<'_> {
             Inline::Subscript(children) => self.wrap("sub", children, plain),
             Inline::Superscript(children) => self.wrap("sup", children, plain),
             Inline::Inserted(children) => self.wrap("ins", children, plain),
-            Inline::Link {
-                url,
-                title,
-                children,
-                ..
-            } => {
+            Inline::Link(link) => {
+                let (url, title, children) = (&link.url, &link.title, &link.children);
                 if plain {
                     self.inlines(children, true);
                     return;
@@ -541,11 +526,8 @@ impl Renderer<'_> {
                 self.inlines(children, false);
                 self.out.push_str("</a>");
             }
-            Inline::Image {
-                url,
-                title,
-                children,
-            } => {
+            Inline::Image(image) => {
+                let (url, title, children) = (&image.url, &image.title, &image.children);
                 if plain {
                     self.inlines(children, true);
                     return;
@@ -599,20 +581,12 @@ fn heading_text(inlines: &[Inline], out: &mut String) {
     for inline in inlines {
         match inline {
             Inline::Text(text) | Inline::Escaped(text) | Inline::Code(text) => out.push_str(text),
-            Inline::Link {
-                kind: LinkKind::Autolink,
-                ..
-            } => {}
-            Inline::Emphasis(children)
-            | Inline::Strong(children)
-            | Inline::Strikethrough(children)
-            | Inline::Mark(children)
-            | Inline::Subscript(children)
-            | Inline::Superscript(children)
-            | Inline::Inserted(children)
-            | Inline::Link { children, .. }
-            | Inline::Image { children, .. } => heading_text(children, out),
-            _ => {}
+            Inline::Link(link) if link.kind == LinkKind::Autolink => {}
+            other => {
+                if let Some(children) = other.children() {
+                    heading_text(children, out);
+                }
+            }
         }
     }
 }

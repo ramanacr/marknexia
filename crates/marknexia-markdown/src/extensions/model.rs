@@ -160,19 +160,27 @@ pub(crate) enum Inline {
     /// `++text++`; only comrak parses it natively.
     #[cfg_attr(not(feature = "candidate-comrak"), allow(dead_code))]
     Inserted(Vec<Inline>),
-    Link {
-        kind: LinkKind,
-        url: String,
-        title: String,
-        children: Vec<Inline>,
-    },
-    Image {
-        url: String,
-        title: String,
-        children: Vec<Inline>,
-    },
+    /// Boxed so that every `Inline` stays small (32 bytes): documents hold
+    /// millions of them.
+    Link(Box<Link>),
+    Image(Box<Image>),
     FootnoteReference(String),
     Math(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Link {
+    pub kind: LinkKind,
+    pub url: String,
+    pub title: String,
+    pub children: Vec<Inline>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Image {
+    pub url: String,
+    pub title: String,
+    pub children: Vec<Inline>,
 }
 
 impl Inline {
@@ -184,9 +192,24 @@ impl Inline {
             | Self::Mark(children)
             | Self::Subscript(children)
             | Self::Superscript(children)
-            | Self::Inserted(children)
-            | Self::Link { children, .. }
-            | Self::Image { children, .. } => Some(children),
+            | Self::Inserted(children) => Some(children),
+            Self::Link(link) => Some(&mut link.children),
+            Self::Image(image) => Some(&mut image.children),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn children(&self) -> Option<&[Inline]> {
+        match self {
+            Self::Emphasis(children)
+            | Self::Strong(children)
+            | Self::Strikethrough(children)
+            | Self::Mark(children)
+            | Self::Subscript(children)
+            | Self::Superscript(children)
+            | Self::Inserted(children) => Some(children),
+            Self::Link(link) => Some(&link.children),
+            Self::Image(image) => Some(&image.children),
             _ => None,
         }
     }
@@ -257,5 +280,18 @@ mod tests {
             normalize_line_endings("a\n"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+}
+#[cfg(test)]
+mod size_tests {
+    #[test]
+    fn inline_stays_small() {
+        // Documents hold millions of inlines; boxing links and images keeps
+        // each one at a `String` plus its tag.
+        assert!(
+            size_of::<super::Inline>() <= 32,
+            "{}",
+            size_of::<super::Inline>()
+        );
     }
 }
