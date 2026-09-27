@@ -6,7 +6,7 @@ use std::{
     ffi::c_void,
     path::PathBuf,
     rc::Rc,
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
 use marknexia_core::contracts::AppTheme;
@@ -77,7 +77,7 @@ use crate::{
         tab_slot,
     },
     app::{AppState as PortableAppState, FocusSurface},
-    documents::{self, RenderOutcome, RenderTickets},
+    documents::{self, RenderJob, RenderOutcome, RenderPool, RenderTickets},
     keyboard::{KeyChord, ShellCommand, route_key},
     layout::{PixelRect, ShellLayout, ShellLayoutRequest},
     tabs::TabId,
@@ -137,14 +137,30 @@ struct AppState {
     /// Dark-theme brushes for standard controls and the frame background;
     /// `None` in light and high-contrast themes (system colors apply).
     brushes: Option<ThemeBrushes>,
-    last_error: Option<String>,
+    /// Environment-level problem (WebView2 or COM unavailable, WebView2
+    /// failure); shown when the active tab has nothing more specific.
+    shell_error: Option<String>,
+    /// Transient message (a failed selection or dialog); cleared when the
+    /// active tab changes.
+    notice: Option<String>,
+    /// Per-document open/render failures, by tab.
+    tab_errors: BTreeMap<u64, String>,
     dpi: u32,
     theme: EffectiveTheme,
     destroyed: bool,
     /// Renders in flight, by tab; stale results are discarded.
     renders: RenderTickets,
+    /// Bounded worker pool, started with the first render.
+    render_pool: Option<RenderPool>,
     render_sender: mpsc::Sender<RenderOutcome>,
     render_results: mpsc::Receiver<RenderOutcome>,
+    /// Results arrived while the session was checked out; the message loop
+    /// applies them after the outer call returns.
+    render_results_deferred: bool,
+    /// Startup document tabs without a result yet, and whether any of them
+    /// rendered: when all fail, StartupFailed is signalled.
+    startup_pending: BTreeSet<u64>,
+    startup_rendered: bool,
     /// Tabs whose rendered Markdown document is in the WebView session.
     rendered_tabs: BTreeSet<u64>,
     /// The shell was started with document paths: `FirstRender` then means
@@ -157,6 +173,10 @@ impl AppState {
         let (render_sender, render_results) = mpsc::channel();
         Self {
             renders: RenderTickets::new(),
+            render_pool: None,
+            render_results_deferred: false,
+            startup_pending: BTreeSet::new(),
+            startup_rendered: false,
             render_sender,
             render_results,
             rendered_tabs: BTreeSet::new(),
@@ -172,7 +192,9 @@ impl AppState {
             webview_active: None,
             readiness: None,
             brushes: None,
-            last_error: None,
+            shell_error: None,
+            notice: None,
+            tab_errors: BTreeMap::new(),
             dpi: 96,
             theme: EffectiveTheme::Light,
             destroyed: false,
@@ -258,6 +280,8 @@ pub fn run() -> Result<(), WindowError> {
             }
         }
         poll_webview(hwnd);
+        // Results that arrived while an outer call held the session.
+        apply_deferred_render_results(hwnd);
     }
     Ok(())
 }
@@ -353,10 +377,16 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                 .collect::<Vec<_>>()
         }
     };
-    state.borrow_mut().document_mode = !startup_documents.is_empty();
+    {
+        let mut state = state.borrow_mut();
+        state.document_mode = !startup_documents.is_empty();
+        state.startup_pending = startup_documents.iter().map(|(id, _)| id.get()).collect();
+    }
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
     }
+    // Every startup render may already have failed to queue.
+    update_startup_readiness(&state);
     // UIA delivers `Select` inside an input-synchronous cross-process call,
     // where WebView2 rejects outgoing COM (0x802A000C). Acknowledgement
     // contract: on return, portable selection, the repainted tab strip, and
@@ -443,18 +473,22 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                     state.webview = Some(session);
                     state.apartment = Some(apartment);
                     state.page_observer = Some(observer);
-                    state.last_error = startup_error;
+                    state.shell_error = startup_error;
                 }
                 Err(error) => {
                     let _ = session.close();
+                    drop(session);
                     let mut state = state.borrow_mut();
                     state.webview_checked_out = false;
-                    state.last_error = Some(format!("WebView2 unavailable: {error:?}"));
+                    // The STA stays entered without WebView2: the Open dialog
+                    // and UIA still need COM on this thread.
+                    state.apartment = Some(apartment);
+                    state.shell_error = Some(format!("WebView2 unavailable: {error:?}"));
                 }
             }
         }
         Err(error) => {
-            state.borrow_mut().last_error = Some(format!("COM STA unavailable: {error:?}"))
+            state.borrow_mut().shell_error = Some(format!("COM STA unavailable: {error:?}"))
         }
     }
     // Apply theme and bounds to the WebView session created above.
@@ -497,75 +531,95 @@ fn page_identity() -> Result<PageIdentity, String> {
     Err("the OS RNG returned zero bytes".to_owned())
 }
 
-/// Reads and renders `path` on a worker thread. The worker owns only `Send`
-/// data; it never touches HWND state, `AppState` or WebView2, and wakes the
-/// UI thread with `WM_RENDER_COMPLETE` after queueing its result.
+/// Queues `path` on the bounded render pool. Workers own only `Send` data:
+/// they read, render and build the `HostDocument` off the UI thread, never
+/// touch HWND state, `AppState` or WebView2, and wake the UI thread with
+/// `WM_RENDER_COMPLETE` after queueing the result.
 fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: PathBuf) {
-    let (ticket, sender, theme) = {
-        let mut state = state.borrow_mut();
-        let theme = match state.portable.borrow().theme() {
-            crate::theme::ThemePreference::System => AppTheme::System,
-            crate::theme::ThemePreference::Light => AppTheme::Light,
-            crate::theme::ThemePreference::Dark => AppTheme::Dark,
-        };
-        (
-            state.renders.begin(tab_id),
-            state.render_sender.clone(),
-            theme,
-        )
+    let mut guard = state.borrow_mut();
+    let state_ref = &mut *guard;
+    let theme = match state_ref.portable.borrow().theme() {
+        crate::theme::ThemePreference::System => AppTheme::System,
+        crate::theme::ThemePreference::Light => AppTheme::Light,
+        crate::theme::ThemePreference::Dark => AppTheme::Dark,
     };
-    let window = hwnd.0 as isize;
-    let spawned = std::thread::Builder::new()
-        .name("marknexia-render".to_owned())
-        .stack_size(RENDER_STACK_BYTES)
-        .spawn(move || {
-            let result = page_identity()
-                .map_err(documents::OpenError::Identity)
-                .and_then(|identity| {
-                    documents::render_file(&path, identity, theme)
-                        .map(|rendered| (rendered, identity))
-                });
-            let outcome = RenderOutcome {
-                tab_id,
-                ticket,
-                result,
+    let title = documents::tab_title(&path);
+    let (ticket, cancelled) = state_ref.renders.begin(tab_id);
+    state_ref.tab_errors.remove(&tab_id);
+    let pool = state_ref.render_pool.get_or_insert_with(|| {
+        let window = hwnd.0 as isize;
+        let notify: documents::Notify = Arc::new(move || {
+            // SAFETY: PostMessageW may target a window owned by another
+            // thread; after the window is destroyed the post just fails.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(window as *mut c_void)),
+                    WM_RENDER_COMPLETE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
             };
-            if sender.send(outcome).is_ok() {
-                // SAFETY: PostMessageW may target a window of another thread;
-                // a destroyed window only makes the post fail.
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(HWND(window as *mut c_void)),
-                        WM_RENDER_COMPLETE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    )
-                };
-            }
         });
-    if let Err(error) = spawned {
-        let mut state = state.borrow_mut();
-        state.renders.cancel(tab_id);
-        state.last_error = Some(format!("Could not start rendering: {error}"));
+        RenderPool::new(
+            RenderPool::default_workers(),
+            RENDER_STACK_BYTES,
+            page_identity,
+            state_ref.render_sender.clone(),
+            notify,
+        )
+    });
+    let submitted = pool.submit(RenderJob {
+        tab_id,
+        ticket,
+        path,
+        title,
+        theme,
+        cancelled,
+    });
+    if let Err(error) = submitted {
+        state_ref.renders.cancel(tab_id);
+        state_ref
+            .tab_errors
+            .insert(tab_id, format!("Could not start rendering: {error}"));
+        state_ref.startup_pending.remove(&tab_id);
     }
 }
 
 /// Applies queued render results on the UI thread: results for closed tabs
-/// are dropped, others become WebView documents.
+/// are dropped, others join the WebView session.
 fn apply_render_results(hwnd: HWND) {
+    // SAFETY: `hwnd` is this thread's shell window; the handle helper returns
+    // a scoped strong reference and no borrow.
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
     if state.borrow().webview_checked_out {
-        // An outer call holds the WebView session; retry on a later turn.
-        let _ = unsafe { PostMessageW(Some(hwnd), WM_RENDER_COMPLETE, WPARAM(0), LPARAM(0)) };
+        // An outer call holds the WebView session. The message loop applies
+        // the results once that call returns; nothing is re-posted.
+        state.borrow_mut().render_results_deferred = true;
         return;
     }
+    state.borrow_mut().render_results_deferred = false;
     let outcomes: Vec<RenderOutcome> = state.borrow().render_results.try_iter().collect();
     for outcome in outcomes {
         apply_render_outcome(&state, outcome);
     }
+    update_startup_readiness(&state);
     refresh_status(&state);
+}
+
+fn apply_deferred_render_results(hwnd: HWND) {
+    // SAFETY: as in `apply_render_results`.
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let ready = {
+        let state = state.borrow();
+        state.render_results_deferred && !state.webview_checked_out
+    };
+    if ready {
+        apply_render_results(hwnd);
+    }
 }
 
 fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
@@ -588,36 +642,55 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         return;
     };
     let rendered = result.is_ok();
-    let document = match result {
-        Ok((rendered, identity)) => {
-            HostDocument::from_rendered(tab_id, 1, &title, &rendered, &identity)
-                .map_err(|error| format!("Could not display {title}: {error:?}"))
-        }
-        Err(error) => Err(format!("Could not open {title}: {error}")),
-    };
-    let document = document.or_else(|message| {
-        state.borrow_mut().last_error = Some(message.clone());
+    let document = result.or_else(|error| {
+        let message = format!("Could not open {title}: {error}");
+        state
+            .borrow_mut()
+            .tab_errors
+            .insert(tab_id, message.clone());
         text_document(tab_id, &title, &message)
     });
-    let Some(mut session) = take_session(state) else {
-        return;
-    };
-    let added = document.and_then(|document| {
-        session
-            .add_document(document)
-            .map_err(|error| format!("WebView2 document: {error:?}"))
-    });
-    restore_session(state, session);
-    match added {
-        Ok(()) if rendered => {
-            state.borrow_mut().rendered_tabs.insert(tab_id);
+    let added = match take_session(state) {
+        Some(mut session) => {
+            let added = document.and_then(|document| {
+                session
+                    .add_document(document)
+                    .map_err(|error| format!("WebView2 document: {error:?}"))
+            });
+            restore_session(state, session);
+            added
         }
-        Ok(()) => {}
-        Err(error) => state.borrow_mut().last_error = Some(error),
+        // Without WebView2 nothing can be displayed; the shell error says so.
+        None => document.map(drop),
+    };
+    {
+        let mut state = state.borrow_mut();
+        state.startup_pending.remove(&tab_id);
+        match added {
+            Ok(()) if rendered => {
+                state.rendered_tabs.insert(tab_id);
+                state.startup_rendered |= state.document_mode;
+            }
+            Ok(()) => {}
+            Err(error) => {
+                state.tab_errors.insert(tab_id, error);
+            }
+        }
     }
     let active = portable.borrow().active_tab().map(TabId::get);
     if active == Some(tab_id) {
         let _ = select_webview(state, tab_id);
+    }
+}
+
+/// With document paths, signals `StartupFailed` once every startup document
+/// has a result (or closed) and none rendered, so a harness fails fast
+/// instead of waiting for a `FirstRender` that cannot come.
+fn update_startup_readiness(state: &Rc<RefCell<AppState>>) {
+    let mut state = state.borrow_mut();
+    let failed = state.document_mode && state.startup_pending.is_empty() && !state.startup_rendered;
+    if failed && let Some(readiness) = state.readiness.as_mut() {
+        readiness.startup_failed();
     }
 }
 
@@ -630,8 +703,10 @@ fn open_from_dialog(hwnd: HWND) {
             }
         }
         Err(error) => {
+            // SAFETY: `hwnd` is this thread's shell window; see
+            // `app_state_handle`.
             if let Some(state) = unsafe { app_state_handle(hwnd) } {
-                state.borrow_mut().last_error = Some(format!("Open dialog failed: {error}"));
+                state.borrow_mut().notice = Some(format!("Open dialog failed: {error}"));
                 refresh_status(&state);
             }
         }
@@ -640,13 +715,14 @@ fn open_from_dialog(hwnd: HWND) {
 
 /// Opens `path` in a new active tab and starts rendering it.
 fn open_document(hwnd: HWND, path: PathBuf) {
+    // SAFETY: `hwnd` is this thread's shell window; see `app_state_handle`.
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
     let portable = Rc::clone(&state.borrow().portable);
     let opened = portable.borrow_mut().open_tab(documents::tab_title(&path));
     let Ok(tab_id) = opened else {
-        state.borrow_mut().last_error = Some("No more tabs can be opened.".to_owned());
+        state.borrow_mut().notice = Some("No more tabs can be opened.".to_owned());
         refresh_status(&state);
         return;
     };
@@ -664,8 +740,12 @@ fn open_document(hwnd: HWND, path: PathBuf) {
 /// paths.
 fn show_open_dialog(owner: HWND) -> Result<Vec<PathBuf>, Error> {
     const CANCELLED: i32 = 0x8007_04C7_u32 as i32;
-    // SAFETY: COM is initialized on this STA (the WebView apartment); every
-    // interface is released on drop and every returned string is freed.
+    // SAFETY: runs on the shell's UI thread. When `StaApartment::enter`
+    // failed at startup COM is not initialized here, and CoCreateInstance
+    // returns CO_E_NOTINITIALIZED, which is reported in the status bar. The
+    // apartment is otherwise kept for the window's lifetime, with or without
+    // WebView2. Interfaces are released on drop, the filter strings are
+    // static, and every returned display name is freed with CoTaskMemFree.
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
@@ -709,38 +789,47 @@ fn show_open_dialog(owner: HWND) -> Result<Vec<PathBuf>, Error> {
     }
 }
 
-/// Shows the most recent shell error in the status bar, "Rendering…" while
-/// the active tab's render is pending, or "Ready". The shell stays usable
-/// without WebView2: tabs, keyboard and UIA keep working and the status
-/// explains why documents are not displayed.
+/// The status of what the user is looking at, most specific first: the
+/// active document's failure, "Rendering…" while its render is pending, a
+/// transient notice, an environment problem, or "Ready". The shell stays
+/// usable without WebView2; the status then explains why documents are not
+/// displayed.
 fn refresh_status(state: &Rc<RefCell<AppState>>) {
     let (status, text) = {
         let state = state.borrow();
-        let pending = {
-            let app = state.portable.borrow();
-            app.active_tab()
-                .filter(|tab| state.renders.is_pending(tab.get()))
-                .and_then(|tab| {
-                    app.tabs()
-                        .tabs()
-                        .iter()
-                        .find(|candidate| candidate.id() == tab)
-                        .map(|candidate| candidate.title().to_owned())
-                })
-        };
-        let text = match (state.last_error.as_deref(), pending) {
-            (None, Some(title)) => format!("Rendering {title}\u{2026}"),
-            (None, None) => "Ready".to_owned(),
-            (Some(error), _) if error.starts_with("WebView2 unavailable") => {
-                "Microsoft Edge WebView2 Runtime is not available; documents cannot be displayed."
-                    .to_owned()
+        let app = state.portable.borrow();
+        let active = app.active_tab();
+        let title = active.and_then(|tab| {
+            app.tabs()
+                .tabs()
+                .iter()
+                .find(|candidate| candidate.id() == tab)
+                .map(|candidate| candidate.title().to_owned())
+        });
+        let tab_error = active.and_then(|tab| state.tab_errors.get(&tab.get()));
+        let pending = active.is_some_and(|tab| state.renders.is_pending(tab.get()));
+        let text = if let Some(error) = tab_error {
+            error.clone()
+        } else if let (true, Some(title)) = (pending, title) {
+            format!("Rendering {title}\u{2026}")
+        } else if let Some(notice) = state.notice.as_deref() {
+            notice.to_owned()
+        } else {
+            match state.shell_error.as_deref() {
+                None => "Ready".to_owned(),
+                Some(error) if error.starts_with("WebView2 unavailable") => {
+                    "Microsoft Edge WebView2 Runtime is not available; documents cannot be displayed."
+                        .to_owned()
+                }
+                Some(error) => error.to_owned(),
             }
-            (Some(error), _) => error.to_owned(),
         };
         (state.controls.map(|c| c.status), text)
     };
     if let Some(status) = status {
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `text` is NUL-terminated and outlives the call; the STATIC
+        // control belongs to this thread and no AppState borrow is held.
         let _ = unsafe { SetWindowTextW(status, PCWSTR::from_raw(text.as_ptr())) };
     }
 }
@@ -819,6 +908,7 @@ unsafe extern "system" fn window_proc(
         }
         // BN_CLICKED (notification code 0) from the Open Markdown button.
         WM_COMMAND if wparam.0 & 0xffff == COMMAND_OPEN_ID && (wparam.0 >> 16) & 0xffff == 0 => {
+            // SAFETY: posts to this thread's own live window; no pointers.
             let _ = unsafe { PostMessageW(Some(hwnd), WM_OPEN_DIALOG, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
         }
@@ -1027,10 +1117,15 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
                 return false;
             }
         }
-        // Any in-flight render for the closed tab is now stale.
-        let mut state = state.borrow_mut();
-        state.renders.cancel(active.get());
-        state.rendered_tabs.remove(&active.get());
+        // Any queued or in-flight render for the closed tab is now stale.
+        {
+            let mut state = state.borrow_mut();
+            state.renders.cancel(active.get());
+            state.rendered_tabs.remove(&active.get());
+            state.tab_errors.remove(&active.get());
+            state.startup_pending.remove(&active.get());
+        }
+        update_startup_readiness(&state);
     }
     let previous = portable.borrow().active_tab();
     let applied = portable.borrow_mut().apply_command(command);
@@ -1194,6 +1289,10 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     if let (Some(a11y), Some(id)) = (a11y.as_ref(), newly_selected) {
         a11y.notify_selected(id);
     }
+    if newly_selected.is_some() {
+        // A notice concerned the previous view.
+        state.borrow_mut().notice = None;
+    }
     refresh_status(state);
 }
 
@@ -1244,7 +1343,7 @@ fn poll_webview(hwnd: HWND) {
         }
     }
     if let Some(error) = error {
-        state.borrow_mut().last_error = Some(error);
+        state.borrow_mut().shell_error = Some(error);
         refresh_status(&state);
     }
     if let Some(readiness) = state.borrow_mut().readiness.as_mut() {
@@ -1255,13 +1354,18 @@ fn poll_webview(hwnd: HWND) {
 /// Named manual-reset events that let an external measurement harness
 /// observe startup milestones of this process without UI scraping:
 /// `Local\Marknexia.WebViewReady.<pid>` when the active tab's controller
-/// exists, and `Local\Marknexia.FirstRender.<pid>` when its document has
-/// completed navigation. Signalling is best-effort and never affects the UI.
+/// exists, `Local\Marknexia.FirstRender.<pid>` when its document (with
+/// document paths: the first rendered Markdown document) has completed
+/// navigation, and `Local\Marknexia.StartupFailed.<pid>` when every startup
+/// document failed, so a harness fails fast. Signalling is best-effort and
+/// never affects the UI.
 struct Readiness {
     webview_ready: Option<HANDLE>,
     first_render: Option<HANDLE>,
+    startup_failed: Option<HANDLE>,
     webview_signaled: bool,
     render_signaled: bool,
+    failure_signaled: bool,
 }
 
 impl Readiness {
@@ -1270,9 +1374,15 @@ impl Readiness {
         Self {
             webview_ready: named_event(&format!(r"Local\Marknexia.WebViewReady.{pid}")),
             first_render: named_event(&format!(r"Local\Marknexia.FirstRender.{pid}")),
+            startup_failed: named_event(&format!(r"Local\Marknexia.StartupFailed.{pid}")),
             webview_signaled: false,
             render_signaled: false,
+            failure_signaled: false,
         }
+    }
+
+    fn startup_failed(&mut self) {
+        signal_once(&mut self.startup_failed, &mut self.failure_signaled);
     }
 
     fn observe(&mut self, controller_ready: bool, document_loaded: bool) {
@@ -1287,10 +1397,15 @@ impl Readiness {
 
 impl Drop for Readiness {
     fn drop(&mut self) {
-        for handle in [self.webview_ready.take(), self.first_render.take()]
-            .into_iter()
-            .flatten()
+        for handle in [
+            self.webview_ready.take(),
+            self.first_render.take(),
+            self.startup_failed.take(),
+        ]
+        .into_iter()
+        .flatten()
         {
+            // SAFETY: each handle came from CreateEventW and is closed once.
             let _ = unsafe { CloseHandle(handle) };
         }
     }
@@ -1308,6 +1423,7 @@ fn named_event(name: &str) -> Option<HANDLE> {
 fn signal_once(slot: &mut Option<HANDLE>, signaled: &mut bool) {
     if let (Some(handle), false) = (slot.as_ref(), *signaled) {
         *signaled = true;
+        // SAFETY: the handle is a live event owned by Readiness.
         let _ = unsafe { SetEvent(*handle) };
     }
 }
@@ -1659,7 +1775,7 @@ fn select_webview(state: &Rc<RefCell<AppState>>, tab_id: u64) -> bool {
     restore_session(state, session);
     match error {
         Some(error) => {
-            state.borrow_mut().last_error = Some(error);
+            state.borrow_mut().notice = Some(error);
             false
         }
         None => {
@@ -1836,6 +1952,8 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
     drop(observer);
     drop(apartment);
     let mut state = state.borrow_mut();
-    state.last_error = error.or_else(|| state.last_error.take());
+    if error.is_some() {
+        state.shell_error = error;
+    }
     let _ = controls;
 }

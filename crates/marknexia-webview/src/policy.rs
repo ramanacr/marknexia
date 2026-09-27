@@ -10,16 +10,17 @@ use crate::{
     protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message},
 };
 
-/// Limit for shell-built and bundled documents.
-pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
-/// Limit for a rendered Markdown page: the rendering crate's page limit plus
-/// room for the host-inserted `<title>`.
-pub const MAX_RENDERED_DOCUMENT_BYTES: usize =
+/// Limit for every hosted document: the rendering crate's page limit (the
+/// .NET `MaxRenderedHtmlBytes`, 128 MiB) plus an allowance for the
+/// host-inserted `<title>` and shell template text.
+pub const MAX_DOCUMENT_BYTES: usize =
     RenderLimits::DEFAULT_MAX_RENDERED_HTML_BYTES + MAX_TITLE_MARKUP_BYTES;
+/// Equals [`MAX_DOCUMENT_BYTES`]; kept for callers of the rendered API.
+pub const MAX_RENDERED_DOCUMENT_BYTES: usize = MAX_DOCUMENT_BYTES;
 const MAX_TITLE_MARKUP_BYTES: usize = 64 * 1024;
 /// Response-header policy for every broker response except a rendered page,
-/// whose header repeats the page's own meta policy (see
-/// [`HostDocument::from_rendered`]).
+/// whose header repeats the page's own meta policy plus the header-only
+/// `frame-ancestors 'none'` (see [`HostDocument::from_rendered`]).
 pub const DEFAULT_RESPONSE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 pub const MAX_ASSET_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ASSETS: usize = 32;
@@ -112,9 +113,9 @@ pub struct HostDocument {
     /// Virtual origin that serves this document: the per-tab origin, or the
     /// rendered page's own identity origin.
     origin: String,
-    /// Shared so that cloning a large rendered page stays cheap.
-    html: Arc<[u8]>,
-    max_html_bytes: usize,
+    /// Shared and never copied per clone or per request: the broker streams
+    /// the document response straight from this buffer.
+    html: Arc<Vec<u8>>,
     /// `Content-Security-Policy` response header for the document itself.
     document_csp: String,
     assets: BTreeMap<String, Asset>,
@@ -141,20 +142,29 @@ impl HostDocument {
     /// host change is an entity-encoded `<title>` inserted into the template
     /// head. The document is served from `identity`'s origin so the page's
     /// `<base href>`, `base-uri` and `img-src` name the serving origin, and
-    /// the document response carries the page's own policy as its header so
-    /// the header and meta policies are identical. `identity` must be the one
-    /// the page was rendered with; a mismatch is rejected.
+    /// the document response carries the page's own policy as its header
+    /// (plus the header-only `frame-ancestors 'none'`). `identity` must be
+    /// the one the page was rendered with; a mismatch is rejected.
+    ///
+    /// The rendered document is consumed so its body is released as soon as
+    /// the page exists; the title is inserted in place and the page buffer
+    /// moves into the shared `Arc` without another copy. Build this off the
+    /// UI thread: `HostDocument` is `Send`.
     pub fn from_rendered(
         tab_id: u64,
         document_epoch: u64,
         title: &str,
-        rendered: &RenderedDocument,
+        rendered: RenderedDocument,
         identity: &PageIdentity,
     ) -> Result<Self, DocumentError> {
         const PREFIX: &str = "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"";
         const HEAD: &str = "\">\n<head>\n  <meta charset=\"utf-8\" />\n";
         const HEAD_END: &str = "\n  </style>\n</head>\n<body>\n";
-        let page = rendered.page_html();
+        if rendered.page_bytes() > MAX_DOCUMENT_BYTES - MAX_TITLE_MARKUP_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let mut page = rendered.page_html();
+        drop(rendered);
         let origin = identity.origin();
         let csp = rendered_page_csp(identity);
         // The theme value is one of three fixed template words, so the head
@@ -192,21 +202,17 @@ impl HostDocument {
             .len()
             .checked_add(title_markup.len())
             .ok_or(DocumentError::TooLarge)?;
-        if required > MAX_RENDERED_DOCUMENT_BYTES {
+        if required > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::TooLarge);
         }
-        let mut html = Vec::with_capacity(required);
-        html.extend_from_slice(&page.as_bytes()[..insert_at]);
-        html.extend_from_slice(title_markup.as_bytes());
-        html.extend_from_slice(&page.as_bytes()[insert_at..]);
-        drop(page);
+        page.reserve_exact(title_markup.len());
+        page.insert_str(insert_at, &title_markup);
         let document = Self {
             tab_id,
             document_epoch,
             origin,
-            html: html.into(),
-            max_html_bytes: MAX_RENDERED_DOCUMENT_BYTES,
-            document_csp: csp,
+            html: Arc::new(page.into_bytes()),
+            document_csp: format!("{csp}; frame-ancestors 'none'"),
             assets: BTreeMap::new(),
         };
         document.validate()?;
@@ -316,8 +322,7 @@ impl HostDocument {
             tab_id,
             document_epoch,
             origin: TabResourceBroker::for_tab(tab_id).origin().to_owned(),
-            html: html.into(),
-            max_html_bytes: MAX_DOCUMENT_BYTES,
+            html: Arc::new(html),
             document_csp: DEFAULT_RESPONSE_CSP.to_owned(),
             assets,
         };
@@ -348,7 +353,7 @@ impl HostDocument {
         if self.html.is_empty() {
             return Err(DocumentError::EmptyHtml);
         }
-        if self.html.len() > self.max_html_bytes {
+        if self.html.len() > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::TooLarge);
         }
         if self.assets.len() > MAX_ASSETS {
@@ -407,6 +412,7 @@ impl HostDocument {
         match self.broker().resolve(request) {
             BrokerDecision::Document => ResponseSpec {
                 content_security_policy: &self.document_csp,
+                shared_body: Some(&self.html),
                 ..ResponseSpec::ok("text/html; charset=utf-8", &self.html)
             },
             BrokerDecision::LocalAsset { relative_path } => self
@@ -451,6 +457,10 @@ pub struct ResponseSpec<'a> {
     pub content_type: &'static str,
     pub content_security_policy: &'a str,
     pub body: &'a [u8],
+    /// The same bytes as `body` when they live in a shared document buffer:
+    /// the native adapter then streams the response from the buffer instead
+    /// of copying it into a per-request stream.
+    pub shared_body: Option<&'a Arc<Vec<u8>>>,
 }
 
 impl<'a> ResponseSpec<'a> {
@@ -460,6 +470,7 @@ impl<'a> ResponseSpec<'a> {
             reason: "OK",
             content_type,
             content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
             body,
         }
     }
@@ -470,6 +481,7 @@ impl<'a> ResponseSpec<'a> {
             reason: "Forbidden",
             content_type: "text/plain; charset=utf-8",
             content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
             body: b"Forbidden",
         }
     }
@@ -480,6 +492,7 @@ impl<'a> ResponseSpec<'a> {
             reason: "Method Not Allowed",
             content_type: "text/plain; charset=utf-8",
             content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
             body: b"Method Not Allowed",
         }
     }

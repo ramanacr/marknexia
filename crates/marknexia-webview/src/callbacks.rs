@@ -401,6 +401,12 @@ fn create_response(
     environment: &ICoreWebView2Environment,
     response: ResponseSpec<'_>,
 ) -> windows::core::Result<ICoreWebView2WebResourceResponse> {
+    // A document streams from its shared buffer (no per-request copy); small
+    // fixed bodies (denials, probe assets) are copied into an HGLOBAL.
+    if let Some(shared) = response.shared_body.filter(|_| !copy_for_measurement()) {
+        let stream = crate::stream::SharedStream::create(std::sync::Arc::clone(shared));
+        return create_response_from(environment, &stream, response);
+    }
     let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }?;
     if !response.body.is_empty() {
         let mut written = 0;
@@ -417,6 +423,30 @@ fn create_response(
         }
     }
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }?;
+    create_response_from(environment, &stream, response)
+}
+
+/// Native measurements compare streaming with the old per-request copy.
+#[cfg(test)]
+pub(crate) static COPY_FOR_MEASUREMENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn copy_for_measurement() -> bool {
+    #[cfg(test)]
+    {
+        COPY_FOR_MEASUREMENT.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+fn create_response_from(
+    environment: &ICoreWebView2Environment,
+    stream: &windows::Win32::System::Com::IStream,
+    response: ResponseSpec<'_>,
+) -> windows::core::Result<ICoreWebView2WebResourceResponse> {
     let reason = wide(response.reason);
     let headers = wide(&format!(
         "Content-Type: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Security-Policy: {}\r\n",
@@ -424,7 +454,7 @@ fn create_response(
     ));
     unsafe {
         environment.CreateWebResourceResponse(
-            &stream,
+            stream,
             response.status,
             PCWSTR::from_raw(reason.as_ptr()),
             PCWSTR::from_raw(headers.as_ptr()),

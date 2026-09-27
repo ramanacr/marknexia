@@ -905,6 +905,116 @@ mod native_tests {
         unsafe { DestroyWindow(parent) }.unwrap();
     }
 
+    /// Serves large documents from the shared buffer (no per-request copy)
+    /// and reports load times. Run with `--nocapture`; set
+    /// `MARKNEXIA_MEASURE_SIZES_MIB` (e.g. `8,32,128`) and
+    /// `MARKNEXIA_MEASURE_COPY=1` to compare with the old HGLOBAL copy.
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_large_document_streams_from_the_shared_buffer() {
+        use crate::policy::{HostDocument, MAX_DOCUMENT_BYTES};
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Marknexia large document test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                800,
+                600,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+        let folder = std::env::temp_dir()
+            .join("marknexia-webview-native-tests")
+            .join(format!("large-{}", std::process::id()));
+        let mut results = Vec::new();
+        let copy = std::env::var_os("MARKNEXIA_MEASURE_COPY").is_some();
+        crate::callbacks::COPY_FOR_MEASUREMENT.store(copy, std::sync::atomic::Ordering::Relaxed);
+        let sizes: Vec<usize> = std::env::var("MARKNEXIA_MEASURE_SIZES_MIB")
+            .ok()
+            .map(|sizes| {
+                sizes
+                    .split(',')
+                    .filter_map(|size| size.trim().parse::<usize>().ok())
+                    .map(|mib| (mib << 20).min(MAX_DOCUMENT_BYTES - 4096))
+                    .collect()
+            })
+            // 128 MiB (`MARKNEXIA_MEASURE_SIZES_MIB=128`) is served, but
+            // Chromium did not finish parsing and layout within 90 s on the
+            // measurement host, so it is not a default.
+            .unwrap_or_else(|| vec![64 * 1024, 8 << 20, 32 << 20]);
+        for (tab_id, target) in (21_u64..).zip(sizes) {
+            let mut session = WebViewSession::new(
+                Rc::clone(&apartment),
+                parent,
+                folder.clone(),
+                Rc::downgrade(&observer),
+            );
+            // Paragraphs, like rendered Markdown, rather than one huge text node.
+            let prefix = b"<!doctype html><title>large</title><body>";
+            let suffix = b"</body>";
+            let mut html = Vec::with_capacity(target);
+            html.extend_from_slice(prefix);
+            while html.len() + 64 + suffix.len() < target {
+                html.extend_from_slice(
+                    b"<p>Marknexia large-document streaming paragraph of plain text.</p>\n",
+                );
+            }
+            html.extend_from_slice(suffix);
+            let bytes = html.len();
+            let document = HostDocument::from_trusted_bundle(
+                tab_id,
+                1,
+                html,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+            session.add_document(document).unwrap();
+            session.select_tab(tab_id).unwrap();
+            session.start().unwrap();
+            pump_until(&mut session, Duration::from_secs(30), |session| {
+                session.host(tab_id).is_some()
+            });
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(90);
+            let loaded = loop {
+                let mut message = MSG::default();
+                while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
+                    unsafe { DispatchMessageW(&message) };
+                }
+                session.poll().unwrap();
+                if session
+                    .host(tab_id)
+                    .is_some_and(crate::host::WebViewHost::document_loaded)
+                {
+                    break true;
+                }
+                if Instant::now() > deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            eprintln!(
+                "served {bytes} bytes (copy={copy}); loaded={loaded}; controller-to-NavigationCompleted {} ms",
+                started.elapsed().as_millis()
+            );
+            results.push((bytes, loaded, started.elapsed()));
+            session.close().unwrap();
+        }
+        for (bytes, loaded, _) in &results {
+            assert!(*loaded, "{bytes}-byte document did not finish navigating");
+        }
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
     #[test]
     #[ignore = "manual native browser-process exit required after both tabs appear"]
     fn native_browser_exit_recreates_environment_and_immutable_tabs() {

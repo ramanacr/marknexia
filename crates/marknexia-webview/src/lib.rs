@@ -18,3 +18,6 @@ pub mod protocol;
 pub mod recovery;
 #[cfg(windows)]
 pub mod session;
+#[cfg(windows)]
+#[allow(unsafe_code)] // A read-only COM stream over a shared document buffer.
+mod stream;

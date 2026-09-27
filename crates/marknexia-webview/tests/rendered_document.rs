@@ -26,7 +26,8 @@ fn html(document: &HostDocument) -> String {
 fn rendered_page_is_served_from_its_identity_origin_with_matching_policy() {
     let identity = identity(0xA5);
     let rendered = render("# Heading\n\nBody <script>alert(1)</script>", identity);
-    let document = HostDocument::from_rendered(4, 1, "notes.md", &rendered, &identity).unwrap();
+    let expected_page = rendered.page_html();
+    let document = HostDocument::from_rendered(4, 1, "notes.md", rendered, &identity).unwrap();
     let origin = identity.origin();
     assert_eq!(document.document_uri(), format!("{origin}/document"));
     assert!(document.permits_navigation(&document.document_uri()));
@@ -36,13 +37,17 @@ fn rendered_page_is_served_from_its_identity_origin_with_matching_policy() {
     // Exactly the rendering crate's page plus one encoded title line.
     assert_eq!(
         page.replacen("  <title>notes.md</title>\n", "", 1),
-        rendered.page_html()
+        expected_page
     );
     assert!(page.contains("<head>\n  <meta charset=\"utf-8\" />\n  <title>notes.md</title>\n"));
     assert!(!page.contains("<script>alert(1)"));
 
-    // The header policy equals the page's meta policy and names its nonce.
-    let csp = document.document_csp();
+    // The header policy is the page's meta policy plus the header-only
+    // frame-ancestors directive, and names the page nonce.
+    let header = document.document_csp();
+    let csp = header
+        .strip_suffix("; frame-ancestors 'none'")
+        .expect("header adds frame-ancestors");
     assert_ne!(csp, DEFAULT_RESPONSE_CSP);
     assert!(csp.contains(&format!("'nonce-{}'", identity.nonce())));
     assert!(csp.contains(&format!("base-uri {origin};")));
@@ -58,7 +63,14 @@ fn rendered_page_is_served_from_its_identity_origin_with_matching_policy() {
     };
     let response = document.resolve(&request);
     assert_eq!(response.status, 200);
-    assert_eq!(response.content_security_policy, csp);
+    assert_eq!(response.content_security_policy, header);
+    // Served from the shared buffer, not a copy.
+    assert!(
+        response
+            .shared_body
+            .is_some_and(|body| std::ptr::eq(body.as_ptr(), document.html().as_ptr()))
+    );
+    const { assert!(marknexia_webview::policy::MAX_DOCUMENT_BYTES > 128 * 1024 * 1024) };
     assert_eq!(response.body, document.html());
     // Other origins, other tabs and every asset path fail closed.
     for (uri, tab, kind) in [
@@ -95,7 +107,7 @@ fn title_is_plain_text() {
     let identity = identity(3);
     let rendered = render("x", identity);
     let document =
-        HostDocument::from_rendered(1, 1, "</title><script>x</script>", &rendered, &identity)
+        HostDocument::from_rendered(1, 1, "</title><script>x</script>", rendered, &identity)
             .unwrap();
     let page = html(&document);
     assert!(page.contains("<title>&lt;/title&gt;&lt;script&gt;x&lt;/script&gt;</title>"));
@@ -105,7 +117,7 @@ fn title_is_plain_text() {
 fn a_page_rendered_for_another_identity_is_rejected() {
     let rendered = render("# x", identity(1));
     assert_eq!(
-        HostDocument::from_rendered(1, 1, "x.md", &rendered, &identity(2)),
+        HostDocument::from_rendered(1, 1, "x.md", rendered, &identity(2)),
         Err(DocumentError::IdentityMismatch)
     );
 }
@@ -114,7 +126,7 @@ fn a_page_rendered_for_another_identity_is_rejected() {
 fn bridge_messages_the_page_sends_are_rejected_by_the_strict_protocol() {
     let identity = identity(9);
     let rendered = render("[link](https://example.com)", identity);
-    let document = HostDocument::from_rendered(2, 1, "x.md", &rendered, &identity).unwrap();
+    let document = HostDocument::from_rendered(2, 1, "x.md", rendered, &identity).unwrap();
     let source = document.document_uri();
     // bridge.js posts untagged objects without protocol, tab or epoch.
     for json in [

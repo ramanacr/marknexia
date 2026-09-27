@@ -155,6 +155,77 @@ available.
   the foreground belonged to `LockApp`, so its foreground guard refused
   `SendInput`.
 
+### Review fixes (2026-09-27)
+
+These supersede the matching statements above.
+
+- **Panic containment.** Release now uses `panic = "unwind"`. Each render
+  job runs under `catch_unwind`, and a drop guard answers the tab with
+  `Panicked` if a panic ever escapes, so one bad document fails only its
+  own tab and the worker keeps serving. Option (b), keeping abort, would
+  need proof that the markdown, rendering and sanitizer stacks (including
+  third-party parsers) never panic, which this lane cannot provide. Cost:
+  the release x64 executable grows from 2,298,368 to 2,908,672 bytes
+  (+610,304, +26.6%). Panics in `extern "system"` callbacks still abort.
+- **Worker pool.** A FIFO queue feeds 2–4 workers
+  (`available_parallelism - 1`, clamped). A closed tab's cancel flag lets a
+  queued job skip its work.
+- **Page building off the UI thread.** Workers read, render and build the
+  `HostDocument` (it is `Send`). `from_rendered` consumes the
+  `RenderedDocument`, drops the body once the page exists, inserts the
+  title in place and moves the buffer into an `Arc<Vec<u8>>` with no
+  further copy.
+- **128 MiB cap and streaming.** `MAX_DOCUMENT_BYTES` is the 128 MiB page
+  limit plus 64 KiB for title and template text. The document response
+  streams from the shared buffer through a read-only, free-threaded
+  `IStream` (no per-request copy). Small fixed bodies still use an HGLOBAL.
+  - Measured on the loaded x64 host, from controller creation to
+    `NavigationCompleted`, with a paragraph-per-line page: 64 KiB in
+    0.3 s, 8 MiB in 2.6–4.4 s, 32 MiB in 18.0 s (24.9 s with the old
+    per-request copy).
+  - A 128 MiB page is served but Chromium did not finish parsing and
+    layout within 90 s, in either mode.
+- **Safe open.**
+  - `read_source` accepts only drive-letter paths that `CanonicalPath`
+    validates, plus the verbatim `\\?\C:\` form of one. It refuses UNC,
+    `\\.\` and `\\?\` device namespaces (GLOBALROOT, volumes, pipes),
+    reserved device names and alternate data streams, all before opening.
+  - It opens with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` and a
+    sequential-scan hint, and requires `GetFileType == FILE_TYPE_DISK` and
+    a regular file.
+  - This is stricter than .NET: `FileStream` refuses non-disk handles for
+    ordinary paths but allows UNC shares.
+  - An over-limit read reports the file's current size.
+  - `file:///` and `file://` arguments convert like the .NET
+    `PathCanonicalizer`.
+- **Status and readiness.**
+  - The status bar shows, in order of priority: the active document's
+    error, "Rendering…", a transient notice (cleared when the active tab
+    changes), the environment error, or "Ready".
+  - `Local\Marknexia.StartupFailed.<pid>` is signalled when every startup
+    document failed. The collector then fails fast: the large-document
+    run stopped in 6 s instead of timing out.
+  - Results that arrive while the session is checked out are applied by
+    the message loop after the outer call, not re-posted.
+  - The COM STA stays entered without WebView2, so the Open dialog still
+    works.
+- **Header policy.** The document response header is the page's meta
+  policy plus the header-only `frame-ancestors 'none'`.
+- **Identity binding.** The check still rebuilds the policy and base from
+  the identity and matches the page head. A direct comparison needs
+  `marknexia-rendering` to expose `RenderedDocument::identity() ->
+  &PageIdentity` (the identity the page was rendered with; `PageIdentity`
+  is already `Eq`) and `RenderedDocument::content_security_policy() ->
+  &str` (the unencoded policy). Optionally it could also take a plain-text
+  document title in `RenderContext`, so the host would not need to insert
+  `<title>`.
+- **Native re-verification (workstation locked, foreground `LockApp`).**
+  - UIA and SendInput steps and screenshots were skipped.
+  - Non-interactive runs passed: the two-tab resource/teardown and
+    page-message WebView2 tests, the large-document streaming measurement,
+    and `small-document` collection with the streamed document (first
+    render 2.95–6.45 s over 2 cold and 2 warm runs).
+
 ## Compiled and headless-tested
 
 - `cargo clippy --workspace --all-targets -- -D warnings` passes, with default

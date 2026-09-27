@@ -19,7 +19,8 @@ output records that definition.
 Scenarios: empty-shell starts with no document. small-document passes the
 pinned fixture as the command-line argument; large-document generates its
 file in %TEMP% exactly as the scenario describes, hashes it, and passes that.
-FirstRender then means the opened document's navigation completed. The
+FirstRender then means the opened document's navigation completed, and a run
+fails fast when the shell signals Local\Marknexia.StartupFailed.<pid>. The
 provenance fixtureDigest is the SHA-256 of the file actually opened, and it
 must equal the artifact measurement's fixtureDigest. repository-scan is not
 collectable yet (no repository sidebar).
@@ -159,6 +160,9 @@ function Invoke-Run([string]$UserData) {
         while (-not $sample.Contains('firstRenderMs')) {
             if ($clock.ElapsedMilliseconds -gt $TimeoutMs) { throw "Run timed out; reached: $($sample.Keys -join ', ')" }
             if ($process.HasExited) { throw "Shell exited early with code $($process.ExitCode)." }
+            if ($documentPath -and (Test-EventSignaled "Local\Marknexia.StartupFailed.$id")) {
+                throw "The shell could not render the scenario document (StartupFailed); its status bar names the error."
+            }
             if (-not $sample.Contains('shellVisibleMs')) {
                 $window = [PerfWindowProbe]::FindVisibleShell([uint32]$id)
                 if ($window -ne [IntPtr]::Zero) { $sample.shellVisibleMs = [double]$clock.Elapsed.TotalMilliseconds }

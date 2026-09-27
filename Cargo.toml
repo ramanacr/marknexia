@@ -27,5 +27,8 @@ serde_json = "=1.0.149"
 incremental = false
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwind (not abort): the shell renders untrusted documents on worker
+# threads and contains a renderer panic to that document's tab with
+# catch_unwind. Panics in `extern "system"` callbacks still abort.
+panic = "unwind"
 strip = "symbols"
