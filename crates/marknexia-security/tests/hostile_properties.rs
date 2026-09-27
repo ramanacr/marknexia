@@ -1146,3 +1146,30 @@ fn only_empty_input_short_circuits() {
     assert_eq!(svg("  "), "  ");
     assert_eq!(svg(""), "");
 }
+
+#[test]
+fn byte_order_mark_at_a_probe_piece_boundary_still_counts_depth() {
+    // Review I2: html5ever drops a U+FEFF at the start of every fed piece
+    // (16 KiB in the probe) unless told not to. ammonia sees it as a
+    // character that reopens the 200 formatting elements, so the real depth
+    // is about 450.
+    let mut tail = String::from("<p>");
+    for index in 0..200 {
+        tail.push_str(&format!("<b id=\"i{index}\">"));
+    }
+    tail.push_str("</p>");
+    let mut input = "x".repeat(16_384 - tail.len());
+    input.push_str(&tail);
+    assert_eq!(input.len(), 16_384);
+    input.push('\u{feff}');
+    input.push_str(&"<div>".repeat(250));
+    input.push_str(&"</div>".repeat(250));
+    assert_eq!(
+        HtmlPolicy::new(ContentPolicy::default()).sanitize_fragment(&input),
+        Err(SanitizeError::NestingTooDeep {
+            limit: marknexia_security::MAX_NESTING_DEPTH
+        })
+    );
+    // A leading byte order mark is still discarded, as by ammonia.
+    assert_eq!(html("\u{feff}<p>a</p>"), "<p>a</p>");
+}

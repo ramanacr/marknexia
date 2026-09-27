@@ -202,6 +202,8 @@ const RAW: &[&str] = &[
     "<script>",
     "</script>\n",
     "<plaintext>",
+    "\u{feff}",
+    "\u{feff}<b>x</b>\n",
 ];
 
 #[test]
@@ -248,6 +250,40 @@ fn budget_errors_do_not_depend_on_threads() {
     for workers in [1, 3, 8] {
         assert_eq!(
             sanitize_with_chunking(ContentPolicy::default(), &misnested, Some(4096), workers),
+            whole
+        );
+    }
+}
+
+#[test]
+fn byte_order_marks_after_a_split_point_are_kept() {
+    // Review C1: ammonia's parser discards U+FEFF at the start of its input,
+    // and every chunk is its own input, so a chunk must never start with one.
+    let policy = ContentPolicy::default();
+    for input in [
+        "<p>a</p>\n\u{feff}<b>x</b>".to_owned(),
+        "\u{feff}<p>a</p>\n\u{feff}\n<p>b</p>\n".to_owned(),
+        "<div>a</div>\n\u{feff}".repeat(60_000),
+    ] {
+        let whole = sanitize_with_chunking(policy, &input, None, 1).unwrap();
+        let leading = usize::from(input.starts_with('\u{feff}'));
+        assert_eq!(
+            whole.matches('\u{feff}').count(),
+            input.matches('\u{feff}').count() - leading
+        );
+        for (target, workers) in [(1, 1), (1, 4), (4096, 8)] {
+            assert_eq!(
+                sanitize_with_chunking(policy, &input, Some(target), workers).as_ref(),
+                Ok(&whole),
+                "target {target}"
+            );
+        }
+        // The default settings too.
+        assert_eq!(
+            marknexia_security::HtmlPolicy::new(policy)
+                .sanitize_fragment(&input)
+                .unwrap()
+                .as_str(),
             whole
         );
     }

@@ -260,6 +260,9 @@ pub(crate) fn scan(input: &str, limit: usize) -> Option<Candidates> {
             && bytes.get(index) == Some(&b'\n')
             && current.len() == 1
             && current[0].0 == State::Data
+            // A chunk that starts with U+FEFF would lose it: ammonia's
+            // parser discards a byte order mark at the start of its input.
+            && !bytes[index + 1..].starts_with("\u{feff}".as_bytes())
         {
             candidates.all.push(index + 1);
             // An end tag right after means an enclosing element closes

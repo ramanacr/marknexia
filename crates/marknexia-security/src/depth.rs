@@ -48,6 +48,7 @@ use std::{
 use html5ever::{
     Attribute, ParseOpts, QualName, local_name, ns, parse_fragment,
     tendril::{StrTendril, TendrilSink},
+    tokenizer::TokenizerOpts,
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, Tracer, TreeSink},
 };
 
@@ -186,11 +187,19 @@ impl<'i> Planner<'i> {
         };
         let parser = parse_fragment(
             sink,
-            ParseOpts::default(),
+            probe_parse_opts(),
             QualName::new(None, ns!(html), local_name!("div")),
             Vec::new(),
             false,
         );
+        // ammonia's parse discards a byte order mark at the start of its
+        // input, and every chunk is its own input. Split candidates are never
+        // followed by one, so only offset 0 can start with it.
+        let position = if start == 0 && input.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            start
+        };
         Self {
             input,
             candidates,
@@ -198,7 +207,7 @@ impl<'i> Planner<'i> {
             verdict,
             chunk_target,
             chunk_start: start,
-            position: start,
+            position,
             next_candidate: candidates.partition_point(|&candidate| candidate <= start),
             chunks: Vec::new(),
             used_at_cut: Budget::ZERO,
@@ -317,6 +326,21 @@ impl<'i> Planner<'i> {
     /// Budget used by the closed chunks.
     pub(crate) const fn used_at_last_cut(&self) -> Budget {
         self.used_at_cut
+    }
+}
+
+/// ammonia's parse options, except that the tokenizer never discards a byte
+/// order mark itself: html5ever checks `discard_bom` on every `feed`, so it
+/// would drop a U+FEFF at the start of every piece the probe feeds, where
+/// ammonia (one feed per chunk) sees a character. `Planner::new` skips the
+/// one at offset 0 by hand instead.
+fn probe_parse_opts() -> ParseOpts {
+    ParseOpts {
+        tokenizer: TokenizerOpts {
+            discard_bom: false,
+            ..TokenizerOpts::default()
+        },
+        ..ParseOpts::default()
     }
 }
 
