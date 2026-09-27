@@ -60,6 +60,10 @@ fn accepted(outcome: &Outcome) -> bool {
     outcome.is_ok()
 }
 
+fn accepted_or_complex(outcome: &Outcome) -> bool {
+    accepted(outcome) || too_complex(outcome)
+}
+
 const CASES: &[Case] = &[
     Case {
         name: "nested divs",
@@ -124,10 +128,11 @@ const CASES: &[Case] = &[
         input: |size| fill("<p>", "x&y ", size),
         expected: accepted,
     },
+    // No split point: accepted at 5 MiB, over the chunk node limit at 50.
     Case {
         name: "open formatting element: every segment re-probed",
         input: |size| fill("<b>\n", "<p>x</p>\n", size),
-        expected: accepted,
+        expected: accepted_or_complex,
     },
 ];
 
@@ -173,4 +178,21 @@ fn budgets_fail_closed_in_linear_time_at_50_mib() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+#[ignore = "memory budget at 50 MiB; run in release"]
+fn a_chunk_over_the_node_limit_is_rejected_before_its_dom_is_built() {
+    // Review I3: one paragraph of raw inline HTML has no split point, so it
+    // is one chunk: 2 nodes per 8 bytes. 12 MiB stays under
+    // MAX_CHUNK_NODES; 50 MiB (13 M nodes, about 2.6 GiB of DOM) does not.
+    let policy = HtmlPolicy::new(ContentPolicy::default());
+    let small = fill("<p>", "<b>x</b>", 12 * MIB);
+    assert!(policy.sanitize_fragment(&small).is_ok());
+    drop(small);
+    let large = fill("<p>", "<b>x</b>", 50 * MIB);
+    let (outcome, time) = run(&policy, &large);
+    eprintln!("NODES 50 MiB single chunk: {outcome:?} in {time:?}");
+    assert_eq!(outcome, Err(SanitizeError::TooComplex));
+    assert!(marknexia_security::MAX_CHUNK_NODES < 50 * MIB / 4);
 }

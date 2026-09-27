@@ -32,7 +32,7 @@ mod html;
 mod serialize;
 
 pub use attrs::MAX_ATTRIBUTES_PER_TAG;
-pub use depth::MAX_NESTING_DEPTH;
+pub use depth::{MAX_CHUNK_NODES, MAX_NESTING_DEPTH};
 
 use std::{error::Error, fmt};
 
@@ -483,8 +483,11 @@ pub mod testing {
         html::sanitize(input, policy, run)
     }
 
-    /// The chunks the default settings cut `input` into (byte ranges).
-    pub fn chunk_ranges(input: &str) -> Result<Vec<std::ops::Range<usize>>, SanitizeError> {
+    /// The chunks the default settings cut `input` into: byte ranges and the
+    /// number of nodes in each chunk's tree.
+    pub fn chunk_ranges(
+        input: &str,
+    ) -> Result<Vec<(std::ops::Range<usize>, usize)>, SanitizeError> {
         html::chunk_ranges(input, html::Run::DEFAULT)
     }
 }

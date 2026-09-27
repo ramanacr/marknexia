@@ -8,9 +8,13 @@
 
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     collections::HashMap,
     ops::Range,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use ammonia::{Builder, UrlRelative};
@@ -489,13 +493,21 @@ pub(crate) fn sanitize(
 }
 
 /// Steps 1 to 3 of [`sanitize`]: the chunks of `input`.
-pub(crate) fn chunk_ranges(input: &str, run: Run<'_>) -> Result<Vec<Range<usize>>, SanitizeError> {
+pub(crate) fn chunk_ranges(
+    input: &str,
+    run: Run<'_>,
+) -> Result<Vec<(Range<usize>, usize)>, SanitizeError> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
     let candidates =
         attrs::scan(input, attrs::MAX_ATTRIBUTES_PER_TAG).ok_or(SanitizeError::TooComplex)?;
-    plan_chunks(input, &candidates, run, run.max_workers)
+    plan_chunks(input, &candidates, run, run.max_workers).map(|chunks| {
+        chunks
+            .into_iter()
+            .map(|chunk| (chunk.range, chunk.nodes))
+            .collect()
+    })
 }
 
 /// Segment boundaries: 0, then the first likely candidate at least `target`
@@ -525,8 +537,8 @@ struct SegmentProbe {
     verdict: depth::Verdict,
     /// The parser was at its initial state at the end of the segment.
     ends_initial: bool,
-    /// Closed chunks, each with the budget used when it was closed.
-    chunks: Vec<(Range<usize>, depth::Budget)>,
+    /// Closed chunks.
+    chunks: Vec<depth::Chunk>,
     /// Budget used by `chunks`.
     used: depth::Budget,
     /// Budget used when the probe stopped.
@@ -595,7 +607,7 @@ fn plan_chunks(
     candidates: &attrs::Candidates,
     run: Run<'_>,
     workers: usize,
-) -> Result<Vec<Range<usize>>, SanitizeError> {
+) -> Result<Vec<depth::Chunk>, SanitizeError> {
     // Segments start where the parser is likely back at its initial state,
     // so that most probes are the real parse from their start.
     let bounds = segment_bounds(input, candidates, run.segment_target);
@@ -616,7 +628,7 @@ fn plan_chunks(
         let probe = &probes[segment];
         let (base, first) = match synced_at {
             None => (depth::Budget::ZERO, 0),
-            Some(index) => (probe.chunks[index].1, index + 1),
+            Some(index) => (probe.chunks[index].used, index + 1),
         };
         // Everything the probe found after the synchronization point is
         // what the real parse finds there.
@@ -627,16 +639,13 @@ fn plan_chunks(
             verdict_result(probe.verdict)?;
         }
         let at_stop = probe.total.since(base);
-        if probe.verdict == depth::Verdict::TooMuchWork
-            && (used.work.saturating_add(at_stop.work) > cap.work
-                || used.reparents.saturating_add(at_stop.reparents) > cap.reparents)
-        {
+        if probe.verdict == depth::Verdict::TooMuchWork && used.plus(at_stop).exceeds(cap) {
             // The segment's own allowance ran out, and the document's would
             // have run out by the same point of the same parse.
             return Err(SanitizeError::TooComplex);
         }
         let left = charge(&mut used, cap, probe.used.since(base))?;
-        chunks.extend(probe.chunks[first..].iter().map(|(range, _)| range.clone()));
+        chunks.extend(probe.chunks[first..].iter().cloned());
         synced_at = None;
         if probe.ends_initial {
             segment += 1;
@@ -659,15 +668,15 @@ fn plan_chunks(
             if segment == segments {
                 verdict_result(planner.finish())?;
                 charge(&mut used, cap, planner.used_at_last_cut())?;
-                chunks.extend(planner.take_chunks().into_iter().map(|(range, _)| range));
+                chunks.extend(planner.take_chunks());
                 break;
             }
             // Look for a point where the real parse meets this probe.
             let next = &probes[segment];
             let mut met = planner.at_initial_state().then_some(None);
             if met.is_none() {
-                for (index, (range, _)) in next.chunks.iter().enumerate() {
-                    verdict_result(planner.advance(range.end, &cancelled))?;
+                for (index, chunk) in next.chunks.iter().enumerate() {
+                    verdict_result(planner.advance(chunk.range.end, &cancelled))?;
                     if planner.at_initial_state() {
                         met = Some(Some(index));
                         break;
@@ -681,7 +690,7 @@ fn plan_chunks(
                 }
                 planner.close_chunk();
                 charge(&mut used, cap, planner.used_at_last_cut())?;
-                chunks.extend(planner.take_chunks().into_iter().map(|(range, _)| range));
+                chunks.extend(planner.take_chunks());
                 synced_at = point;
                 break;
             }
@@ -689,9 +698,13 @@ fn plan_chunks(
         }
     }
     debug_assert!(
-        chunks.first().is_some_and(|first| first.start == 0)
-            && chunks.windows(2).all(|pair| pair[0].end == pair[1].start)
-            && chunks.last().is_some_and(|last| last.end == input.len())
+        chunks.first().is_some_and(|first| first.range.start == 0)
+            && chunks
+                .windows(2)
+                .all(|pair| pair[0].range.end == pair[1].range.start)
+            && chunks
+                .last()
+                .is_some_and(|last| last.range.end == input.len())
     );
     Ok(chunks)
 }
@@ -702,22 +715,18 @@ fn charge(
     cap: depth::Budget,
     more: depth::Budget,
 ) -> Result<depth::Budget, SanitizeError> {
-    used.work = used.work.saturating_add(more.work);
-    used.reparents = used.reparents.saturating_add(more.reparents);
-    if used.work > cap.work || used.reparents > cap.reparents {
+    *used = used.plus(more);
+    if used.exceeds(cap) {
         Err(SanitizeError::TooComplex)
     } else {
-        Ok(depth::Budget {
-            work: cap.work - used.work,
-            reparents: cap.reparents - used.reparents,
-        })
+        Ok(cap.since(*used))
     }
 }
 
 /// Step 4 of [`sanitize`].
 fn clean_chunks(
     input: &str,
-    chunks: &[Range<usize>],
+    chunks: &[depth::Chunk],
     policy: ContentPolicy,
     run: Run<'_>,
     workers: usize,
@@ -727,7 +736,15 @@ fn clean_chunks(
     let workers = workers.min(chunks.len()).max(1);
     // One builder per worker; building one costs microseconds.
     let builders: Vec<Builder<'static>> = (0..workers).map(|_| builder(policy)).collect();
-    let outputs = in_parallel(chunks.len(), workers, |worker, index| {
+    // Outputs are appended to one buffer in input order as soon as they are
+    // next, so at most the out-of-order ones are held besides it.
+    let capacity = (input.len() + input.len() / 8).min(policy.limits().max_html_output_bytes);
+    let joined = Mutex::new(Joined {
+        output: String::with_capacity(capacity),
+        next: 0,
+        pending: BTreeMap::new(),
+    });
+    let clean = |worker: usize, index: usize| -> Result<(), SanitizeError> {
         if failed.load(Ordering::Relaxed) {
             return Err(SanitizeError::Serialization);
         }
@@ -735,47 +752,93 @@ fn clean_chunks(
             failed.store(true, Ordering::Relaxed);
             return Err(SanitizeError::Cancelled);
         }
-        let result = clean_chunk(&builders[worker], &input[chunks[index].clone()], &budget);
-        if result.is_err() {
-            failed.store(true, Ordering::Relaxed);
-        }
-        result
-    });
-    {
-        // The first real error in input order; `Serialization` placeholders
-        // only stand for chunks skipped after an earlier failure.
-        let mut first_error = None;
-        for output in &outputs {
-            if let Err(error) = output {
-                let rank = |error: &SanitizeError| match error {
-                    SanitizeError::Cancelled => 0,
-                    SanitizeError::Serialization => 2,
-                    _ => 1,
-                };
-                if first_error
-                    .as_ref()
-                    .is_none_or(|first: &SanitizeError| rank(error) < rank(first))
-                {
-                    first_error = Some(error.clone());
-                }
+        let result = clean_chunk(
+            &builders[worker],
+            &input[chunks[index].range.clone()],
+            &budget,
+        );
+        match result {
+            Ok(cleaned) => {
+                let mut joined = joined.lock().map_err(|_| SanitizeError::Serialization)?;
+                joined.add(index, cleaned);
+                Ok(())
+            }
+            Err(error) => {
+                failed.store(true, Ordering::Relaxed);
+                Err(error)
             }
         }
-        if let Some(error) = first_error {
-            return Err(error);
+    };
+    // A chunk with a large tree is cleaned alone, so at most one large DOM
+    // (up to `MAX_CHUNK_NODES`) is in memory at a time; the ordinary
+    // chunks, a few hundred KiB each, are cleaned in parallel around them.
+    let large = |index: usize| chunks[index].nodes > LARGE_CHUNK_NODES;
+    let mut results = in_parallel(chunks.len(), workers, |worker, index| {
+        if large(index) {
+            Ok(())
+        } else {
+            clean(worker, index)
         }
-        let total = outputs
-            .iter()
-            .map(|output| output.as_ref().map_or(0, String::len))
-            .sum();
-        let mut joined = String::with_capacity(total);
-        for output in outputs.into_iter().flatten() {
-            joined.push_str(&output);
+    });
+    for index in (0..chunks.len()).filter(|&index| large(index)) {
+        results[index] = clean(0, index);
+    }
+    // The first real error; `Serialization` placeholders only stand for
+    // chunks skipped after an earlier failure.
+    let rank = |error: &SanitizeError| match error {
+        SanitizeError::Cancelled => 0,
+        SanitizeError::Serialization => 2,
+        _ => 1,
+    };
+    if let Some(error) = results
+        .into_iter()
+        .filter_map(Result::err)
+        .min_by_key(|error| rank(error))
+    {
+        return Err(error);
+    }
+    let joined = joined
+        .into_inner()
+        .map_err(|_| SanitizeError::Serialization)?;
+    debug_assert!(joined.next == chunks.len() && joined.pending.is_empty());
+    Ok(joined.output)
+}
+
+/// A chunk whose tree holds more nodes than this is cleaned on its own.
+const LARGE_CHUNK_NODES: usize = 256 * 1024;
+
+/// Chunk outputs joined in input order.
+struct Joined {
+    output: String,
+    /// Index of the next chunk to append.
+    next: usize,
+    /// Finished chunks that are not next yet.
+    pending: BTreeMap<usize, String>,
+}
+
+impl Joined {
+    fn add(&mut self, index: usize, cleaned: String) {
+        if index != self.next {
+            self.pending.insert(index, cleaned);
+            return;
         }
-        Ok(joined)
+        self.output.push_str(&cleaned);
+        drop(cleaned);
+        self.next += 1;
+        while let Some(cleaned) = self.pending.remove(&self.next) {
+            self.output.push_str(&cleaned);
+            self.next += 1;
+        }
     }
 }
 
 /// Clean one chunk as a fragment and serialize it.
+///
+/// Chunking relies on ammonia's cleaning being local to each node. Its only
+/// document-wide state, the `id` → tag map in `clean_dom`, is read only for
+/// SVG `<animate>` and `<set>`, which this policy removes with their content
+/// (`ids_only_matter_for_removed_elements` checks that), so which chunk an
+/// `id` is in cannot change the output.
 fn clean_chunk(
     builder: &Builder<'static>,
     chunk: &str,
@@ -989,6 +1052,15 @@ mod tests {
             assert!(chunks.len() > 20, "{}", chunks.len());
         }
         assert!(SYNCED_INSIDE_A_SEGMENT.load(Ordering::Relaxed) > before);
+    }
+
+    #[test]
+    fn ids_only_matter_for_removed_elements() {
+        // ammonia consults its document-wide id map only for these; they
+        // must stay removed for chunked output to equal whole output.
+        for tag in ["animate", "set"] {
+            assert!(REMOVED_WITH_CONTENT.contains(&tag) && !ALLOWED_TAGS.contains(&tag));
+        }
     }
 
     #[test]

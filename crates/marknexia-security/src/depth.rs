@@ -87,6 +87,24 @@ pub(crate) const fn max_reparents(input_bytes: usize) -> usize {
     BASE_REPARENTS + input_bytes / BYTES_PER_REPARENT
 }
 
+/// Most nodes one chunk's tree may hold. The chunk is the unit of ammonia's
+/// DOM, which costs about 200 bytes per node (rcdom plus the probe's shape;
+/// 864 MiB measured for 4.19 M nodes), so this bounds one chunk's DOM to
+/// about 850 MiB. Markdown bodies create at most 0.13 nodes per byte and
+/// split into chunks of about 30,000 nodes; a 50 MiB document inside one
+/// raw `<div>` is one chunk of 3.2 M nodes.
+pub const MAX_CHUNK_NODES: usize = 4 * 1024 * 1024;
+
+/// Nodes allowed for the whole input: one per `BYTES_PER_NODE` input bytes
+/// on top of `BASE_NODES` (Markdown bodies use at most 0.13 per byte).
+pub(crate) const BASE_NODES: usize = 1024 * 1024;
+pub(crate) const BYTES_PER_NODE: usize = 3;
+
+/// Nodes allowed for an input of `input_bytes`.
+pub(crate) const fn max_nodes(input_bytes: usize) -> usize {
+    BASE_NODES + input_bytes / BYTES_PER_NODE
+}
+
 /// Work units allowed for an input of `input_bytes`.
 pub(crate) const fn max_work(input_bytes: usize) -> usize {
     input_bytes
@@ -111,17 +129,20 @@ pub(crate) fn probe(input: &str, limit: usize) -> Verdict {
     }
 }
 
-/// Work and reparent allowances for one probe run.
+/// Work, reparent and node allowances for one probe run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Budget {
     pub(crate) work: usize,
     pub(crate) reparents: usize,
+    /// Nodes created (elements, text, comments), all chunks together.
+    pub(crate) nodes: usize,
 }
 
 impl Budget {
     pub(crate) const ZERO: Self = Self {
         work: 0,
         reparents: 0,
+        nodes: 0,
     };
 
     /// What was used after `earlier`, a reading of the same counters.
@@ -129,7 +150,22 @@ impl Budget {
         Self {
             work: self.work.saturating_sub(earlier.work),
             reparents: self.reparents.saturating_sub(earlier.reparents),
+            nodes: self.nodes.saturating_sub(earlier.nodes),
         }
+    }
+
+    /// Add `more`.
+    pub(crate) const fn plus(self, more: Self) -> Self {
+        Self {
+            work: self.work.saturating_add(more.work),
+            reparents: self.reparents.saturating_add(more.reparents),
+            nodes: self.nodes.saturating_add(more.nodes),
+        }
+    }
+
+    /// Whether any counter is above `cap`'s.
+    pub(crate) const fn exceeds(self, cap: Self) -> bool {
+        self.work > cap.work || self.reparents > cap.reparents || self.nodes > cap.nodes
     }
 
     /// The allowance for a whole input of `input_bytes`.
@@ -137,8 +173,20 @@ impl Budget {
         Self {
             work: max_work(input_bytes),
             reparents: max_reparents(input_bytes),
+            nodes: max_nodes(input_bytes),
         }
     }
+}
+
+/// A chunk the probe closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Chunk {
+    pub(crate) range: Range<usize>,
+    /// The planner's budget reading when the chunk was closed.
+    pub(crate) used: Budget,
+    /// Nodes the chunk's tree holds: what ammonia's DOM of the chunk holds,
+    /// give or take merged text.
+    pub(crate) nodes: usize,
 }
 
 /// An incremental probe over `input`, starting at a point where the parser
@@ -158,8 +206,8 @@ pub(crate) struct Planner<'i> {
     chunk_start: usize,
     position: usize,
     next_candidate: usize,
-    /// Closed chunks, each with the budget used when it was closed.
-    chunks: Vec<(Range<usize>, Budget)>,
+    /// Closed chunks.
+    chunks: Vec<Chunk>,
     used_at_cut: Budget,
 }
 
@@ -183,6 +231,8 @@ impl<'i> Planner<'i> {
             work: Cell::new(0),
             reparents: Cell::new(0),
             max_reparents: budget.reparents,
+            created: Cell::new(0),
+            max_nodes: budget.nodes,
             verdict: Rc::clone(&verdict),
         };
         let parser = parse_fragment(
@@ -284,8 +334,12 @@ impl<'i> Planner<'i> {
     pub(crate) fn close_chunk(&mut self) {
         self.used_at_cut = self.used();
         if self.chunk_start < self.position {
-            self.chunks
-                .push((self.chunk_start..self.position, self.used_at_cut));
+            let nodes = self.parser.tokenizer.sink.sink.live_nodes();
+            self.chunks.push(Chunk {
+                range: self.chunk_start..self.position,
+                used: self.used_at_cut,
+                nodes,
+            });
         }
         self.chunk_start = self.position;
         self.parser.tokenizer.sink.sink.forget_finished_nodes();
@@ -308,9 +362,8 @@ impl<'i> Planner<'i> {
         self.chunk_start
     }
 
-    /// Closed chunks so far, in order, each with the budget used when it
-    /// was closed.
-    pub(crate) fn take_chunks(&mut self) -> Vec<(Range<usize>, Budget)> {
+    /// Closed chunks so far, in order.
+    pub(crate) fn take_chunks(&mut self) -> Vec<Chunk> {
         std::mem::take(&mut self.chunks)
     }
 
@@ -320,6 +373,7 @@ impl<'i> Planner<'i> {
         Budget {
             work: sink.work.get(),
             reparents: sink.reparents.get(),
+            nodes: sink.created.get(),
         }
     }
 
@@ -397,6 +451,8 @@ struct DepthSink {
     work: Cell<usize>,
     reparents: Cell<usize>,
     max_reparents: usize,
+    created: Cell<usize>,
+    max_nodes: usize,
     verdict: Rc<Cell<Verdict>>,
 }
 
@@ -425,7 +481,24 @@ impl DepthSink {
     fn push(&self, node: Node) -> usize {
         let mut nodes = self.nodes.borrow_mut();
         nodes.push(node);
+        self.note_node(nodes.len());
         nodes.len() - 1
+    }
+
+    /// Count a created node; `live` is the tree's node count now. Fails once
+    /// the chunk's tree or the document's node total is over its limit, so
+    /// ammonia's DOM never grows past them.
+    fn note_node(&self, live: usize) {
+        let created = self.created.get() + 1;
+        self.created.set(created);
+        if created > self.max_nodes || live.saturating_sub(ROOT + 1) > MAX_CHUNK_NODES {
+            self.fail(Verdict::TooMuchWork);
+        }
+    }
+
+    /// Nodes in the current chunk's tree.
+    fn live_nodes(&self) -> usize {
+        self.nodes.borrow().len().saturating_sub(ROOT + 1)
     }
 
     fn detach(&self, nodes: &mut [Node], child: usize) {
@@ -492,6 +565,7 @@ impl DepthSink {
         let mut nodes = self.nodes.borrow_mut();
         if !matches!(nodes[parent].children.last(), Some(&last) if nodes[last].is_text) {
             let id = Self::new_text_node(&mut nodes, parent);
+            self.note_node(nodes.len());
             nodes[parent].children.push(id);
             self.charge(1);
         }
@@ -514,6 +588,7 @@ impl DepthSink {
             .is_some_and(|index| nodes[nodes[parent].children[index]].is_text);
         if !merges {
             let id = Self::new_text_node(&mut nodes, parent);
+            self.note_node(nodes.len());
             let len = nodes[parent].children.len();
             nodes[parent].children.insert(position, id);
             self.charge(len - position + 1);
