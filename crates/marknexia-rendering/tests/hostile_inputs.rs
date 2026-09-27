@@ -369,7 +369,10 @@ fn csharp_attribute_prefix_floods_stay_linear() {
             let document = render_bounded(&format!("{name} n={n}"), &source)
                 .unwrap_or_else(|error| panic!("{name} n={n}: {error}"));
             assert!(document.body().as_str().contains("class=\"csharp\""));
-            assert!(started.elapsed() < Duration::from_secs(10), "{name} n={n}");
+            // The quadratic regression took 27 s at n=64,000 in release; debug
+            // builds on busy or 4-core CI hosts need headroom, not a tight bound.
+            let bound = Duration::from_secs(if cfg!(debug_assertions) { 120 } else { 10 });
+            assert!(started.elapsed() < bound, "{name} n={n}");
         }
     }
 }

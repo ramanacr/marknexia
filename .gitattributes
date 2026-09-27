@@ -1,0 +1,3 @@
+# Frozen .NET oracle fixtures are byte-exact LF (see compat/README.md);
+# checkout must not convert them, or digest verification fails.
+compat/fixtures/** text eol=lf
