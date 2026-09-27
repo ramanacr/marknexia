@@ -11,7 +11,7 @@
 //! string heap) into a direct matcher with the same backtracking outcome.
 //! Memoized failure bounds keep the scan linear where the regex is quadratic.
 
-use crate::text::{html_encode, is_space, is_word};
+use crate::text::{html_encode, html_encoded_len, is_space, is_word};
 
 /// `ColorCodeSyntaxHighlighter.HighlightCode`, or `None` as soon as the
 /// output would exceed `limit` bytes.
@@ -21,17 +21,34 @@ pub(crate) fn highlight(code: &str, language: &str, limit: usize) -> Option<Stri
     }
     let mut out = String::with_capacity((code.len() * 2 + 64).min(limit));
     if is_csharp(language) {
-        out.push_str("<div class=\"csharp\"><pre>\n");
+        out.push_str(CSHARP_OPEN);
         if !CSharp::new(code).write(&mut out, limit) {
             return None;
         }
-        out.push_str("\n</pre></div>");
+        out.push_str(CSHARP_CLOSE);
     } else {
-        out.push_str("<pre><code>");
+        out.push_str(PLAIN_OPEN);
         html_encode(code, &mut out);
-        out.push_str("</code></pre>");
+        out.push_str(PLAIN_CLOSE);
     }
     (out.len() <= limit).then_some(out)
+}
+
+const CSHARP_OPEN: &str = "<div class=\"csharp\"><pre>\n";
+const CSHARP_CLOSE: &str = "\n</pre></div>";
+const PLAIN_OPEN: &str = "<pre><code>";
+const PLAIN_CLOSE: &str = "</code></pre>";
+
+/// Exact lower bound of `highlight(code, language, _)`'s length: exact for
+/// the plain fallback; highlighted C# adds spans around the encoded code.
+pub(crate) fn minimum_len(code: &str, language: &str) -> usize {
+    if code.is_empty() {
+        0
+    } else if is_csharp(language) {
+        CSHARP_OPEN.len() + html_encoded_len(code) + CSHARP_CLOSE.len()
+    } else {
+        PLAIN_OPEN.len() + html_encoded_len(code) + PLAIN_CLOSE.len()
+    }
 }
 
 /// `ResolveLanguage` for C#: `c#`/`cs` map to `csharp`, and ColorCode's C#

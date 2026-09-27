@@ -40,10 +40,16 @@ pub(crate) fn html_encode(text: &str, out: &mut String) {
     out.push_str(&text[last..]);
 }
 
-pub(crate) fn html_encoded(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + text.len() / 8);
-    html_encode(text, &mut out);
-    out
+/// Length of `html_encode(text)`.
+pub(crate) fn html_encoded_len(text: &str) -> usize {
+    text.bytes()
+        .map(|byte| match byte {
+            b'<' | b'>' => 4,
+            b'&' | b'\'' => 5,
+            b'"' => 6,
+            _ => 1,
+        })
+        .sum()
 }
 
 /// `System.Net.WebUtility.HtmlDecode`: an entity runs from `&` to the next
@@ -139,6 +145,19 @@ pub(crate) fn escape_data_string(text: &str, out: &mut String) {
             out.push(char::from(HEX[usize::from(byte & 0x0F)]));
         }
     }
+}
+
+/// Length of `escape_data_string(text)`.
+pub(crate) fn escaped_data_string_len(text: &str) -> usize {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                1
+            } else {
+                3
+            }
+        })
+        .sum()
 }
 
 /// ASCII case-insensitive `starts_with` at a byte offset.

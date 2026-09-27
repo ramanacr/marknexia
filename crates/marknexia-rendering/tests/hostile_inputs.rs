@@ -12,8 +12,9 @@ use marknexia_rendering::{
 use marknexia_security::{ContentPolicy, HtmlPolicy, SanitizeError};
 
 const ONE_MIB: usize = 1024 * 1024;
-/// Generous for unoptimized builds; release runs are far faster.
-const CASE_BUDGET: Duration = Duration::from_secs(60);
+/// Generous for unoptimized builds; release runs are far faster. A 4 MiB C#
+/// block renders to a 36 MB page, sanitized as one chunk.
+const CASE_BUDGET: Duration = Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
 
 fn context() -> RenderContext {
     RenderContext::new(
@@ -380,13 +381,13 @@ fn csharp_attribute_prefix_floods_stay_linear() {
 #[test]
 fn amplifying_blocks_fail_before_building_huge_strings() {
     // `1 ` highlights to ~30 bytes per 2 input bytes; the pass must reject
-    // against the budget instead of building tens of MiB first.
-    let digits = format!("```cs\n{}\n```\n", "1 ".repeat(1_500_000));
+    // against the 128 MiB budget instead of building far past it first.
+    let digits = format!("```cs\n{}\n```\n", "1 ".repeat(4_600_000));
     assert!(matches!(
         render_bounded("digits", &digits),
         Err(RenderError::Sanitizer(SanitizeError::InputTooLarge { .. }))
     ));
-    let fractions = format!("${}$", r"\frac{a}{b}".repeat(300_000));
+    let fractions = format!("${}$", r"\frac{a}{b}".repeat(1_300_000));
     assert!(matches!(
         render_bounded("fractions", &fractions),
         Err(RenderError::Sanitizer(SanitizeError::InputTooLarge { .. }))
@@ -404,6 +405,35 @@ fn deep_math_inside_deep_markdown_stays_within_sanitizer_depth() {
         let document = render_bounded("deep-math-in-markdown", &source).expect("renders");
         assert!(document.body().as_str().contains("marknexia-fraction"));
     });
+}
+
+#[test]
+fn remote_image_sources_are_blanked_like_dotnet() {
+    // REND-4: one sanitizer pass under `RemoteImagePolicy::Blank` leaves
+    // what .NET's sanitize-then-`BlockRemoteImages` leaves, for `https://`,
+    // `http://` and `//` alike.
+    for (source, expected) in [
+        (
+            "![r](https://h.test/a.png)",
+            "<p><img src=\"\" alt=\"r\"></p>\n",
+        ),
+        (
+            "![r](http://h.test/a.png)",
+            "<p><img src=\"\" alt=\"r\"></p>\n",
+        ),
+        (
+            "<img src=\"//h.test/a.png\" alt=\"p\">",
+            "<img src=\"\" alt=\"p\">
+",
+        ),
+        (
+            "![l](local.png)",
+            "<p><img src=\"local.png\" alt=\"l\"></p>\n",
+        ),
+    ] {
+        let document = Renderer::new().render(source, &context()).unwrap();
+        assert_eq!(document.body().as_str(), expected, "{source}");
+    }
 }
 
 #[test]

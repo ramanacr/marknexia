@@ -9,7 +9,7 @@
 //! sanitizer's 256-level depth limit even under the deepest Markdown nesting
 //! (32 block + 32 inline containers).
 
-use crate::text::html_encode;
+use crate::text::{html_encode, html_encoded_len};
 
 /// Element-nesting budget for rendered math: `^`, `_` and `\text` cost one
 /// level, `\frac` and `\sqrt` two (they emit nested spans). At most
@@ -127,12 +127,22 @@ pub(crate) fn render(expression: &str, display: bool, limit: usize) -> Option<St
 }
 
 /// The .NET fallback when math rendering is disabled.
+/// The fallback's attributes after `<span` or `<div`.
+const FALLBACK_ATTRIBUTES: &str = " class=\"marknexia-math-fallback\" role=\"math\">";
+
+/// Length of `fallback(expression, display)`.
+pub(crate) fn fallback_len(expression: &str, display: bool) -> usize {
+    let tag = if display { "div" } else { "span" };
+    // `<tag` + attributes + encoded expression + `</tag>`.
+    1 + tag.len() + FALLBACK_ATTRIBUTES.len() + html_encoded_len(expression) + 3 + tag.len()
+}
+
 pub(crate) fn fallback(expression: &str, display: bool) -> String {
     let tag = if display { "div" } else { "span" };
-    let mut out = String::with_capacity(expression.len() + 64);
+    let mut out = String::with_capacity(fallback_len(expression, display));
     out.push('<');
     out.push_str(tag);
-    out.push_str(" class=\"marknexia-math-fallback\" role=\"math\">");
+    out.push_str(FALLBACK_ATTRIBUTES);
     html_encode(expression, &mut out);
     out.push_str("</");
     out.push_str(tag);

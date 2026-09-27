@@ -7,9 +7,14 @@
 //! 2. wrap code blocks in the copy-button container and highlight C#;
 //! 3. replace Mermaid blocks with the diagram shell or a limit fallback;
 //! 4. render math spans with the local TeX subset;
-//! 5. sanitize with [`HtmlPolicy::sanitize_fragment`] and, with remote assets
-//!    off, blank remote image sources exactly where .NET does;
+//! 5. sanitize with [`HtmlPolicy::sanitize_fragment`]; with remote assets off
+//!    the policy blanks remote image sources where .NET does
+//!    ([`RemoteImagePolicy::Blank`]);
 //! 6. enforce the full-page size limit of the .NET template.
+//!
+//! Documents up to the .NET limits (50 MiB of source, 128 MiB of page) are
+//! rendered; the sanitizer cleans large bodies in parallel chunks.
+//! [`Renderer::render_cancellable`] lets a caller stop a render in flight.
 //!
 //! Unsanitized markup never leaves this crate: [`RenderedDocument`] holds the
 //! body only as a [`SanitizedFragment`] and all metadata as [`PlainText`],
@@ -34,6 +39,22 @@ use marknexia_markdown::{MarkdownEngine, MarkdownOptions, ParsedDocument};
 use marknexia_security::{
     ContentPolicy, HtmlPolicy, PolicyLimits, RemoteImagePolicy, SanitizeError, SanitizedFragment,
 };
+
+/// Test hooks. Not part of the API.
+#[doc(hidden)]
+pub mod testing {
+    use super::{MarkdownEngine, RenderContext, RenderError, Renderer};
+
+    /// The body after the code, diagram and math passes, before
+    /// sanitization: what the sanitizer receives.
+    pub fn unsanitized_body<E: MarkdownEngine>(
+        renderer: &Renderer<E>,
+        source: &str,
+        context: &RenderContext,
+    ) -> Result<String, RenderError> {
+        renderer.body_before_sanitizing(source, context, &|| false)
+    }
+}
 
 pub use math::MAX_MATH_DEPTH;
 pub use template::{InvalidPageIdentity, PageIdentity};
@@ -115,9 +136,11 @@ pub enum RenderError {
         size_bytes: Option<u64>,
         maximum_bytes: u64,
     },
-    /// The sanitizer refused the body (its budgets are lower than .NET's;
-    /// REND-1). No partial output exists.
+    /// The sanitizer refused the body (nesting, work and size budgets that
+    /// .NET does not have; REND-1). No partial output exists.
     Sanitizer(SanitizeError),
+    /// The caller's cancellation callback returned `true`.
+    Cancelled,
 }
 
 impl fmt::Display for RenderError {
@@ -149,6 +172,7 @@ impl fmt::Display for RenderError {
                 "rendered document exceeds the {maximum_bytes}-byte limit"
             ),
             Self::Sanitizer(error) => write!(f, "sanitizer rejected the document: {error}"),
+            Self::Cancelled => f.write_str("rendering was cancelled"),
         }
     }
 }
@@ -352,47 +376,71 @@ impl<E: MarkdownEngine> Renderer<E> {
         }
     }
 
-    fn render_document(
+    /// [`DocumentRenderer::render`] that polls `cancel` between stages and
+    /// inside the sanitizer (at most about 16 KiB of body apart) and returns
+    /// [`RenderError::Cancelled`], with no partial output, once it returns
+    /// `true`. `cancel` may be called from several threads.
+    pub fn render_cancellable(
         &self,
         source: &str,
         context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<RenderedDocument, RenderError> {
+        self.render_document(source, context, cancel)
+    }
+
+    /// Steps 1 to 3b: the parsed document and the body the sanitizer gets.
+    fn prepare<'c>(
+        &self,
+        source: &str,
+        context: &'c RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Prepared<'c>, RenderError> {
+        let checkpoint = || {
+            if cancel() {
+                Err(RenderError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         self.check_source_size(source.len() as u64)?;
         let segments = directory_segments(&context.document_directory)?;
+        checkpoint()?;
         let maximum_bytes = self.limits.max_rendered_html_bytes;
-        let too_large = |size_bytes: Option<usize>| RenderError::RenderedTooLarge {
-            size_bytes: size_bytes.map(|size| size as u64),
-            maximum_bytes: maximum_bytes as u64,
-        };
         let options = MarkdownOptions {
             max_diagram_count: self.limits.max_diagram_count,
             max_diagram_source_bytes: self.limits.max_diagram_source_bytes,
             // The body can never exceed the page, so the parser may stop here.
             max_rendered_body_bytes: maximum_bytes,
         };
-        let parsed = self
-            .engine
-            .parse(source, &options)
-            .map_err(|_| too_large(None))?;
+        let mut parsed =
+            self.engine
+                .parse(source, &options)
+                .map_err(|_| RenderError::RenderedTooLarge {
+                    size_bytes: None,
+                    maximum_bytes: maximum_bytes as u64,
+                })?;
+        checkpoint()?;
 
-        // Every pass runs within the sanitizer's input budget, which binds
-        // before the page limit; passes check estimates before building each
-        // block, so intermediate strings stay near the budget.
-        let sanitizer_limits = PolicyLimits::default();
-        let budget = sanitizer_limits.max_html_input_bytes;
+        // Every pass runs within the sanitizer's input budget (the .NET page
+        // limit); passes check exact sizes before building each block, so
+        // intermediate strings stay within the budget. Each pass consumes the
+        // previous body, so only one intermediate string is alive at a time.
+        let budget = PolicyLimits::default().max_html_input_bytes;
         let over_budget = |_| {
             RenderError::Sanitizer(SanitizeError::InputTooLarge {
                 kind: "HTML",
                 limit: budget,
             })
         };
-        if parsed.rendered_body_html.len() > budget {
+        let body = std::mem::take(&mut parsed.rendered_body_html);
+        if body.len() > budget {
             return Err(over_budget(passes::Overflow));
         }
-        let body = passes::highlight_code_blocks(&parsed.rendered_body_html, budget)
-            .map_err(over_budget)?;
+        let body = passes::highlight_code_blocks(body, budget).map_err(over_budget)?;
+        checkpoint()?;
         let (body, has_mermaid) = passes::transform_diagrams(
-            &body,
+            body,
             passes::DiagramSettings {
                 enabled: context.enable_diagrams,
                 max_count: self.limits.max_diagram_count,
@@ -401,8 +449,43 @@ impl<E: MarkdownEngine> Renderer<E> {
             budget,
         )
         .map_err(over_budget)?;
-        let body = passes::render_math(&body, context.enable_math, budget).map_err(over_budget)?;
-        let body = sanitize_body(&body, context.allow_remote_assets, sanitizer_limits)?;
+        checkpoint()?;
+        let body = passes::render_math(body, context.enable_math, budget).map_err(over_budget)?;
+        checkpoint()?;
+        Ok(Prepared {
+            parsed,
+            body,
+            has_mermaid,
+            segments,
+        })
+    }
+
+    fn body_before_sanitizing(
+        &self,
+        source: &str,
+        context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<String, RenderError> {
+        self.prepare(source, context, cancel)
+            .map(|prepared| prepared.body)
+    }
+
+    fn render_document(
+        &self,
+        source: &str,
+        context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<RenderedDocument, RenderError> {
+        let Prepared {
+            parsed,
+            body,
+            has_mermaid,
+            segments,
+        } = self.prepare(source, context, cancel)?;
+        let body = sanitize_body(body, context.allow_remote_assets, cancel)?;
+        if cancel() {
+            return Err(RenderError::Cancelled);
+        }
 
         let head = template::PageHead::new(
             context.theme,
@@ -413,11 +496,23 @@ impl<E: MarkdownEngine> Renderer<E> {
         );
         let mut counter = template::Counter(0);
         head.write(body.as_str(), &mut counter);
+        let maximum_bytes = self.limits.max_rendered_html_bytes;
         if counter.0 > maximum_bytes {
-            return Err(too_large(Some(counter.0)));
+            return Err(RenderError::RenderedTooLarge {
+                size_bytes: Some(counter.0 as u64),
+                maximum_bytes: maximum_bytes as u64,
+            });
         }
         Ok(assemble(parsed, body, head, counter.0, has_mermaid))
     }
+}
+
+/// The parsed document (its body moved out) and the body after the passes.
+struct Prepared<'c> {
+    parsed: ParsedDocument,
+    body: String,
+    has_mermaid: bool,
+    segments: Vec<&'c str>,
 }
 
 impl<E: MarkdownEngine> DocumentRenderer for Renderer<E> {
@@ -426,42 +521,39 @@ impl<E: MarkdownEngine> DocumentRenderer for Renderer<E> {
         source: &str,
         context: &RenderContext,
     ) -> Result<RenderedDocument, RenderError> {
-        self.render_document(source, context)
+        self.render_document(source, context, &|| false)
     }
 }
 
-/// Steps 4 and 4b. .NET sanitizes (keeping remote images) and then blanks
-/// remote `src`/`srcset` on the sanitized markup. Rust does the same, then
-/// sanitizes the blanked markup again under the deny policy so the result is
-/// a `SanitizedFragment` produced under the document's real policy. The
-/// remote-image policy only affects `src` attributes, so without a `src` in
-/// the input one deny-policy pass is equivalent.
+/// Steps 4 and 4b in one sanitizer pass. .NET sanitizes (keeping remote
+/// images) and then blanks remote `<img src>` on the sanitized markup; the
+/// sanitizer's `Blank` policy takes the same decision on the parsed value
+/// (REND-4). As in .NET's `HtmlSanitizerService`, a body that is only white
+/// space (`char.IsWhiteSpace`, the Unicode `White_Space` set) becomes empty.
 fn sanitize_body(
-    body: &str,
+    body: String,
     allow_remote_assets: bool,
-    limits: PolicyLimits,
+    cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<SanitizedFragment, RenderError> {
-    let policy = |remote| {
-        ContentPolicy::try_new(limits, remote)
-            .map(HtmlPolicy::new)
-            .map_err(RenderError::Sanitizer)
+    let remote = if allow_remote_assets {
+        RemoteImagePolicy::AllowHttps
+    } else {
+        RemoteImagePolicy::Blank
     };
-    let allow = policy(RemoteImagePolicy::AllowHttps)?;
-    if allow_remote_assets {
-        return allow
-            .sanitize_fragment(body)
-            .map_err(RenderError::Sanitizer);
-    }
-    let deny = policy(RemoteImagePolicy::Deny)?;
-    if text::find_ci(body, 0, "src").is_none() {
-        return deny.sanitize_fragment(body).map_err(RenderError::Sanitizer);
-    }
-    let permissive = allow
-        .sanitize_fragment(body)
+    let policy = ContentPolicy::try_new(PolicyLimits::default(), remote)
+        .map(HtmlPolicy::new)
         .map_err(RenderError::Sanitizer)?;
-    let blanked = passes::block_remote_images(permissive.as_str());
-    deny.sanitize_fragment(&blanked)
-        .map_err(RenderError::Sanitizer)
+    let input = if body.chars().all(char::is_whitespace) {
+        ""
+    } else {
+        body.as_str()
+    };
+    policy
+        .sanitize_fragment_cancellable(input, cancel)
+        .map_err(|error| match error {
+            SanitizeError::Cancelled => RenderError::Cancelled,
+            error => RenderError::Sanitizer(error),
+        })
 }
 
 /// .NET `DocumentAssetContext.Create`: the document directory relative to

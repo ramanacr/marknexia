@@ -87,12 +87,16 @@ impl XorShift {
     }
 }
 
+/// The renderer's policy: remote images kept (remote assets on) or blanked.
 fn policy(remote: bool) -> HtmlPolicy {
-    let remote = if remote {
+    policy_for(if remote {
         RemoteImagePolicy::AllowHttps
     } else {
-        RemoteImagePolicy::Deny
-    };
+        RemoteImagePolicy::Blank
+    })
+}
+
+fn policy_for(remote: RemoteImagePolicy) -> HtmlPolicy {
     HtmlPolicy::new(ContentPolicy::try_new(PolicyLimits::default(), remote).unwrap())
 }
 
@@ -106,18 +110,16 @@ fn random_documents_keep_the_fuzz_invariants() {
             .map(|_| TOKENS[(rng.next() % TOKENS.len() as u64) as usize])
             .collect();
         let remote = flags & 1 != 0;
-        let html = policy(remote);
+        let html = if flags & 8 != 0 {
+            policy_for(RemoteImagePolicy::Deny)
+        } else {
+            policy(remote)
+        };
         if let Ok(clean) = html.sanitize_fragment(&input) {
+            // Sanitizing is a fixed point, including white space and line
+            // feeds after `<pre>`/`<textarea>` (I2, M1).
             let again = html.sanitize_fragment(clean.as_str()).unwrap();
-            assert_eq!(
-                again.as_str(),
-                if clean.as_str().trim().is_empty() {
-                    String::new()
-                } else {
-                    drop_one_lf_after_pre(clean.as_str())
-                },
-                "#{iteration} sanitizer: {input:?}"
-            );
+            assert_eq!(again, clean, "#{iteration} sanitizer: {input:?}");
         }
         let limits = RenderLimits {
             max_rendered_html_bytes: if flags & 0x10 != 0 {
@@ -157,12 +159,7 @@ fn random_documents_keep_the_fuzz_invariants() {
                 }
             }
             let again = policy(remote).sanitize_fragment(body).unwrap();
-            // The sanitizer maps white-space-only input to "" by design.
-            let expected = if body.trim().is_empty() {
-                String::new()
-            } else {
-                drop_one_lf_after_pre(body)
-            };
+            let expected = body;
             if again.as_str() != expected {
                 let at = expected
                     .bytes()
@@ -182,36 +179,23 @@ fn random_documents_keep_the_fuzz_invariants() {
     }
 }
 
-/// Known sanitizer drift (reported; owned by `marknexia-security`): a `<pre>`
-/// whose text starts with a line feed serializes as `<pre>` + LF, and HTML
-/// parsing drops a line feed right after `<pre>`, so each re-sanitization
-/// removes one. Everything else must be a fixed point.
-fn drop_one_lf_after_pre(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("<pre") {
-        let Some(close) = rest[start..].find('>') else {
-            break;
-        };
-        let end = start + close + 1;
-        let is_pre = matches!(rest.as_bytes().get(start + 4), Some(b'>' | b' '));
-        out.push_str(&rest[..end]);
-        rest = &rest[end..];
-        if is_pre && let Some(stripped) = rest.strip_prefix('\n') {
-            rest = stripped;
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 #[test]
-fn pre_leading_line_feed_drift_is_still_present() {
-    // Remove this test and `drop_one_lf_after_pre` once the security crate
-    // makes `<pre>` serialization a fixed point.
+fn leading_line_feeds_in_pre_and_textarea_are_a_fixed_point() {
+    // I2: the parser drops one line feed after `<pre>`/`<textarea>`; the
+    // serializer writes it back when the text starts with a line feed.
     let policy = HtmlPolicy::new(ContentPolicy::default());
-    let once = policy.sanitize_fragment("<pre>\n\nx</pre>").unwrap();
-    assert_eq!(once.as_str(), "<pre>\nx</pre>");
-    let twice = policy.sanitize_fragment(once.as_str()).unwrap();
-    assert_eq!(twice.as_str(), "<pre>x</pre>");
+    for (input, expected) in [
+        ("<pre>\n\nx</pre>", "<pre>\n\nx</pre>"),
+        ("<pre>\nx</pre>", "<pre>x</pre>"),
+        ("<pre>\n\n\nx</pre>", "<pre>\n\n\nx</pre>"),
+        ("<textarea>\n\nx</textarea>", "<textarea>\n\nx</textarea>"),
+        ("<pre><x-foo>\nabc</x-foo></pre>", "<pre>\n\nabc</pre>"),
+        ("<pre><!--c-->\nabc</pre>", "<pre>\n\nabc</pre>"),
+        ("<pre><b>\nx</b></pre>", "<pre><b>\nx</b></pre>"),
+    ] {
+        let once = policy.sanitize_fragment(input).unwrap();
+        assert_eq!(once.as_str(), expected, "{input:?}");
+        let twice = policy.sanitize_fragment(once.as_str()).unwrap();
+        assert_eq!(twice, once, "{input:?}");
+    }
 }
