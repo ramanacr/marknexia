@@ -1173,3 +1173,26 @@ fn byte_order_mark_at_a_probe_piece_boundary_still_counts_depth() {
     // A leading byte order mark is still discarded, as by ammonia.
     assert_eq!(html("\u{feff}<p>a</p>"), "<p>a</p>");
 }
+
+#[test]
+fn a_chunk_tree_over_the_node_limit_is_too_complex() {
+    // Review I3: one paragraph has no split point, so its whole tree is one
+    // chunk; above MAX_CHUNK_NODES it is rejected before ammonia builds it.
+    // (Release only: the input is 16 MiB.)
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let policy = HtmlPolicy::new(ContentPolicy::default());
+    let limit = marknexia_security::MAX_CHUNK_NODES;
+    // `<b>x</b>` adds two nodes (element and text).
+    let under = format!("<p>{}</p>", "<b>x</b>".repeat(limit / 2 - 16));
+    assert!(policy.sanitize_fragment(&under).is_ok());
+    let over = format!("<p>{}</p>", "<b>x</b>".repeat(limit / 2 + 16));
+    assert_eq!(
+        policy.sanitize_fragment(&over),
+        Err(SanitizeError::TooComplex)
+    );
+    // The same nodes over many blocks split into chunks and pass.
+    let split = "<p><b>x</b></p>\n".repeat(limit / 2 + 16);
+    assert!(policy.sanitize_fragment(&split).is_ok());
+}

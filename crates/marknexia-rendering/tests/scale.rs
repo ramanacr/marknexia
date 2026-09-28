@@ -171,6 +171,15 @@ fn one_block(size: usize) -> String {
     format!("<div>\n\n{}\n\n</div>\n", prose(size - 20))
 }
 
+/// Review I3's worst Markdown shapes for the model and body size.
+fn emphasis(size: usize) -> String {
+    fill(size, &["*a* "])
+}
+
+fn tight_list(size: usize) -> String {
+    fill(size, &["- x\n"])
+}
+
 fn one_paragraph(size: usize) -> String {
     fill(size, &["word "])
 }
@@ -205,6 +214,8 @@ const SHAPES: &[Shape] = &[
     ("mixed", mixed),
     ("one-block", one_block),
     ("one-paragraph", one_paragraph),
+    ("emphasis *a*", emphasis),
+    ("tight-list - x", tight_list),
 ];
 
 fn sizes() -> Vec<usize> {
