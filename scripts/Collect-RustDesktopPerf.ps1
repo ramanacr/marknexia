@@ -201,17 +201,32 @@ function Invoke-Run([string]$UserData) {
     }
 }
 
+# A launch can fail transiently on hosted runners (e.g. STATUS_DLL_INIT_FAILED
+# 0xC0000142 when desktop resources run low). Retry such a run at most twice;
+# every retry is recorded in the samples so nothing is hidden.
+$script:retries = [System.Collections.Generic.List[object]]::new()
+function Invoke-MeasuredRun([string]$UserData, [string]$Label) {
+    for ($attempt = 1; ; $attempt++) {
+        try { return Invoke-Run $UserData }
+        catch {
+            if ($attempt -ge 3 -or "$_" -notmatch 'Shell exited early') { throw }
+            $script:retries.Add([ordered]@{ run = $Label; attempt = $attempt; reason = "$_" })
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
 $profileRoot = Join-Path ([IO.Path]::GetTempPath()) "marknexia-perf-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $profileRoot | Out-Null
 try {
     $cold = foreach ($index in 1..$Runs) {
         $folder = Join-Path $profileRoot "cold-$index"
-        Invoke-Run $folder
+        Invoke-MeasuredRun $folder "cold-$index"
         Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
     }
     $warmFolder = Join-Path $profileRoot 'warm'
-    [void](Invoke-Run $warmFolder)
-    $warm = foreach ($index in 1..$Runs) { Invoke-Run $warmFolder }
+    [void](Invoke-MeasuredRun $warmFolder 'warm-prime')
+    $warm = foreach ($index in 1..$Runs) { Invoke-MeasuredRun $warmFolder "warm-$index" }
 }
 finally {
     Remove-Item -LiteralPath $profileRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -223,6 +238,7 @@ $samples = [ordered]@{
     coldDefinition = 'fresh WebView2 user-data folder per run; OS file cache not flushed'
     warmDefinition = 'shared WebView2 user-data folder primed by one discarded run'
     webViewResidency = 'separate-process'
+    retriedRuns = @($script:retries)
     provenance = [ordered]@{
         commit = $artifact.commit
         fixtureDigest = $fixtureDigest

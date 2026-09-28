@@ -29,7 +29,7 @@ use windows::{
             },
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_TAB,
+                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_TAB,
             },
             WindowsAndMessaging::{
                 EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
@@ -357,7 +357,15 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
         owner == shell.0.id()
     };
     let deadline = Instant::now() + Duration::from_secs(10);
+    // On CI runners no user owns the foreground, and Windows refuses
+    // SetForegroundWindow from a background process. A synthetic Alt press
+    // releases the foreground lock. It is only used when CI=true, never on a
+    // developer desktop where it could reach another application.
+    let on_ci = std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true"));
     while !shell_is_foreground() && Instant::now() < deadline {
+        if on_ci {
+            send_chord(&[VK_MENU]);
+        }
         let _ = unsafe { SetForegroundWindow(hwnd) };
         let _ = unsafe { root.SetFocus() };
         thread::sleep(Duration::from_millis(200));
