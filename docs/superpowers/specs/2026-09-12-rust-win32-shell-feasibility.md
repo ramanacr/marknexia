@@ -195,6 +195,17 @@ These supersede the matching statements above.
     a regular file.
   - This is stricter than .NET: `FileStream` refuses non-disk handles for
     ordinary paths but allows UNC shares.
+  - Superseded by owner decision (2026-09-28): UNC shares open as in .NET.
+    `check_document_path` accepts `\\server\share\...` and
+    `\\?\UNC\server\share\...` alongside drive paths. It refuses `\\.\`
+    and other `\\?\` forms, the `pipe`/`mailslot` pseudo-shares, `..` in
+    UNC paths, reserved device names and alternate data streams. After
+    opening, `GetFinalPathNameByHandleW` must yield a final path that
+    passes the same gate, so a reparse point cannot lead to a pipe or
+    device namespace; files Windows cannot name that way are refused. A
+    headless test opens the fixture through `\\localhost\<drive>$\`, which
+    succeeded on the x64 host. QoS, `FILE_TYPE_DISK` and regular-file
+    checks are unchanged.
   - An over-limit read reports the file's current size.
   - `file:///` and `file://` arguments convert like the .NET
     `PathCanonicalizer`.

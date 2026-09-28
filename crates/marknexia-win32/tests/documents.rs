@@ -13,8 +13,9 @@ use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{PageIdentity, RenderError};
 use marknexia_win32::documents::{
     OpenError, RenderJob, RenderOutcome, RenderPool, RenderTickets, SourceEncoding, build_document,
-    decode_source, read_source, startup_paths, tab_title,
+    check_document_path, decode_source, read_source, startup_paths, tab_title,
 };
+
 fn os(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
@@ -139,7 +140,7 @@ fn reads_are_size_checked_before_reading_and_bounded() {
 }
 
 #[test]
-fn device_pipe_unc_and_directory_paths_are_refused_before_reading() {
+fn device_pipe_and_directory_paths_are_refused_before_reading() {
     let opened = std::cell::Cell::new(false);
     let check = |_| {
         opened.set(true);
@@ -151,9 +152,15 @@ fn device_pipe_unc_and_directory_paths_are_refused_before_reading() {
         r"\\.\C:",
         r"\\?\GLOBALROOT\Device\Null",
         r"\\?\pipe\marknexia-test",
-        r"\\?\UNC\server\share\x.md",
         r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x.md",
-        r"\\server\share\x.md",
+        r"\\server\pipe\marknexia-test",
+        r"\\?\UNC\server\PIPE\marknexia-test",
+        r"\\server\mailslot\x",
+        r"\\.\share\x.md",
+        r"\\server\share\..\..\x.md",
+        r"\\server\share\CON.md",
+        r"\\server\share\x.md:stream",
+        r"\\server",
         r"C:\NUL",
         r"C:\docs\CON.md",
         r"C:\docs\COM1",
@@ -173,6 +180,39 @@ fn device_pipe_unc_and_directory_paths_are_refused_before_reading() {
         read_source(&directory, |_| Ok(()), 1 << 20),
         Err(OpenError::UnsupportedPath | OpenError::Io(_))
     ));
+}
+
+#[test]
+fn drive_and_unc_share_paths_pass_the_lexical_gate() {
+    for path in [
+        r"C:\docs\notes.md",
+        r"\\?\C:\docs\notes.md",
+        r"\\server\share\docs\notes.md",
+        r"//server/share/notes.md",
+        r"\\?\UNC\server\share\notes.md",
+        r"\\?\unc\server\share\notes.md",
+        r"\\server\c$\notes.md",
+    ] {
+        assert_eq!(check_document_path(path), Ok(()), "{path}");
+    }
+}
+
+/// A real UNC open through the local administrative share, when this host
+/// allows it: the final path is `\\?\UNC\...` and must pass the gate too.
+#[test]
+fn a_local_admin_share_path_opens_like_a_drive_path() {
+    let local = std::path::absolute(fixture("features.md")).unwrap();
+    let local = local.to_string_lossy().into_owned();
+    let (drive, rest) = local.split_at(2);
+    let unc = format!(r"\\localhost\{}${}", &drive[..1], rest);
+    match read_source(&PathBuf::from(&unc), |_| Ok(()), 1 << 20) {
+        Ok(text) => assert!(text.starts_with("# GFM Full Features Test")),
+        // Admin shares can be disabled or need elevation on this host.
+        Err(OpenError::Io(_) | OpenError::NotFound) => {
+            eprintln!("skipped: {unc} is not reachable here");
+        }
+        Err(error) => panic!("{unc}: {error:?}"),
+    }
 }
 
 fn job(tab_id: u64, path: PathBuf) -> (RenderJob, Arc<AtomicBool>) {

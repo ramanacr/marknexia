@@ -182,9 +182,10 @@ fn decode_utf32_le(bytes: &[u8]) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OpenError {
     NotFound,
-    /// Not a drive-letter path to a regular disk file: UNC and device
-    /// namespaces (`\\.\`, `\\?\`, `\\?\GLOBALROOT`), pipes, reserved device
-    /// names and non-disk handles are refused.
+    /// Not a regular disk file on a drive or UNC share: device namespaces
+    /// (`\\.\`, `\\?\GLOBALROOT`, other `\\?\` forms), pipes and mailslots,
+    /// reserved device names, alternate data streams and non-disk handles
+    /// are refused, before opening and again on the handle's final path.
     UnsupportedPath,
     Io(String),
     Render(RenderError),
@@ -199,7 +200,7 @@ impl fmt::Display for OpenError {
         match self {
             Self::NotFound => f.write_str("the file does not exist"),
             Self::UnsupportedPath => {
-                f.write_str("only files on a local or mapped drive can be opened")
+                f.write_str("only files on a drive or network share can be opened")
             }
             Self::Io(error) => write!(f, "the file could not be read ({error})"),
             Self::Render(error) => error.fmt(f),
@@ -217,15 +218,72 @@ const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 /// `FILE_FLAG_SEQUENTIAL_SCAN`, as .NET `FileOptions.SequentialScan`.
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 
-/// Reads a Markdown source like .NET `FileService.ReadTextAsync`, but
-/// stricter about what may be opened:
-/// - the path must be a drive-letter path that `CanonicalPath` accepts
-///   (no UNC or device namespace, no reserved device names);
+/// The lexical gate for a document path, applied to the requested path and
+/// to the opened handle's final path. Accepted forms:
+/// - a drive path `C:\...` or its verbatim form `\\?\C:\...`;
+/// - a UNC path `\\server\share\...` or its verbatim form
+///   `\\?\UNC\server\share\...` (as .NET allows).
+///
+/// Every component must pass `CanonicalPath` (no reserved device names such
+/// as `CON`, `NUL`, `COM1`, no `:` so no alternate data streams, no wildcard
+/// or control characters). Refused: `\\.\` and all other `\\?\` forms
+/// (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and `mailslot`
+/// pseudo-shares, and `..` in UNC paths.
+pub fn check_document_path(text: &str) -> Result<(), OpenError> {
+    let unsupported = |_| OpenError::UnsupportedPath;
+    let unc = if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if is_drive_path(rest) {
+            return CanonicalPath::new(rest).map(drop).map_err(unsupported);
+        }
+        match rest.get(..4) {
+            Some(prefix) if prefix.eq_ignore_ascii_case(r"UNC\") => &rest[4..],
+            _ => return Err(OpenError::UnsupportedPath),
+        }
+    } else if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
+        rest
+    } else {
+        return CanonicalPath::new(text).map(drop).map_err(unsupported);
+    };
+    let mut parts = unc.split(['\\', '/']);
+    let server = parts.next().unwrap_or_default();
+    let share = parts.next().unwrap_or_default();
+    let rest: Vec<&str> = parts.collect();
+    if server.is_empty()
+        || share.is_empty()
+        || matches!(server, "." | "?" | "..")
+        || share.eq_ignore_ascii_case("pipe")
+        || share.eq_ignore_ascii_case("mailslot")
+        || rest.contains(&"..")
+    {
+        return Err(OpenError::UnsupportedPath);
+    }
+    // Reuse the component rules by checking the UNC components as if they
+    // were below a drive root.
+    let components = std::iter::once(server)
+        .chain(std::iter::once(share))
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join("/");
+    CanonicalPath::new(&format!("C:/{components}"))
+        .map(drop)
+        .map_err(unsupported)
+}
+
+fn is_drive_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
+/// Reads a Markdown source like .NET `FileService.ReadTextAsync`, with
+/// stricter checks on what may be opened:
+/// - the path passes [`check_document_path`] (drive and UNC share paths);
 /// - the handle is opened for reading with identification-only QoS and
-///   must be a disk file (`GetFileType == FILE_TYPE_DISK`). .NET `FileStream`
-///   refuses non-disk handles for ordinary paths too
-///   (`NotSupported_FileStreamOnNonFiles`), and `File.Exists` excludes
-///   devices and directories;
+///   must be a disk file (`GetFileType == FILE_TYPE_DISK`), a regular file,
+///   and have a final path (`GetFinalPathNameByHandleW`) that again passes
+///   [`check_document_path`], so a reparse point cannot lead to a pipe or
+///   device namespace. .NET `FileStream` also refuses non-disk handles for
+///   ordinary paths (`NotSupported_FileStreamOnNonFiles`), and `File.Exists`
+///   excludes devices and directories;
 /// - the size is checked with `check_size` (the renderer's
 ///   `check_source_size`) before reading, the read is bounded by `limit`
 ///   (the file may grow after the check), and an over-limit read reports the
@@ -237,17 +295,7 @@ pub fn read_source(
     limit: u64,
 ) -> Result<String, OpenError> {
     let text = path.to_str().ok_or(OpenError::UnsupportedPath)?;
-    // A verbatim drive path (`\\?\C:\...`, what `fs::canonicalize` returns)
-    // is checked as its drive path; every other `\\?\` or `\\.\` form
-    // (GLOBALROOT, volumes, pipes, devices, UNC) is refused.
-    let lexical = text
-        .strip_prefix(r"\\?\")
-        .filter(|rest| {
-            let bytes = rest.as_bytes();
-            bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":\\"
-        })
-        .unwrap_or(text);
-    CanonicalPath::new(lexical).map_err(|_| OpenError::UnsupportedPath)?;
+    check_document_path(text)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -270,6 +318,8 @@ pub fn read_source(
     if !metadata.is_file() {
         return Err(OpenError::UnsupportedPath);
     }
+    let final_path = final_path(&file).ok_or(OpenError::UnsupportedPath)?;
+    check_document_path(&final_path)?;
     check_size(metadata.len()).map_err(OpenError::Render)?;
     let bytes = BoundedReader::new(usize::try_from(limit).unwrap_or(usize::MAX))
         .read_from(&file)
@@ -300,9 +350,49 @@ fn is_disk_file(file: &fs::File) -> bool {
     unsafe { GetFileType(HANDLE(file.as_raw_handle())) == FILE_TYPE_DISK }
 }
 
+/// The opened file's normalized DOS-volume final path (`\\?\C:\...` or
+/// `\\?\UNC\server\share\...`), or `None` when Windows cannot name it that
+/// way (the file is then refused).
+#[cfg(windows)]
+#[allow(unsafe_code)] // One path query on a handle this function owns.
+fn final_path(file: &fs::File) -> Option<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
+            VOLUME_NAME_DOS,
+        },
+    };
+    let handle = HANDLE(file.as_raw_handle());
+    let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0);
+    let mut buffer = vec![0_u16; 512];
+    loop {
+        // SAFETY: the handle belongs to `file`, which outlives this call, and
+        // the buffer is writable for its full length.
+        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, flags) } as usize;
+        if length == 0 {
+            return None;
+        }
+        if length < buffer.len() {
+            return String::from_utf16(&buffer[..length]).ok();
+        }
+        // Too small: `length` is the required size including the NUL.
+        if length > 64 * 1024 {
+            return None;
+        }
+        buffer.resize(length + 1, 0);
+    }
+}
+
 #[cfg(not(windows))]
 fn is_disk_file(_file: &fs::File) -> bool {
     true
+}
+
+#[cfg(not(windows))]
+fn final_path(_file: &fs::File) -> Option<String> {
+    None
 }
 
 /// Reads, renders and builds the hosted page for one file. Runs on a render
