@@ -444,6 +444,19 @@ pub fn build_document(
         .map_err(|error| OpenError::Display(format!("{error:?}")))
 }
 
+/// Whether a shell started with document paths must signal `StartupFailed`:
+/// paths were requested, nothing rendered, and either every startup
+/// document has a result (or closed) or WebView2 cannot start at all.
+#[must_use]
+pub fn startup_failed(
+    document_mode: bool,
+    startup_pending_empty: bool,
+    webview_unavailable: bool,
+    startup_rendered: bool,
+) -> bool {
+    document_mode && !startup_rendered && (startup_pending_empty || webview_unavailable)
+}
+
 /// Pending renders by tab. The renderer cannot be cancelled, so a result is
 /// accepted only while its ticket is still the tab's current one: closing the
 /// tab (or starting a newer render for it) makes an in-flight result stale,

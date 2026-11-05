@@ -13,7 +13,7 @@ use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{PageIdentity, RenderError};
 use marknexia_win32::documents::{
     OpenError, RenderJob, RenderOutcome, RenderPool, RenderTickets, SourceEncoding, build_document,
-    check_document_path, decode_source, read_source, startup_paths, tab_title,
+    check_document_path, decode_source, read_source, startup_failed, startup_paths, tab_title,
 };
 
 fn os(values: &[&str]) -> Vec<OsString> {
@@ -392,4 +392,18 @@ fn stale_render_results_are_discarded_and_queued_jobs_cancelled() {
     assert!(!tickets.complete(1, other));
     assert!(tickets.complete(2, other));
     assert!(!tickets.is_pending(2));
+}
+
+#[test]
+fn startup_failure_follows_requested_paths_and_webview_availability() {
+    // No paths: never a startup failure.
+    assert!(!startup_failed(false, true, true, false));
+    // Paths requested but no tab opened (nothing pending), nothing rendered.
+    assert!(startup_failed(true, true, false, false));
+    // Still rendering, WebView2 available: not yet.
+    assert!(!startup_failed(true, false, false, false));
+    // WebView2 cannot start: fail even while renders are pending.
+    assert!(startup_failed(true, false, true, false));
+    // Something rendered: never a failure.
+    assert!(!startup_failed(true, true, true, true));
 }

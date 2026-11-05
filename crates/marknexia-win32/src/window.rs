@@ -364,6 +364,9 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     };
     // Placeholder tabs only without documents. Document renders start before
     // the window is shown and overlap WebView2 startup.
+    // Document mode follows the requested paths, not the tabs that opened:
+    // paths that could not get a tab still mean the startup failed.
+    let document_mode = !paths.is_empty();
     let startup_documents = {
         let mut app = portable.borrow_mut();
         if paths.is_empty() {
@@ -383,7 +386,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     };
     {
         let mut state = state.borrow_mut();
-        state.document_mode = !startup_documents.is_empty();
+        state.document_mode = document_mode;
         state.startup_pending = startup_documents.iter().map(|(id, _)| id.get()).collect();
     }
     for (tab_id, path) in startup_documents {
@@ -703,8 +706,12 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
 /// instead of waiting for a `FirstRender` that cannot come.
 fn update_startup_readiness(state: &Rc<RefCell<AppState>>) {
     let mut state = state.borrow_mut();
-    let nothing_rendered = state.startup_pending.is_empty() || state.webview_unavailable;
-    let failed = state.document_mode && nothing_rendered && !state.startup_rendered;
+    let failed = documents::startup_failed(
+        state.document_mode,
+        state.startup_pending.is_empty(),
+        state.webview_unavailable,
+        state.startup_rendered,
+    );
     if failed && let Some(readiness) = state.readiness.as_mut() {
         readiness.startup_failed();
     }
@@ -1319,10 +1326,12 @@ fn poll_webview(hwnd: HWND) {
     let Some(mut session) = take_session(&state) else {
         return;
     };
-    let error = session
-        .poll()
-        .err()
-        .map(|error| format!("WebView2 poll: {error:?}"));
+    let error = session.poll().err();
+    // Environment or controller startup failed: no document can render.
+    let startup_failure = error
+        .as_ref()
+        .is_some_and(marknexia_webview::session::SessionError::is_startup_failure);
+    let error = error.map(|error| format!("WebView2 poll: {error:?}"));
     let (active, document_mode, rendered_tabs) = {
         let state = state.borrow();
         (
@@ -1359,7 +1368,12 @@ fn poll_webview(hwnd: HWND) {
         }
     }
     if let Some(error) = error {
-        state.borrow_mut().shell_error = Some(error);
+        {
+            let mut state = state.borrow_mut();
+            state.shell_error = Some(error);
+            state.webview_unavailable |= startup_failure;
+        }
+        update_startup_readiness(&state);
         refresh_status(&state);
     }
     if let Some(readiness) = state.borrow_mut().readiness.as_mut() {

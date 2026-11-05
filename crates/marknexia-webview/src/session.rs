@@ -44,6 +44,19 @@ pub enum SessionError {
     CallbackPanicked,
 }
 
+impl SessionError {
+    /// The WebView2 environment or a controller could not start, so no
+    /// document can be displayed (the shell then signals `StartupFailed`).
+    #[must_use]
+    pub fn is_startup_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Environment(_)
+                | Self::Host(HostError::ControllerStartupFailed(_) | HostError::MissingController)
+        )
+    }
+}
+
 impl From<EnvironmentError> for SessionError {
     fn from(error: EnvironmentError) -> Self {
         Self::Environment(error)
@@ -746,6 +759,18 @@ mod panic_tests {
 
     use super::{SessionError, WebViewSession};
     use crate::{environment::StaApartment, protocol::PageToHost};
+
+    #[test]
+    fn environment_and_controller_startup_errors_are_startup_failures() {
+        use crate::{environment::EnvironmentError, host::HostError};
+        assert!(
+            SessionError::Environment(EnvironmentError::MissingEnvironment).is_startup_failure()
+        );
+        assert!(SessionError::Host(HostError::ControllerStartupFailed(-1)).is_startup_failure());
+        assert!(!SessionError::Host(HostError::CallFailed(-1)).is_startup_failure());
+        assert!(!SessionError::CallbackPanicked.is_startup_failure());
+        assert!(!SessionError::MissingTab.is_startup_failure());
+    }
 
     /// A controller or subscription records into the session's shared flag;
     /// once it is gone, the next poll still reports the panic, exactly once.
