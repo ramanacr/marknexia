@@ -16,6 +16,7 @@ All 7 frozen cases in `compat/fixtures/v1/rendering` match byte-for-byte, includ
 | --- | --- | --- |
 | Raw HTML nested deeper than 256 levels | rendered | `RenderError::Sanitizer(NestingTooDeep)` |
 | Raw HTML beyond the tree-construction work or reparent budget (SAN-8): flat content under about 250 open elements, or misnesting repaired more than once per 256 bytes | rendered, slowly | `RenderError::Sanitizer(TooComplex)` |
+| A single top-level block (one paragraph, one list) or unclosed raw HTML whose tree exceeds 4 Mi nodes, e.g. 16 MiB or more of `*a* `, `- x` or `<b>x</b>` in one block | rendered (or out of memory: the reviewer projected about 9.7 GiB for 46 MiB of `*a* `) | `RenderError::Sanitizer(TooComplex)` (chunk node limit, SAN-8) |
 | A pass (copy metadata, C# highlighting at about 15×, diagram shells, `\frac` chains at about 10×) that takes the body past 128 MiB | builds the page, then `DocumentTooLargeException` | `RenderError::Sanitizer(InputTooLarge)` before building that block |
 | A body over 128 MiB after the passes that sanitizing would shrink under the page limit (megabytes of removed `<script>` or `<style>` content) | rendered | `RenderError::Sanitizer(InputTooLarge)` |
 
@@ -50,11 +51,28 @@ Before building a code-block, diagram or math replacement, a pass checks its exa
 | one raw `<div>` around everything | 4 / 16 / 50 | 8.8 s / 74.5 s / not run | 1.73 s / 6.9 s / — | 0.68 s / 2.5 s / 7.9 s (857 MiB) |
 | one paragraph | 4 / 16 / 50 | 1.16 s / 1.23 s / not run | — | 0.04 s / 0.15 s / 0.47 s |
 
-Where the Rust time and memory now go at 50 MiB:
+The table above is from before the review fixes. The review fixes changed memory as follows: node limits, a smaller Markdown model, and a streamed join. Peak heap is in MiB for parse / whole render; the source sizes are as generated.
 
-* **The Markdown parse is the largest part.** `marknexia-markdown` builds a full document model: 1.8 to 8.5 s, and 17 to 100 bytes of heap per source byte (5.0 GiB for 50 MiB of `<b>x</b>`, 3.9 GiB for lists). It is outside this change.
-* **The sanitizer is parallel.** It keeps one chunk's DOM per worker (under 220 MiB at 50 MiB) and cleans about 10 to 30 MB of body per second.
-* **Single chunks are sequential.** A document with no split point, such as a single 50 MiB paragraph of raw inline HTML or everything inside one raw `<div>`, is one chunk (SAN-8): it is sanitized on one thread and its whole DOM is in memory (2.3 GiB for 50 MiB of `<b>x</b>`).
+| Shape | 16 MiB before | 16 MiB after | 50 MiB before | 50 MiB after |
+| --- | --- | --- | --- | --- |
+| prose | 269 / 269 | 170 / 170 | 857 / 857 | 547 / 547 |
+| tables | 1,029 / 1,029 | 656 / 656 | 3,154 / 3,154 (body over 128 MiB) | 1,989 / 1,989 (same) |
+| code | 125 / 383 | 125 / 290 | 320 / 324 | 320 / 324 |
+| lists | 1,240 / 1,240 | 684 / 684 | 3,917 / 3,917 (body over 128 MiB) | 2,180 / 2,180 (same) |
+| links | 438 / 438 | 241 / 241 | 1,414 / 1,414 | 799 / 799 |
+| raw `<b>x</b>`, one paragraph | 1,424 / 1,424 | 1,040 / 1,040 | 5,010 / 5,010 (rendered in 27.6 s) | 3,474 / 3,474 (`TooComplex` in 17 s) |
+| raw HTML blocks | 409 / 409 | 296 / 296 | 1,318 / 1,318 | 963 / 963 |
+| mixed | 579 / 579 | 358 / 358 | 1,802 / 1,802 | 1,115 / 1,115 |
+| one raw `<div>` around everything | 269 / 269 | 170 / 266 | 857 / 857 | 547 / 836 |
+| `*a* ` (one paragraph) | about 3,460 (216 B per source byte) | 1,928 / 1,928 (`TooComplex`) | about 10,800 | 6,249 (body over 128 MiB) |
+| `- x` (one list) | about 3,390 (212 B per source byte) | 1,764 / 1,764 (`TooComplex`) | about 10,600 | 5,552 (body over 128 MiB) |
+
+The `*a* ` and `- x` "before" figures are 8 MiB measurements scaled per byte (216 and 212 bytes per source byte); the other "before" figures were measured.
+
+* **The Markdown parse is the largest part.** Boxing the link and image payloads made `Inline` 32 bytes instead of 80. Growth slack is also given back when spans, leaves and containers close, and the grid-table line list is built only when a line starts with `+`. Together these cut the parse peak by 30 to 48%: from 216 to 120 bytes per source byte for `*a* `, and from 212 to 110 for `- x`. pulldown-cmark's own tree of the whole document is 48 to 96 of those bytes, and it lives until its event stream ends. The parse takes 2 to 6 s per 16 MiB for the dense shapes, sequentially.
+* **The sanitizer is parallel.** Chunkable bodies keep one ordinary chunk's DOM per worker: 16 to 150 MiB at 50 MiB, measured during the sanitizer alone. It cleans about 10 to 30 MB of body per second.
+* **Single chunks are sequential and bounded.** A document with no split point is one chunk (SAN-8), for example everything inside one raw `<div>`, one paragraph or one list. It is sanitized on one thread, with its whole DOM in memory up to the chunk node limit: 718 MiB for 50 MiB inside one `<div>`. Above the limit it is rejected as `TooComplex`, after 5 to 15 s at 16 to 50 MiB.
+* **Timing caveat.** The review-fix runs overlapped other work on this machine, and their parse times are 1.5 to 3 times those of the first run (for example, `lists` at 16 MiB took 2.6 s to parse in the first run and 4.1 s in the second).
 
 **Cancellation.** `Renderer::render_cancellable(source, context, cancel)` polls `cancel` between stages and inside the sanitizer, at most about 16 KiB of body apart, and returns `RenderError::Cancelled`. Only the Markdown parse cannot be interrupted.
 

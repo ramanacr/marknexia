@@ -327,7 +327,15 @@ The owner decided that the Rust edition must accept what .NET accepts: 50 MiB of
   * No crate was added, and `Cargo.lock` is unchanged.
 * **Single-pass remote-image blanking** (`RemoteImagePolicy::Blank`, REND-4), the .NET white-space rule kept in the renderer only (SAN-10), exact pass budgets (review M5), and `Renderer::render_cancellable`.
 
-Measured results: .NET timed out (600 s) on every 50 MiB shape and on several at 16 MiB and 4 MiB. Rust renders the 50 MiB shapes that fit the page limit in 0.5 to 28 s. Most of that time and memory is now the Markdown model (REND-1).
+Measured results: .NET timed out (600 s) on every 50 MiB shape it was run on, and on several shapes at 16 MiB and 4 MiB. Rust renders the 50 MiB shapes that fit the page limit in 0.5 to 12 s.
+
+The adversarial review of these commits found no XSS or mXSS. It did find:
+
+* U+FEFF handling at chunk and probe-piece boundaries (fixed; SAN-8);
+* no memory bound on a single chunk, now limited to 4 Mi nodes per chunk and `1 Mi + input/3` nodes per document (SAN-8);
+* a Markdown model about twice as large as needed, since cut by 30 to 48% (REND-1).
+
+Documents whose single top-level block has more than 4 Mi nodes, for example 16 MiB or more of one paragraph or one list, are rejected as `TooComplex` instead of taking several GiB. The fuzz target and the reproducible-build workflow now pass `--cfg ammonia_unstable`.
 
 ### Reproduce
 
