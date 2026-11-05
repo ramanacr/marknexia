@@ -17,6 +17,7 @@ use windows::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoUninitialize,
             },
+            Threading::{AttachThreadInput, GetCurrentThreadId},
             Variant::VARIANT,
         },
         UI::{
@@ -32,8 +33,9 @@ use windows::{
                 SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_TAB,
             },
             WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
-                IsWindowVisible, SetForegroundWindow,
+                BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow,
+                GetWindowThreadProcessId, IsWindowVisible, SW_MINIMIZE, SW_RESTORE,
+                SetForegroundWindow, ShowWindow,
             },
         },
     },
@@ -188,6 +190,40 @@ fn visible_document_element(
         .find(|document| {
             unsafe { document.CurrentIsOffscreen() }.is_ok_and(|offscreen| !offscreen.as_bool())
         })
+}
+
+/// CI-only activation of the shell window. Windows refuses
+/// `SetForegroundWindow` from a background process, so this:
+/// 1. attaches this thread's input to the current foreground thread (when
+///    one exists), raises the shell with `BringWindowToTop` and
+///    `SetForegroundWindow`, then detaches;
+/// 2. on every third attempt, minimizes and restores the shell, which
+///    activates a restored top-level window.
+///
+/// No system setting (such as `SPI_SETFOREGROUNDLOCKTIMEOUT`) is changed.
+fn ci_activate(hwnd: HWND, attempt: u32) {
+    let current = unsafe { GetCurrentThreadId() };
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_thread = if foreground.is_invalid() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(foreground, None) }
+    };
+    let attached = foreground_thread != 0
+        && foreground_thread != current
+        && unsafe { AttachThreadInput(current, foreground_thread, true) }.as_bool();
+    let _ = unsafe { BringWindowToTop(hwnd) };
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    if attached {
+        let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
+    }
+    if attempt % 3 == 2 {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = unsafe { SetForegroundWindow(hwnd) };
+    }
 }
 
 /// Presses the keys in order, then releases them in reverse order.
@@ -362,13 +398,16 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     // releases the foreground lock. It is only used when CI=true, never on a
     // developer desktop where it could reach another application.
     let on_ci = std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    let mut attempt = 0_u32;
     while !shell_is_foreground() && Instant::now() < deadline {
         if on_ci {
             send_chord(&[VK_MENU]);
+            ci_activate(hwnd, attempt);
         }
         let _ = unsafe { SetForegroundWindow(hwnd) };
         let _ = unsafe { root.SetFocus() };
         thread::sleep(Duration::from_millis(200));
+        attempt += 1;
     }
     unsafe { document.SetFocus() }.expect("focus WebView document");
     thread::sleep(Duration::from_millis(300));
