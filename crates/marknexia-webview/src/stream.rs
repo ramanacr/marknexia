@@ -46,19 +46,34 @@ impl SharedStream {
 impl ISequentialStream_Impl for SharedStream_Impl {
     fn Read(&self, pv: *mut c_void, cb: u32, pcbread: *mut u32) -> HRESULT {
         if pv.is_null() {
+            if !pcbread.is_null() {
+                // SAFETY: a non-null `pcbread` is a caller-owned u32 out pointer.
+                unsafe { *pcbread = 0 };
+            }
             return STG_E_INVALIDPOINTER;
         }
         let mut position = self.position.lock().unwrap_or_else(PoisonError::into_inner);
         let length = self.bytes.len();
-        let start = usize::try_from(*position).unwrap_or(usize::MAX).min(length);
-        let count = (cb as usize).min(length - start);
-        // SAFETY: the caller supplies `pv` valid for `cb` bytes; `count <= cb`
-        // and `start + count <= length`, and the regions cannot overlap
-        // because the source is this stream's private immutable buffer.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.bytes.as_ptr().add(start), pv.cast::<u8>(), count);
-        }
-        *position = (start + count) as u64;
+        // A position past the end (after a seek) reads nothing and stays put.
+        let count = match usize::try_from(*position) {
+            Ok(start) if start < length => {
+                let count = (cb as usize).min(length - start);
+                // SAFETY: the caller supplies `pv` valid for `cb` bytes;
+                // `count <= cb` and `start + count <= length`, and the regions
+                // cannot overlap because the source is this stream's private
+                // immutable buffer.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        self.bytes.as_ptr().add(start),
+                        pv.cast::<u8>(),
+                        count,
+                    );
+                }
+                *position = (start + count) as u64;
+                count
+            }
+            _ => 0,
+        };
         if !pcbread.is_null() {
             // SAFETY: a non-null `pcbread` is a caller-owned u32 out pointer.
             unsafe { *pcbread = count as u32 };
@@ -163,7 +178,9 @@ impl IStream_Impl for SharedStream_Impl {
 mod tests {
     use std::sync::Arc;
 
-    use windows::Win32::System::Com::{STATFLAG_NONAME, STATSTG, STREAM_SEEK_END, STREAM_SEEK_SET};
+    use windows::Win32::System::Com::{
+        STATFLAG_NONAME, STATSTG, STREAM_SEEK_CUR, STREAM_SEEK_END, STREAM_SEEK_SET,
+    };
 
     use super::SharedStream;
 
@@ -194,6 +211,23 @@ mod tests {
             .unwrap();
         assert_eq!(&out[..read as usize], &bytes[9_990..]);
         assert!(unsafe { stream.Seek(-1, STREAM_SEEK_SET, None) }.is_err());
+        // A read after seeking past the end reads nothing and keeps the
+        // position; a null buffer zeroes the count.
+        unsafe { stream.Seek(20_000, STREAM_SEEK_SET, None) }.unwrap();
+        read = 7;
+        unsafe { stream.Read(out.as_mut_ptr().cast(), 100, Some(&mut read)) }
+            .ok()
+            .unwrap();
+        assert_eq!(read, 0);
+        unsafe { stream.Seek(0, STREAM_SEEK_CUR, Some(&mut position)) }.unwrap();
+        assert_eq!(position, 20_000);
+        read = 7;
+        assert!(
+            unsafe { stream.Read(std::ptr::null_mut(), 1, Some(&mut read)) }
+                .ok()
+                .is_err()
+        );
+        assert_eq!(read, 0);
         let mut stat = STATSTG::default();
         unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }.unwrap();
         assert_eq!(stat.cbSize, 10_000);
