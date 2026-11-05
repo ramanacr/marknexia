@@ -4,14 +4,13 @@
 //! this ignored test; `Test-RustNativeShell.ps1` supplies the final executable.
 
 use std::{
-    process::{Child, Command},
     thread,
     time::{Duration, Instant},
 };
 
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM},
+        Foundation::HWND,
         System::{
             Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -28,32 +27,24 @@ use windows::{
                 UIA_SelectionItemPatternId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
                 UIA_TextPatternId,
             },
-            Input::KeyboardAndMouse::{
-                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_TAB,
-            },
+            Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_TAB},
             WindowsAndMessaging::{
-                BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow,
-                GetWindowThreadProcessId, IsWindowVisible, SW_MINIMIZE, SW_RESTORE,
-                SetForegroundWindow, ShowWindowAsync,
+                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SW_MINIMIZE,
+                SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
             },
         },
     },
-    core::{BOOL, Interface},
+    core::Interface,
 };
 
-const SHELL_CLASS: &str = "MarknexiaRustWindow";
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Kills the launched shell even when an assertion fails mid-test.
-struct ShellProcess(Child);
+/// Launch with a unique WebView2 profile, cleanup, window lookup and guarded
+/// key input, shared with `native_accessibility.rs`.
+#[path = "support/shell.rs"]
+mod shell_support;
 
-impl Drop for ShellProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+use shell_support::{ShellProcess, find_shell_window, foreground_owner, send_chord, send_chord_to};
 
 /// Single-threaded COM apartment for the UIA client, released on drop.
 struct Apartment;
@@ -71,48 +62,6 @@ impl Drop for Apartment {
     fn drop(&mut self) {
         unsafe { CoUninitialize() };
     }
-}
-
-struct WindowSearch {
-    process_id: u32,
-    found: Option<HWND>,
-}
-
-unsafe extern "system" fn match_shell_window(hwnd: HWND, data: LPARAM) -> BOOL {
-    // SAFETY: `data` is the `WindowSearch` borrowed by `find_shell_window`
-    // for the duration of the synchronous `EnumWindows` call.
-    let search = unsafe { &mut *(data.0 as *mut WindowSearch) };
-    let mut owner = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-    if owner != search.process_id || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        return true.into();
-    }
-    let mut class = [0_u16; 64];
-    let length = unsafe { GetClassNameW(hwnd, &mut class) };
-    let length = usize::try_from(length).unwrap_or(0).min(class.len());
-    if String::from_utf16_lossy(&class[..length]) == SHELL_CLASS {
-        search.found = Some(hwnd);
-        return false.into();
-    }
-    true.into()
-}
-
-/// Binds the tested HWND to the launched process. `FindWindowW` alone can
-/// keep returning an older instance of the same class.
-fn find_shell_window(process_id: u32) -> Option<HWND> {
-    let mut search = WindowSearch {
-        process_id,
-        found: None,
-    };
-    // EnumWindows reports an error when the callback stops early; the result
-    // is read from `search` instead.
-    let _ = unsafe {
-        EnumWindows(
-            Some(match_shell_window),
-            LPARAM(std::ptr::from_mut(&mut search) as isize),
-        )
-    };
-    search.found
 }
 
 fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
@@ -229,27 +178,6 @@ fn ci_activate(hwnd: HWND, attempt: u32) {
     }
 }
 
-/// Presses the keys in order, then releases them in reverse order.
-fn send_chord(keys: &[VIRTUAL_KEY]) {
-    let key = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let mut inputs: Vec<INPUT> = keys
-        .iter()
-        .map(|vk| key(*vk, KEYBD_EVENT_FLAGS(0)))
-        .collect();
-    inputs.extend(keys.iter().rev().map(|vk| key(*vk, KEYEVENTF_KEYUP)));
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    assert_eq!(sent as usize, inputs.len(), "SendInput");
-}
-
 fn select_and_observe(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
@@ -297,15 +225,8 @@ fn command_line_markdown_file_opens_as_a_named_rendered_document() {
         .trim()
         .to_owned();
     let launched = Instant::now();
-    let shell = ShellProcess(
-        Command::new(executable)
-            .arg(&fixture)
-            .spawn()
-            .expect("launch shell"),
-    );
-    let hwnd = wait_for("the launched shell HWND", || {
-        find_shell_window(shell.0.id())
-    });
+    let shell = ShellProcess::launch(&executable, &[fixture.as_os_str()]);
+    let hwnd = wait_for("the launched shell HWND", || find_shell_window(shell.id()));
 
     let _apartment = Apartment::enter();
     let automation: IUIAutomation =
@@ -345,10 +266,8 @@ fn command_line_markdown_file_opens_as_a_named_rendered_document() {
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn two_named_tab_items_expose_selection_and_change_active_tab() {
     let executable = std::env::var_os("MARKNEXIA_SHELL_EXE").expect("MARKNEXIA_SHELL_EXE");
-    let shell = ShellProcess(Command::new(executable).spawn().expect("launch shell"));
-    let hwnd = wait_for("the launched shell HWND", || {
-        find_shell_window(shell.0.id())
-    });
+    let shell = ShellProcess::launch(&executable, &[]);
+    let hwnd = wait_for("the launched shell HWND", || find_shell_window(shell.id()));
 
     let _apartment = Apartment::enter();
     let automation: IUIAutomation =
@@ -389,12 +308,7 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     // the foreground (e.g. on CI runners). UI Automation SetFocus may activate
     // the target window, so try both until the launched shell owns the
     // foreground.
-    let shell_is_foreground = || {
-        let foreground = unsafe { GetForegroundWindow() };
-        let mut owner = 0;
-        unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
-        owner == shell.0.id()
-    };
+    let shell_is_foreground = || foreground_owner() == shell.id();
     let deadline = Instant::now() + Duration::from_secs(10);
     // On CI runners no user owns the foreground, and Windows refuses
     // SetForegroundWindow from a background process. A synthetic Alt press
@@ -418,12 +332,9 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     unsafe { document.SetFocus() }.expect("focus WebView document");
     thread::sleep(Duration::from_millis(300));
     // Never inject keys unless the launched shell owns the foreground, so a
-    // failed activation cannot type into another application.
-    assert!(
-        shell_is_foreground(),
-        "shell must be foreground before SendInput"
-    );
-    send_chord(&[VK_CONTROL, VK_TAB]);
+    // failed activation cannot type into another application; the owner is
+    // re-checked immediately before SendInput.
+    send_chord_to(shell.id(), &[VK_CONTROL, VK_TAB]);
     let expected = name(&tabs[0]);
     wait_for("Ctrl+Tab from inside the document to switch tabs", || {
         visible_document(&automation, &root).filter(|document| *document == expected)

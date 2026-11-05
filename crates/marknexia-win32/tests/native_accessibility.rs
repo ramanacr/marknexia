@@ -10,7 +10,6 @@
 //! (`SPI_GETHIGHCONTRAST`), never set.
 
 use std::{
-    process::{Child, Command},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -22,7 +21,7 @@ use marknexia_win32::{
 };
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, POINT, RECT},
+        Foundation::{HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
             GetDC, GetPixel, GetSysColor, HGDIOBJ, MapWindowPoints, ReleaseDC, SelectObject,
@@ -51,22 +50,18 @@ use windows::{
                 DPI_AWARENESS_PER_MONITOR_AWARE, GetAwarenessFromDpiAwarenessContext,
                 GetDpiForWindow, GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
             },
-            Input::KeyboardAndMouse::{
-                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_W,
-            },
+            Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_W},
             WindowsAndMessaging::{
-                EnumWindows, FindWindowExW, GetClassNameW, GetClientRect, GetForegroundWindow,
-                GetWindowThreadProcessId, IsWindowVisible, SPI_GETHIGHCONTRAST,
-                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SystemParametersInfoW,
+                FindWindowExW, GetClientRect, SMTO_ABORTIFHUNG, SPI_GETHIGHCONTRAST,
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SetForegroundWindow,
+                SystemParametersInfoW, WM_NULL,
             },
         },
     },
-    core::{BOOL, Interface, w},
+    core::{Interface, w},
 };
 use windows_core::{Ref, implement};
 
-const SHELL_CLASS: &str = "MarknexiaRustWindow";
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// The design target from `layout::Dip::INTERACTION_TARGET`, in DIPs.
 const TARGET_DIP: f64 = 44.0;
@@ -75,19 +70,14 @@ const TARGET_DIP: f64 = 44.0;
 const PRINT_CLIENT_FULL_CONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(1 | 2);
 
 // ---------------------------------------------------------------------------
-// Helpers copied from `automation_smoke.rs` (that file belongs to another
-// lane and is not shared).
+// Helpers. Launch, cleanup, window lookup and guarded key input are shared
+// with `automation_smoke.rs` through `support/shell.rs`.
 // ---------------------------------------------------------------------------
 
-/// Kills the launched shell even when an assertion fails mid-test.
-struct ShellProcess(Child);
+#[path = "support/shell.rs"]
+mod shell_support;
 
-impl Drop for ShellProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+use shell_support::{ShellProcess, find_shell_window, foreground_owner, send_chord, send_chord_to};
 
 /// Single-threaded COM apartment for the UIA client, released on drop.
 struct Apartment;
@@ -105,45 +95,6 @@ impl Drop for Apartment {
     fn drop(&mut self) {
         unsafe { CoUninitialize() };
     }
-}
-
-struct WindowSearch {
-    process_id: u32,
-    found: Option<HWND>,
-}
-
-unsafe extern "system" fn match_shell_window(hwnd: HWND, data: LPARAM) -> BOOL {
-    // SAFETY: `data` is the `WindowSearch` borrowed by `find_shell_window`
-    // for the duration of the synchronous `EnumWindows` call.
-    let search = unsafe { &mut *(data.0 as *mut WindowSearch) };
-    let mut owner = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-    if owner != search.process_id || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        return true.into();
-    }
-    let mut class = [0_u16; 64];
-    let length = unsafe { GetClassNameW(hwnd, &mut class) };
-    let length = usize::try_from(length).unwrap_or(0).min(class.len());
-    if String::from_utf16_lossy(&class[..length]) == SHELL_CLASS {
-        search.found = Some(hwnd);
-        return false.into();
-    }
-    true.into()
-}
-
-/// Binds the tested HWND to the launched process.
-fn find_shell_window(process_id: u32) -> Option<HWND> {
-    let mut search = WindowSearch {
-        process_id,
-        found: None,
-    };
-    let _ = unsafe {
-        EnumWindows(
-            Some(match_shell_window),
-            LPARAM(std::ptr::from_mut(&mut search) as isize),
-        )
-    };
-    search.found
 }
 
 fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
@@ -200,27 +151,6 @@ fn visible_document(automation: &IUIAutomation, root: &IUIAutomationElement) -> 
     visible.next().is_none().then_some(first)
 }
 
-/// Presses the keys in order, then releases them in reverse order.
-fn send_chord(keys: &[VIRTUAL_KEY]) {
-    let key = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let mut inputs: Vec<INPUT> = keys
-        .iter()
-        .map(|vk| key(*vk, KEYBD_EVENT_FLAGS(0)))
-        .collect();
-    inputs.extend(keys.iter().rev().map(|vk| key(*vk, KEYEVENTF_KEYUP)));
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    assert_eq!(sent as usize, inputs.len(), "SendInput");
-}
-
 fn select(tab: &IUIAutomationElement) {
     let pattern: IUIAutomationSelectionItemPattern =
         unsafe { tab.GetCurrentPattern(UIA_SelectionItemPatternId) }
@@ -253,10 +183,8 @@ struct Launched {
 fn launch_shell() -> Launched {
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let executable = std::env::var_os("MARKNEXIA_SHELL_EXE").expect("MARKNEXIA_SHELL_EXE");
-    let shell = ShellProcess(Command::new(executable).spawn().expect("launch shell"));
-    let hwnd = wait_for("the launched shell HWND", || {
-        find_shell_window(shell.0.id())
-    });
+    let shell = ShellProcess::launch(&executable, &[]);
+    let hwnd = wait_for("the launched shell HWND", || find_shell_window(shell.id()));
     let apartment = Apartment::enter();
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
@@ -286,10 +214,7 @@ impl Launched {
     }
 
     fn is_foreground(&self) -> bool {
-        let foreground = unsafe { GetForegroundWindow() };
-        let mut owner = 0;
-        unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
-        owner == self.shell.0.id()
+        foreground_owner() == self.shell.id()
     }
 
     /// Same foreground guard as `automation_smoke.rs`: try to activate the
@@ -461,11 +386,11 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
     shell.activate();
     let _ = unsafe { tabs[0].SetFocus() };
     thread::sleep(Duration::from_millis(300));
-    assert!(
-        shell.is_foreground(),
-        "shell must be foreground before SendInput"
-    );
-    send_chord(&[VK_CONTROL, VK_W]);
+    // Only events raised by the close below count: drop anything recorded
+    // while selecting and focusing.
+    events.lock().expect("event list").clear();
+    // Re-checks the foreground immediately before SendInput.
+    send_chord_to(shell.shell.id(), &[VK_CONTROL, VK_W]);
 
     let observed = wait_for("a ChildRemoved or ChildrenInvalidated event", || {
         let events = events.lock().ok()?;
@@ -538,6 +463,23 @@ fn tab_fills(colors: Palette) -> (u32, u32) {
 /// Samples the inactive and active tab fills from a DWM capture of the
 /// shell's client area. Tab 0 must be the active tab.
 fn sample_tab_fills(shell_hwnd: HWND, strip: HWND, dpi: u32) -> Option<(u32, u32)> {
+    // PrintWindow sends WM_PRINT synchronously and would block on a hung
+    // shell: first prove its UI thread answers within two seconds.
+    let mut reply = 0_usize;
+    let responsive = unsafe {
+        SendMessageTimeoutW(
+            shell_hwnd,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            2000,
+            Some(&mut reply),
+        )
+    };
+    if responsive.0 == 0 {
+        return None;
+    }
     let mut client = RECT::default();
     unsafe { GetClientRect(shell_hwnd, &mut client) }.ok()?;
     let mut strip_rect = RECT::default();
