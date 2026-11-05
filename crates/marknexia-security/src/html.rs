@@ -199,6 +199,11 @@ const REMOVED_WITH_CONTENT: &[&str] = &[
     "animateMotion",
     "animateTransform",
     "animateColor",
+    // SVG 1.1 glyph elements (Ganss removes them with their content).
+    "altGlyph",
+    "altGlyphDef",
+    "altGlyphItem",
+    "glyphRef",
     "clipPath",
     "desc",
     "discard",
@@ -741,7 +746,9 @@ fn clean_chunks(
     // next, so at most the out-of-order ones are held besides it.
     let capacity = (input.len() + input.len() / 8).min(policy.limits().max_html_output_bytes);
     let joined = Mutex::new(Joined {
-        output: String::with_capacity(capacity),
+        output: String::new(),
+        capacity,
+        limit: policy.limits().max_html_output_bytes,
         next: 0,
         pending: BTreeMap::new(),
     });
@@ -815,6 +822,10 @@ struct Joined {
     next: usize,
     /// Finished chunks that are not next yet.
     pending: BTreeMap<usize, String>,
+    /// Expected total, used for the first reservation.
+    capacity: usize,
+    /// The output limit; the buffer never reserves past it.
+    limit: usize,
 }
 
 impl Joined {
@@ -823,13 +834,26 @@ impl Joined {
             self.pending.insert(index, cleaned);
             return;
         }
-        self.output.push_str(&cleaned);
-        drop(cleaned);
-        self.next += 1;
+        self.append(cleaned);
         while let Some(cleaned) = self.pending.remove(&self.next) {
-            self.output.push_str(&cleaned);
-            self.next += 1;
+            self.append(cleaned);
         }
+    }
+
+    /// Append the next chunk's output. The first one becomes the buffer
+    /// when it is the whole output so far (no copy, as for a single chunk).
+    fn append(&mut self, cleaned: String) {
+        if self.output.is_empty() && cleaned.capacity() >= self.capacity.min(self.limit) {
+            self.output = cleaned;
+        } else {
+            let wanted = self.capacity.max(self.output.len() + cleaned.len());
+            let extra = wanted.min(self.limit).saturating_sub(self.output.len());
+            if self.output.capacity() - self.output.len() < cleaned.len() {
+                self.output.reserve_exact(extra.max(cleaned.len()));
+            }
+            self.output.push_str(&cleaned);
+        }
+        self.next += 1;
     }
 }
 
@@ -837,7 +861,8 @@ impl Joined {
 ///
 /// Chunking relies on ammonia's cleaning being local to each node. Its only
 /// document-wide state, the `id` → tag map in `clean_dom`, is read only for
-/// SVG `<animate>` and `<set>`, which this policy removes with their content
+/// the SVG animation elements (`animate`, `animateMotion`, `animateTransform`,
+/// `animateColor`, `set`), which this policy removes with their content
 /// (`ids_only_matter_for_removed_elements` checks that), so which chunk an
 /// `id` is in cannot change the output.
 fn clean_chunk(
@@ -1056,10 +1081,45 @@ mod tests {
     }
 
     #[test]
+    fn joined_output_moves_a_single_chunk_and_stays_under_the_limit() {
+        let mut one = Joined {
+            output: String::new(),
+            next: 0,
+            pending: BTreeMap::new(),
+            capacity: 8,
+            limit: 64,
+        };
+        let only = String::with_capacity(8) + "abcdefgh";
+        let pointer = only.as_ptr();
+        one.add(0, only);
+        assert_eq!(one.output.as_ptr(), pointer);
+        let mut many = Joined {
+            output: String::new(),
+            next: 0,
+            pending: BTreeMap::new(),
+            capacity: 1 << 40,
+            limit: 40,
+        };
+        many.add(1, "b".repeat(20));
+        many.add(0, "a".repeat(10));
+        many.add(2, "c".repeat(10));
+        assert_eq!(many.output.len(), 40);
+        assert!(many.output.capacity() <= 64, "{}", many.output.capacity());
+        assert!(many.output.starts_with("aaaaaaaaaab"));
+    }
+
+    #[test]
     fn ids_only_matter_for_removed_elements() {
-        // ammonia consults its document-wide id map only for these; they
-        // must stay removed for chunked output to equal whole output.
-        for tag in ["animate", "set"] {
+        // ammonia 4.2.4 consults its document-wide id map only for the SVG
+        // animation elements; they must stay removed for chunked output to
+        // equal whole output.
+        for tag in [
+            "animate",
+            "animateMotion",
+            "animateTransform",
+            "animateColor",
+            "set",
+        ] {
             assert!(REMOVED_WITH_CONTENT.contains(&tag) && !ALLOWED_TAGS.contains(&tag));
         }
     }

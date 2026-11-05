@@ -495,6 +495,20 @@ fn svg_references_scripts_and_handlers_are_neutralized() {
             "<svg><animate attributeName=href values=\"javascript:alert(1)\"/><set attributeName=onmouseover to=alert(1)/></svg>",
             "<svg></svg>",
         ),
+        // Review M2/M4: every SVG animation element and the SVG 1.1 glyph
+        // elements go with their content, as in Ganss.
+        (
+            "<svg><animateColor attributeName=fill to=red>T</animateColor></svg>",
+            "<svg></svg>",
+        ),
+        (
+            "<svg><animateMotion path=M0>T</animateMotion><animateTransform>U</animateTransform></svg>",
+            "<svg></svg>",
+        ),
+        (
+            "<svg><text><altGlyph xlink:href=#g>T</altGlyph><glyphRef/></text><altGlyphDef><altGlyphItem>U</altGlyphItem></altGlyphDef></svg>",
+            "<svg><text></text></svg>",
+        ),
         (
             "<svg><foreignObject><img src=x onerror=alert(1)></foreignObject></svg>",
             "<svg></svg>",

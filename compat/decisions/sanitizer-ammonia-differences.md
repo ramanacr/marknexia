@@ -102,9 +102,9 @@ No class of input produced a difference after these fixes, so no whole-document 
 
 **Entity-dense text (review minor 4).** Character references are decoded by html5ever's tokenizer twice (probe and ammonia), in linear time but slowly: 4 M `&amp;` take about 8.2 s. Inside one element (a paragraph or code block) there is no split point, so 128 MiB of such text would take about a minute on one thread. It is text, not nodes, so the node limits do not apply. It is recorded, not improved: a split inside an open element is never at the parser's initial state. Markdown bodies of entity-heavy prose split at every paragraph and are cleaned in parallel as usual.
 
-**Output.** Chunk outputs are appended in input order to one buffer sized for the whole output, as soon as each is next. Only out-of-order outputs are held besides it, so output memory stays near one copy of the 128 MiB output rather than two.
+**Output.** Chunk outputs are appended in input order to one buffer, as soon as each is next. The buffer reserves the expected output size once, never more than the 128 MiB limit. A single chunk's output becomes the buffer without a copy. Besides the buffer, the join holds only the outputs that finish out of order and the chunks being cleaned.
 
-**ammonia's document-wide state.** ammonia's only document-wide state is `clean_dom`'s id-to-tag map. It is read only for SVG `<animate>`/`<set>`, which this policy removes with their content (`ids_only_matter_for_removed_elements`), so the chunk an `id` is in cannot change the output.
+**ammonia's document-wide state.** ammonia's only document-wide state is `clean_dom`'s id-to-tag map. It is read only for the SVG animation elements (`animate`, `animateMotion`, `animateTransform`, `animateColor`, `set`), which this policy removes with their content (`ids_only_matter_for_removed_elements`), so the chunk an `id` is in cannot change the output.
 
 **Serializer.** ammonia exposes its cleaned DOM only under `cfg(ammonia_unstable)`. The workspace `.cargo/config.toml` now sets that flag, and `marknexia-security` fails to compile without it. The crate serializes the DOM itself (`src/serialize.rs`):
 
