@@ -241,9 +241,10 @@ These supersede the matching statements above.
   bridge-message rejection (`marknexia-webview/tests/rendered_document.rs`);
   collector fixture generation and digests without launching the shell
   (`tests/perf/collect_rust_desktop_perf.tests.ps1`).
-- `cargo deny check` fails only on licenses reached through the optional
+- `cargo deny check` failed only on licenses reached through the optional
   `candidate-comrak` feature (comrak `BSD-2-Clause`, finl_unicode
-  `Unicode-DFS-2016`), which predates this work; `deny.toml` is unchanged.
+  `Unicode-DFS-2016`); `deny.toml` is unchanged. Owner decision
+  (2026-11-05): comrak was removed, and `cargo deny check` passes.
 - Release builds pass for `x86_64` (483–488 KB) and `aarch64`
   (440 KB, compile-only).
 

@@ -38,12 +38,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Lint (all features, both Markdown candidates)
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
-      - name: Test (all features, both Markdown candidates)
-        run: cargo test --workspace --all-features --locked
       - name: Portable dependency boundary
         run: pwsh -NoProfile -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
       - name: Dependency policy
@@ -183,6 +179,9 @@ jobs:
           cargo_fuzz=$(jq -r .tools.cargoFuzz tools/rust-tools.lock)
           cargo +nightly install cargo-fuzz --version "$cargo_fuzz" --locked
       - name: Fuzz
+        # cargo fuzz sets RUSTFLAGS, which replaces .cargo/config.toml rustflags.
+        env:
+          RUSTFLAGS: --cfg ammonia_unstable
         run: |
           cd fuzz
           cargo +nightly fuzz run markdown_and_html corpus/markdown_and_html -- -max_total_time=300 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz.log"

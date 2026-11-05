@@ -6,7 +6,7 @@ Scope: `crates/marknexia-markdown`, both parser candidates. These limits come fr
 
 ## Observable differences
 
-No frozen fixture reaches these limits. The mandatory parity suite still reports 0 mismatches for both candidates.
+No frozen fixture reaches these limits. The mandatory parity suite still reports 0 mismatches for the pulldown-cmark parser.
 
 ### 1. Nesting depth
 

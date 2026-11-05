@@ -2,11 +2,11 @@
 
 Status: **proposed — requires Task 8 approval**
 
-Scope: `crates/marknexia-rendering` (`Renderer`, both Markdown candidates). It reproduces the .NET `MarkdownRenderer`, `TemplateEngine`, `ColorCodeSyntaxHighlighter`, `MermaidDiagramRenderer` and `SimpleMathRenderer` at fixture revision `38b39f6`.
+Scope: `crates/marknexia-rendering` (`Renderer` over the pulldown-cmark parser). It reproduces the .NET `MarkdownRenderer`, `TemplateEngine`, `ColorCodeSyntaxHighlighter`, `MermaidDiagramRenderer` and `SimpleMathRenderer` at fixture revision `38b39f6`.
 
 ## Fixture result
 
-All 7 frozen cases in `compat/fixtures/v1/rendering` match byte-for-byte, including the complete templated page, for `rendering-pulldown` and `rendering-comrak` (`tests/parity_v1.rs`). This file therefore has no `parity-allowance` blocks. Every difference below lies outside the frozen corpus. The .NET exporter should add cases for them so they are recorded against the oracle.
+All 7 frozen cases in `compat/fixtures/v1/rendering` match byte-for-byte, including the complete templated page, for `rendering-pulldown` (`tests/parity_v1.rs`). This file therefore has no `parity-allowance` blocks. Every difference below lies outside the frozen corpus. The .NET exporter should add cases for them so they are recorded against the oracle.
 
 ## REND-1 — The .NET size limits apply; sanitizer budgets remain
 

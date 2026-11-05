@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the current .NET edition as the behavioral oracle and releasable product. Add language-neutral compatibility fixtures, the approved root-level Rust workspace, a secure native WebView2 vertical slice, a raw Win32 shell/UI Automation proof, and reproducible size/performance measurements. Work proceeds in three lanes after the shared baseline: portable parity, native shell/WebView2, and release measurement.
 
-**Tech Stack:** .NET 10/C# baseline exporter, stable Rust 2024 with MSVC targets, `windows-rs`, native WebView2 COM, `serde`, `serde_json`, candidate `comrak`/`pulldown-cmark`, candidate `ammonia`, Cargo test/property/fuzz tooling, PowerShell, GitHub Actions.
+**Tech Stack:** .NET 10/C# baseline exporter, stable Rust 2024 with MSVC targets, `windows-rs`, native WebView2 COM, `serde`, `serde_json`, candidate `comrak`/`pulldown-cmark` (Owner decision (2026-11-05): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed), candidate `ammonia`, Cargo test/property/fuzz tooling, PowerShell, GitHub Actions.
 
 **Spec:** `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md`
 
