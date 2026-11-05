@@ -229,16 +229,19 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 /// so Win32 normalization cannot move a path onto another share (for
 /// example `\\server\..\pipe\x`). Refused forms: `\\.\` and all other
 /// `\\?\` forms (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and
-/// `mailslot` pseudo-shares, and a UNC server name with `@` (the WebDAV
-/// `@SSL` / `@port` forms; .NET would pass these to the WebDAV redirector,
-/// and refusing them is a deliberate decision). Server and share names may
+/// `mailslot` pseudo-shares (also with trailing dots or spaces, which Win32
+/// strips), server or share names ending in `.` or space, and the explicit
+/// WebDAV forms: a server name with `@` (`@SSL` / `@port`) and the
+/// `DavWWWRoot` share. .NET would pass these to the WebDAV redirector;
+/// refusing them is a deliberate decision. The refusal is partial: when SMB
+/// fails, the WebClient service may still send an ordinary share over WebDAV. Server and share names may
 /// not contain separators, wildcards, `:` or control characters. The
 /// components after the drive root or after `server\share` must pass
 /// `CanonicalPath` (no reserved device names such as `CON`, `NUL`, `COM1`,
 /// no `:` so no alternate data streams, no wildcard or control characters).
 ///
-/// Opening a UNC path contacts the remote server (SMB, or WebDAV for the
-/// refused `@` forms) and can block until the network times out; documents
+/// Opening a UNC path contacts the remote server (SMB, or WebDAV through
+/// the WebClient fallback) and can block until the network times out; documents
 /// are opened on render workers, never on the UI thread.
 pub fn check_document_path(text: &str) -> Result<(), OpenError> {
     let unsupported = |_| OpenError::UnsupportedPath;
@@ -276,11 +279,18 @@ pub fn check_document_path(text: &str) -> Result<(), OpenError> {
                 .chars()
                 .any(|c| c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
     };
+    // Win32 strips trailing dots and spaces from a name, so "pipe." or
+    // "mailslot ." would reach those pseudo-shares: refuse such names, and
+    // compare the stripped name as defense in depth.
+    let stripped_share = share.trim_end_matches(['.', '\u{20}']);
     if bad_name(server)
         || bad_name(share)
+        || server.ends_with(['.', '\u{20}'])
+        || share.ends_with(['.', '\u{20}'])
         || server.contains('@')
-        || share.eq_ignore_ascii_case("pipe")
-        || share.eq_ignore_ascii_case("mailslot")
+        || stripped_share.eq_ignore_ascii_case("pipe")
+        || stripped_share.eq_ignore_ascii_case("mailslot")
+        || stripped_share.eq_ignore_ascii_case("DavWWWRoot")
     {
         return Err(OpenError::UnsupportedPath);
     }

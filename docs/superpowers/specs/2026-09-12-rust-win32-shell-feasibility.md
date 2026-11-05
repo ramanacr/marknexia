@@ -212,7 +212,13 @@ These supersede the matching statements above.
     list. Device-name rules apply only below `server\share`.
   - Decision: a UNC server name with `@` is refused. This covers the
     WebDAV `@SSL` and `@port` forms, which .NET would pass to the WebDAV
-    redirector.
+    redirector. The `DavWWWRoot` share is refused too.
+  - The WebDAV refusal is partial: when SMB fails, the WebClient service
+    can still send an ordinary `\\server\share` path over WebDAV.
+  - Win32 strips trailing dots and spaces from a name, so `\\server\pipe.\x`
+    would reach the `pipe` pseudo-share. Server and share names ending in
+    `.` or a space are therefore refused. The pseudo-share comparison also
+    runs on the stripped name, as defense in depth.
   - Opening a UNC path contacts the remote server (SMB) and can block
     until the network times out. It runs on a render worker, never on the
     UI thread.
