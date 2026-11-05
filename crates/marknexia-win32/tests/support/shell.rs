@@ -30,7 +30,7 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
+                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW,
@@ -236,15 +236,27 @@ fn close_runner_sign_in_prompt() {
     let class_len = unsafe { GetClassNameW(foreground, &mut class) }.max(0) as usize;
     let mut title = [0u16; 256];
     let title_len = unsafe { GetWindowTextW(foreground, &mut title) }.max(0) as usize;
-    if String::from_utf16_lossy(&class[..class_len]) == "Windows.UI.Core.CoreWindow"
-        && String::from_utf16_lossy(&title[..title_len]) == "Microsoft account"
+    if String::from_utf16_lossy(&class[..class_len]) != "Windows.UI.Core.CoreWindow" {
+        return;
+    }
+    let title = String::from_utf16_lossy(&title[..title_len]);
+    let image = process_image(foreground_owner()).to_ascii_lowercase();
+    // System shell surfaces only: the sign-in prompt (WWAHost) and system
+    // flyouts such as Search (SystemApps), which took the foreground after
+    // the prompt closed in run 42113919802.
+    if title == "Microsoft account"
+        || image.ends_with("\\wwahost.exe")
+        || image.contains("\\windows\\systemapps\\")
     {
         eprintln!(
-            "closing the runner's sign-in prompt ({})",
+            "dismissing a runner system surface ({})",
             foreground_description()
         );
         // SAFETY: posting to a window of another process; no pointers.
         let _ = unsafe { PostMessageW(Some(foreground), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        // Flyouts close on Escape; the foreground is this system surface,
+        // never an application.
+        send_chord(&[VK_ESCAPE]);
     }
 }
 
