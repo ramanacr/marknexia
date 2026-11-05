@@ -230,7 +230,9 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 /// example `\\server\..\pipe\x`). Refused forms: `\\.\` and all other
 /// `\\?\` forms (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and
 /// `mailslot` pseudo-shares (also with trailing dots or spaces, which Win32
-/// strips), server or share names ending in `.` or space, and the explicit
+/// strips), the `IPC$` share (also with trailing dots or spaces), server or
+/// share names with non-ASCII characters, server or share names ending in
+/// `.` or space, and the explicit
 /// WebDAV forms: a server name with `@` (`@SSL` / `@port`) and the
 /// `DavWWWRoot` share. .NET would pass these to the WebDAV redirector;
 /// refusing them is a deliberate decision. The refusal is partial: when SMB
@@ -273,8 +275,11 @@ pub fn check_document_path(text: &str) -> Result<(), OpenError> {
         [server, share, rest @ ..] => (*server, *share, rest),
         _ => return Err(OpenError::UnsupportedPath),
     };
+    // Server and share names must be ASCII, matching the ASCII-only case
+    // folding used for path containment.
     let bad_name = |name: &str| {
         name.is_empty()
+            || !name.is_ascii()
             || name
                 .chars()
                 .any(|c| c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
@@ -291,6 +296,8 @@ pub fn check_document_path(text: &str) -> Result<(), OpenError> {
         || stripped_share.eq_ignore_ascii_case("pipe")
         || stripped_share.eq_ignore_ascii_case("mailslot")
         || stripped_share.eq_ignore_ascii_case("DavWWWRoot")
+        // The inter-process communication share carries named pipes, not files.
+        || stripped_share.eq_ignore_ascii_case("IPC$")
     {
         return Err(OpenError::UnsupportedPath);
     }
