@@ -6,9 +6,10 @@ fn is_reserved_component(segment: &str) -> bool {
     if segment.ends_with([' ', '.']) {
         return true;
     }
-    let base = segment.split('.').next().unwrap_or_default();
+    // Win32 ignores trailing spaces before the extension: "COM1 .md" is COM1.
+    let base = segment.split('.').next().unwrap_or_default().trim_end();
     let upper = base.to_ascii_uppercase();
-    if ["CON", "PRN", "AUX", "NUL"].contains(&upper.as_str()) {
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&upper.as_str()) {
         return true;
     }
     let Some(port) = upper
@@ -19,7 +20,7 @@ fn is_reserved_component(segment: &str) -> bool {
     };
     matches!(
         port,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
     )
 }
 
