@@ -236,6 +236,24 @@ These supersede the matching statements above.
     the message loop after the outer call, not re-posted.
   - The COM STA stays entered without WebView2, so the Open dialog still
     works.
+- **Callback panics (2026-11-05).**
+  - Every WebView2 handler body runs under a panic guard: resource
+    requests, navigation starting and completed, web messages (including
+    the untrusted JSON parse), new windows, accelerators, process failures
+    and browser exit. The application's page observer is guarded too.
+  - Each handler fails closed:
+    - a resource request keeps its deferral and closes the controller;
+    - a navigation is cancelled;
+    - a new window stays handled.
+  - All controllers and browser-exit subscriptions share one session flag.
+    `poll` therefore reports each caught panic once, even after its
+    controller was closed, orphaned or replaced.
+  - A native test injects a panicking page observer, and `poll` reports it
+    exactly once.
+- **StartupFailed (2026-11-05).** StartupFailed is also signalled in two
+  more cases:
+  - `poll` reports an environment or controller startup error;
+  - paths were requested but none opened a tab.
 - **Header policy.** The document response header is the page's meta
   policy plus the header-only `frame-ancestors 'none'`.
 - **Identity binding.** The check still rebuilds the policy and base from
