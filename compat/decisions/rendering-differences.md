@@ -60,7 +60,7 @@ The table above is from before the review fixes. The review fixes changed memory
 | code | 125 / 383 | 125 / 290 | 320 / 324 | 320 / 324 |
 | lists | 1,240 / 1,240 | 684 / 684 | 3,917 / 3,917 (body over 128 MiB) | 2,180 / 2,180 (same) |
 | links | 438 / 438 | 241 / 241 | 1,414 / 1,414 | 799 / 799 |
-| raw `<b>x</b>`, one paragraph | 1,424 / 1,424 | 1,040 / 1,040 | 5,010 / 5,010 (rendered in 27.6 s) | 3,474 / 3,474 (`TooComplex` in 17 s) |
+| raw `<b>x</b>`, one paragraph | 1,424 / 1,424 | 1,040 / 1,040 (`TooComplex`: 4,194,306 nodes, 2 over the chunk limit) | 5,010 / 5,010 (rendered in 27.6 s) | 3,474 / 3,474 (`TooComplex` in 7.9 s) |
 | raw HTML blocks | 409 / 409 | 296 / 296 | 1,318 / 1,318 | 963 / 963 |
 | mixed | 579 / 579 | 358 / 358 | 1,802 / 1,802 | 1,115 / 1,115 |
 | one raw `<div>` around everything | 269 / 269 | 170 / 266 | 857 / 857 | 547 / 836 |
