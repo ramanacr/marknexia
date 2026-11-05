@@ -139,6 +139,21 @@ jobs:
           rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
       - name: Record WebView2 runtime
         run: (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+      # The hosted windows-11-arm image can start with a "Microsoft account"
+      # sign-in prompt (a system CoreWindow) holding the foreground, which
+      # Windows then refuses to hand to the shell under test (run
+      # 42104089745). This ephemeral runner never signs in: the prompt's host
+      # process is logged and closed, nothing is answered.
+      - name: Close the runner image's sign-in prompt
+        if: runner.os == 'Windows'
+        run: |
+          Get-Process | Where-Object { $_.MainWindowTitle } |
+            ForEach-Object { "{0} {1} '{2}'" -f $_.Id, $_.ProcessName, $_.MainWindowTitle }
+          $prompts = Get-Process | Where-Object { $_.MainWindowTitle -eq 'Microsoft account' }
+          foreach ($prompt in $prompts) {
+            "closing $($prompt.Id) $($prompt.ProcessName)"
+            Stop-Process -Id $prompt.Id -Force
+          }
       - name: Native gates
         run: pwsh -NoProfile -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
       - name: Desktop performance (empty shell, 30 cold + 30 warm)
