@@ -35,7 +35,7 @@ use windows::{
             WindowsAndMessaging::{
                 BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow,
                 GetWindowThreadProcessId, IsWindowVisible, SW_MINIMIZE, SW_RESTORE,
-                SetForegroundWindow, ShowWindow,
+                SetForegroundWindow, ShowWindowAsync,
             },
         },
     },
@@ -192,7 +192,8 @@ fn visible_document_element(
         })
 }
 
-/// CI-only activation of the shell window. Windows refuses
+/// Activation of the shell window on GitHub Actions only (`CI=true` and
+/// `GITHUB_ACTIONS=true`). Windows refuses
 /// `SetForegroundWindow` from a background process, so this:
 /// 1. attaches this thread's input to the current foreground thread (when
 ///    one exists), raises the shell with `BringWindowToTop` and
@@ -218,9 +219,11 @@ fn ci_activate(hwnd: HWND, attempt: u32) {
         let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
     }
     if attempt % 3 == 2 {
+        // Asynchronous: the shell thread processes the show commands, so a
+        // busy shell cannot block this test thread.
         unsafe {
-            let _ = ShowWindow(hwnd, SW_MINIMIZE);
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindowAsync(hwnd, SW_MINIMIZE);
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         }
         let _ = unsafe { SetForegroundWindow(hwnd) };
     }
@@ -395,9 +398,12 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     let deadline = Instant::now() + Duration::from_secs(10);
     // On CI runners no user owns the foreground, and Windows refuses
     // SetForegroundWindow from a background process. A synthetic Alt press
-    // releases the foreground lock. It is only used when CI=true, never on a
-    // developer desktop where it could reach another application.
-    let on_ci = std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    // releases the foreground lock. It is only used on GitHub Actions runners
+    // (CI=true and GITHUB_ACTIONS=true), never on a developer desktop where a
+    // synthetic key could reach another application.
+    let is_true =
+        |name: &str| std::env::var(name).is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    let on_ci = is_true("CI") && is_true("GITHUB_ACTIONS");
     let mut attempt = 0_u32;
     while !shell_is_foreground() && Instant::now() < deadline {
         if on_ci {
