@@ -206,6 +206,22 @@ These supersede the matching statements above.
     headless test opens the fixture through `\\localhost\<drive>$\`, which
     succeeded on the x64 host. QoS, `FILE_TYPE_DISK` and regular-file
     checks are unchanged.
+  - Review fixes: every path form now refuses `.` and `..` components
+    before any other check, so `\\server\..\pipe\x` cannot normalize onto
+    the `pipe` pseudo-share. The pseudo-share test runs on that component
+    list. Device-name rules apply only below `server\share`.
+  - Decision: a UNC server name with `@` is refused. This covers the
+    WebDAV `@SSL` and `@port` forms, which .NET would pass to the WebDAV
+    redirector.
+  - Opening a UNC path contacts the remote server (SMB) and can block
+    until the network times out. It runs on a render worker, never on the
+    UI thread.
+  - Folder-mounted volumes without a drive letter are not supported. Their
+    final path has no DOS name, and the error message says so.
+  - A directory is reported as `UnsupportedPath`.
+  - A headless test opens a file through a directory junction (`mklink
+    /J`, no admin rights). The junction's target is named `CON`, so the
+    final-path check refuses it.
   - An over-limit read reports the file's current size.
   - `file:///` and `file://` arguments convert like the .NET
     `PathCanonicalizer`.

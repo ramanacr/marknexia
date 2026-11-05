@@ -199,9 +199,10 @@ impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => f.write_str("the file does not exist"),
-            Self::UnsupportedPath => {
-                f.write_str("only files on a drive or network share can be opened")
-            }
+            Self::UnsupportedPath => f.write_str(
+                "only files on a drive letter or a network share can be opened \
+                 (folder-mounted volumes without a drive letter are not supported)",
+            ),
             Self::Io(error) => write!(f, "the file could not be read ({error})"),
             Self::Render(error) => error.fmt(f),
             Self::Identity(error) => write!(f, "no page identity ({error})"),
@@ -224,47 +225,68 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 /// - a UNC path `\\server\share\...` or its verbatim form
 ///   `\\?\UNC\server\share\...` (as .NET allows).
 ///
-/// Every component must pass `CanonicalPath` (no reserved device names such
-/// as `CON`, `NUL`, `COM1`, no `:` so no alternate data streams, no wildcard
-/// or control characters). Refused: `\\.\` and all other `\\?\` forms
-/// (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and `mailslot`
-/// pseudo-shares, and `..` in UNC paths.
+/// Refused before anything else: any `.` or `..` component, in every form,
+/// so Win32 normalization cannot move a path onto another share (for
+/// example `\\server\..\pipe\x`). Refused forms: `\\.\` and all other
+/// `\\?\` forms (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and
+/// `mailslot` pseudo-shares, and a UNC server name with `@` (the WebDAV
+/// `@SSL` / `@port` forms; .NET would pass these to the WebDAV redirector,
+/// and refusing them is a deliberate decision). Server and share names may
+/// not contain separators, wildcards, `:` or control characters. The
+/// components after the drive root or after `server\share` must pass
+/// `CanonicalPath` (no reserved device names such as `CON`, `NUL`, `COM1`,
+/// no `:` so no alternate data streams, no wildcard or control characters).
+///
+/// Opening a UNC path contacts the remote server (SMB, or WebDAV for the
+/// refused `@` forms) and can block until the network times out; documents
+/// are opened on render workers, never on the UI thread.
 pub fn check_document_path(text: &str) -> Result<(), OpenError> {
     let unsupported = |_| OpenError::UnsupportedPath;
-    let unc = if let Some(rest) = text.strip_prefix(r"\\?\") {
+    let (body, unc) = if let Some(rest) = text.strip_prefix(r"\\?\") {
         if is_drive_path(rest) {
-            return CanonicalPath::new(rest).map(drop).map_err(unsupported);
-        }
-        match rest.get(..4) {
-            Some(prefix) if prefix.eq_ignore_ascii_case(r"UNC\") => &rest[4..],
-            _ => return Err(OpenError::UnsupportedPath),
+            (rest, false)
+        } else {
+            match rest.get(..4) {
+                Some(prefix) if prefix.eq_ignore_ascii_case(r"UNC\") => (&rest[4..], true),
+                _ => return Err(OpenError::UnsupportedPath),
+            }
         }
     } else if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
-        rest
+        (rest, true)
     } else {
-        return CanonicalPath::new(text).map(drop).map_err(unsupported);
+        (text, false)
     };
-    let mut parts = unc.split(['\\', '/']);
-    let server = parts.next().unwrap_or_default();
-    let share = parts.next().unwrap_or_default();
-    let rest: Vec<&str> = parts.collect();
-    if server.is_empty()
-        || share.is_empty()
-        || matches!(server, "." | "?" | "..")
-        || share.eq_ignore_ascii_case("pipe")
-        || share.eq_ignore_ascii_case("mailslot")
-        || rest.contains(&"..")
+    let components: Vec<&str> = body.split(['\\', '/']).collect();
+    if components
+        .iter()
+        .any(|component| matches!(*component, "." | ".."))
     {
         return Err(OpenError::UnsupportedPath);
     }
-    // Reuse the component rules by checking the UNC components as if they
-    // were below a drive root.
-    let components = std::iter::once(server)
-        .chain(std::iter::once(share))
-        .chain(rest)
-        .collect::<Vec<_>>()
-        .join("/");
-    CanonicalPath::new(&format!("C:/{components}"))
+    if !unc {
+        return CanonicalPath::new(body).map(drop).map_err(unsupported);
+    }
+    let (server, share, rest) = match components.as_slice() {
+        [server, share, rest @ ..] => (*server, *share, rest),
+        _ => return Err(OpenError::UnsupportedPath),
+    };
+    let bad_name = |name: &str| {
+        name.is_empty()
+            || name
+                .chars()
+                .any(|c| c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+    };
+    if bad_name(server)
+        || bad_name(share)
+        || server.contains('@')
+        || share.eq_ignore_ascii_case("pipe")
+        || share.eq_ignore_ascii_case("mailslot")
+    {
+        return Err(OpenError::UnsupportedPath);
+    }
+    // The components below the share follow the drive-path rules; server and
+    // share are names, not files, so the device-name rules do not apply.
+    CanonicalPath::new(&format!("C:/{}", rest.join("/")))
         .map(drop)
         .map_err(unsupported)
 }
@@ -307,6 +329,11 @@ pub fn read_source(
     }
     let file = options.open(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => OpenError::NotFound,
+        // Opening a directory as a file is refused by Windows; report it as
+        // the unsupported target it is, not as an I/O failure.
+        _ if fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) => {
+            OpenError::UnsupportedPath
+        }
         _ => OpenError::Io(error.kind().to_string()),
     })?;
     if !is_disk_file(&file) {

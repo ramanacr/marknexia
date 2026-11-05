@@ -20,10 +20,15 @@ fn os(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// The fixture path without `..` components (the document gate refuses
+/// them); `std::path::absolute` normalizes like GetFullPathNameW.
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test-fixtures/markdown/gfm")
-        .join(name)
+    std::path::absolute(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-fixtures/markdown/gfm")
+            .join(name),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -161,7 +166,18 @@ fn device_pipe_and_directory_paths_are_refused_before_reading() {
         r"\\server\share\CON.md",
         r"\\server\share\x.md:stream",
         r"\\server",
+        r"\\server\..\pipe\x",
+        r"\\server\.\pipe\x",
+        r"\\?\UNC\server\..\pipe\x",
+        r"\\?\UNC\server\.\mailslot\x",
+        r"\\server\share\.\x.md",
+        r"\\server@SSL\share\x.md",
+        r"\\server@8080\share\x.md",
+        r"C:\docs\..\x.md",
+        r"C:\docs\.\x.md",
+        r"\\?\C:\docs\..\x.md",
         r"C:\NUL",
+        r"C:\docs\COM1 .md",
         r"C:\docs\CON.md",
         r"C:\docs\COM1",
         r"C:\docs\x.md:stream",
@@ -174,12 +190,40 @@ fn device_pipe_and_directory_paths_are_refused_before_reading() {
         );
     }
     assert!(!opened.get(), "no refused path reached the size check");
-    // A directory opens as a disk handle but is not a regular file.
+    // A directory is not a regular file.
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    assert!(matches!(
+    assert_eq!(
         read_source(&directory, |_| Ok(()), 1 << 20),
-        Err(OpenError::UnsupportedPath | OpenError::Io(_))
-    ));
+        Err(OpenError::UnsupportedPath)
+    );
+}
+
+/// The final-path check: a directory junction (no admin rights needed)
+/// whose target has a reserved device name. The requested path passes the
+/// lexical gate; the handle's final path does not.
+#[test]
+fn a_junction_to_a_refused_final_path_is_refused_after_opening() {
+    let root = std::env::temp_dir().join(format!("marknexia-junction-{}", std::process::id()));
+    let root = std::path::absolute(root).unwrap();
+    let verbatim_target = format!(r"\\?\{}\CON", root.display());
+    std::fs::create_dir_all(&verbatim_target).unwrap();
+    std::fs::write(format!(r"{verbatim_target}\x.md"), b"# refused").unwrap();
+    let link = root.join("link");
+    let created = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&verbatim_target)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let result = created.then(|| read_source(&link.join("x.md"), |_| Ok(()), 1 << 20));
+    let _ = std::fs::remove_dir(&link);
+    let _ = std::fs::remove_file(format!(r"{verbatim_target}\x.md"));
+    let _ = std::fs::remove_dir(&verbatim_target);
+    let _ = std::fs::remove_dir(&root);
+    match result {
+        Some(result) => assert_eq!(result, Err(OpenError::UnsupportedPath)),
+        None => eprintln!("skipped: mklink /J is not available here"),
+    }
 }
 
 #[test]
@@ -192,6 +236,9 @@ fn drive_and_unc_share_paths_pass_the_lexical_gate() {
         r"\\?\UNC\server\share\notes.md",
         r"\\?\unc\server\share\notes.md",
         r"\\server\c$\notes.md",
+        // Server and share are names: device-name rules apply only below them.
+        r"\\con\share\notes.md",
+        r"\\server\nul\notes.md",
     ] {
         assert_eq!(check_document_path(path), Ok(()), "{path}");
     }
