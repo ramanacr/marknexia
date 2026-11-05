@@ -143,6 +143,7 @@ jobs:
         run: pwsh -NoProfile -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
       - name: Desktop performance (empty shell, 30 cold + 30 warm)
         if: always()
+        timeout-minutes: 15
         run: |
           $ErrorActionPreference = 'Stop'
           $architecture = if ('${{ matrix.target }}' -like 'x86_64*') { 'x64' } else { 'ARM64' }

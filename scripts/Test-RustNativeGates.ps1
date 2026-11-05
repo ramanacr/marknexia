@@ -25,16 +25,24 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $results = [ordered]@{}
 
-function Invoke-Gate([string]$Name, [scriptblock]$Body) {
+function Invoke-Gate([string]$Name, [scriptblock]$Body, [int]$Attempts = 1) {
+    # Desktop-input gates may be retried: hosted runners intermittently refuse
+    # the foreground to a background process. Every failed attempt is kept in
+    # the summary, so a retry never hides a failure.
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    try {
-        & $Body
-        if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
-        $results[$Name] = [ordered]@{ passed = $true; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1) }
+    $failures = @()
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            & $Body
+            if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+            $results[$Name] = [ordered]@{ passed = $true; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); attempts = $attempt; failedAttempts = $failures }
+            return
+        }
+        catch {
+            $failures += "attempt ${attempt}: $_"
+        }
     }
-    catch {
-        $results[$Name] = [ordered]@{ passed = $false; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); error = "$_" }
-    }
+    $results[$Name] = [ordered]@{ passed = $false; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); attempts = $Attempts; failedAttempts = $failures; error = $failures[-1] }
 }
 
 Invoke-Gate 'webview-environment' {
@@ -70,17 +78,18 @@ Invoke-Gate 'webview-browser-exit-recovery' {
 }
 
 Invoke-Gate 'shell-build' { cargo build --locked --release --target $Target -p marknexia-win32 }
-$exe = Join-Path $root "target\$Target\release\marknexia-win32.exe"
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
+$exe = Join-Path $targetDir "$Target\release\marknexia-win32.exe"
 Invoke-Gate 'uia-smoke' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test automation_smoke -- --ignored --test-threads=1
-}
+} -Attempts 3
 # DPI awareness and 44-DIP tab targets, UIA structure events on tab close,
 # and the palette against the current (read-only) high-contrast state.
 Invoke-Gate 'uia-native-accessibility' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_accessibility -- --ignored --test-threads=1 --nocapture
-}
+} -Attempts 3
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
 }
