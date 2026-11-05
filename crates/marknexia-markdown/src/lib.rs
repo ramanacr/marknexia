@@ -11,16 +11,8 @@
 //! `compat/decisions/markdown-resource-limits.md`).
 
 mod engine;
-#[cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
 mod extensions;
 pub use engine::{Anchor, Diagram, Heading, MarkdownEngine, MarkdownOptions, ParsedDocument};
 
-#[cfg(feature = "candidate-comrak")]
-mod comrak_adapter;
-#[cfg(feature = "candidate-comrak")]
-pub use comrak_adapter::ComrakAdapter;
-
-#[cfg(feature = "candidate-pulldown")]
 mod pulldown_adapter;
-#[cfg(feature = "candidate-pulldown")]
 pub use pulldown_adapter::PulldownAdapter;

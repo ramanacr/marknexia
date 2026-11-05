@@ -145,7 +145,6 @@ pub(crate) enum Inline {
     Text(String),
     /// Backslash-escaped text: renders like `Text` but never forms or merges
     /// into an extension delimiter run (for example `\=` next to `==`).
-    #[cfg_attr(not(feature = "candidate-pulldown"), allow(dead_code))]
     Escaped(String),
     Code(String),
     SoftBreak,
@@ -157,9 +156,6 @@ pub(crate) enum Inline {
     Mark(Vec<Inline>),
     Subscript(Vec<Inline>),
     Superscript(Vec<Inline>),
-    /// `++text++`; only comrak parses it natively.
-    #[cfg_attr(not(feature = "candidate-comrak"), allow(dead_code))]
-    Inserted(Vec<Inline>),
     /// Boxed so that every `Inline` stays small (32 bytes): documents hold
     /// millions of them.
     Link(Box<Link>),
@@ -191,8 +187,7 @@ impl Inline {
             | Self::Strikethrough(children)
             | Self::Mark(children)
             | Self::Subscript(children)
-            | Self::Superscript(children)
-            | Self::Inserted(children) => Some(children),
+            | Self::Superscript(children) => Some(children),
             Self::Link(link) => Some(&mut link.children),
             Self::Image(image) => Some(&mut image.children),
             _ => None,
@@ -206,8 +201,7 @@ impl Inline {
             | Self::Strikethrough(children)
             | Self::Mark(children)
             | Self::Subscript(children)
-            | Self::Superscript(children)
-            | Self::Inserted(children) => Some(children),
+            | Self::Superscript(children) => Some(children),
             Self::Link(link) => Some(&link.children),
             Self::Image(image) => Some(&image.children),
             _ => None,
@@ -215,7 +209,7 @@ impl Inline {
     }
 }
 
-/// Zero-based line lookup for byte offsets and 1-based comrak line/column pairs.
+/// Zero-based line lookup for byte offsets.
 pub(crate) struct LineIndex {
     starts: Vec<usize>,
 }
@@ -233,18 +227,10 @@ impl LineIndex {
         Self { starts }
     }
 
-    #[cfg(any(feature = "candidate-pulldown", test))]
     pub(crate) fn line_of(&self, offset: usize) -> usize {
         self.starts
             .partition_point(|start| *start <= offset)
             .saturating_sub(1)
-    }
-
-    /// Byte offset of a 1-based line and 1-based byte column.
-    #[cfg(any(feature = "candidate-comrak", test))]
-    pub(crate) fn offset(&self, line: usize, column: usize) -> Option<usize> {
-        let start = *self.starts.get(line.checked_sub(1)?)?;
-        Some(start + column.checked_sub(1)?)
     }
 }
 
@@ -269,8 +255,6 @@ mod tests {
         assert_eq!(index.line_of(3), 1);
         assert_eq!(index.line_of(6), 2);
         assert_eq!(index.line_of(8), 3);
-        assert_eq!(index.offset(2, 2), Some(4));
-        assert_eq!(index.offset(0, 1), None);
     }
 
     #[test]

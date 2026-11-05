@@ -3,8 +3,6 @@
 //! default), anchor and alert emulation must stay linear, and rendered output
 //! must stay within `MarkdownOptions::max_rendered_body_bytes`.
 
-#![cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
-
 use marknexia_core::contracts::DiagnosticSeverity;
 use marknexia_markdown::{MarkdownEngine, MarkdownOptions};
 use std::time::{Duration, Instant};
@@ -14,14 +12,9 @@ const ONE_MIB: usize = 1024 * 1024;
 type Engine = &'static (dyn MarkdownEngine + Sync);
 
 fn engines() -> Vec<(&'static str, Engine)> {
-    [
-        #[cfg(feature = "candidate-comrak")]
-        ("comrak", &marknexia_markdown::ComrakAdapter as Engine),
-        #[cfg(feature = "candidate-pulldown")]
-        ("pulldown", &marknexia_markdown::PulldownAdapter as Engine),
-    ]
-    .into_iter()
-    .collect()
+    [("pulldown", &marknexia_markdown::PulldownAdapter as Engine)]
+        .into_iter()
+        .collect()
 }
 
 /// Runs `body` on a thread with a 1 MiB stack. A stack overflow aborts the

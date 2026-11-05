@@ -194,5 +194,5 @@ fn a_chunk_over_the_node_limit_is_rejected_before_its_dom_is_built() {
     let (outcome, time) = run(&policy, &large);
     eprintln!("NODES 50 MiB single chunk: {outcome:?} in {time:?}");
     assert_eq!(outcome, Err(SanitizeError::TooComplex));
-    assert!(marknexia_security::MAX_CHUNK_NODES < 50 * MIB / 4);
+    const { assert!(marknexia_security::MAX_CHUNK_NODES < 50 * MIB / 4) };
 }

@@ -15,7 +15,3 @@ markup5ever = "=0.40.0"
 [dev-dependencies]
 serde_json = { workspace = true }
 
-[features]
-# Lets `--all-features` run the rendering parity gate on both Markdown
-# candidates; the default candidate is whatever marknexia-markdown defaults to.
-candidate-comrak = ["marknexia-markdown/candidate-comrak"]

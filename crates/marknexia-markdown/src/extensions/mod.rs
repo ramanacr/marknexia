@@ -1,4 +1,4 @@
-//! Marknexia-owned compatibility layer shared by every parser candidate.
+//! Marknexia-owned compatibility layer over the pulldown-cmark front end.
 //!
 //! Adapters only translate third-party syntax trees into [`model::Document`].
 //! Everything the .NET Markdig 0.40 pipeline adds on top of CommonMark lives

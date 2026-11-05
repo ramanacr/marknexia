@@ -397,12 +397,6 @@ fn pulldown_passes_rendering_parity_suite() {
     run_suite("rendering-pulldown", || marknexia_markdown::PulldownAdapter);
 }
 
-#[cfg(feature = "candidate-comrak")]
-#[test]
-fn comrak_passes_rendering_parity_suite() {
-    run_suite("rendering-comrak", || marknexia_markdown::ComrakAdapter);
-}
-
 #[test]
 fn gate_rejects_unlisted_and_stale_differences() {
     let mismatch = Mismatch {

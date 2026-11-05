@@ -448,12 +448,8 @@ impl Renderer<'_> {
                 Inline::Html(tag) => extract_anchors(tag, line, &mut self.result.custom_anchors),
                 _ => {}
             }
-            match inline {
-                other => {
-                    if let Some(children) = other.children() {
-                        self.collect(children, line);
-                    }
-                }
+            if let Some(children) = inline.children() {
+                self.collect(children, line);
             }
         }
     }
@@ -511,7 +507,6 @@ impl Renderer<'_> {
             Inline::Mark(children) => self.wrap("mark", children, plain),
             Inline::Subscript(children) => self.wrap("sub", children, plain),
             Inline::Superscript(children) => self.wrap("sup", children, plain),
-            Inline::Inserted(children) => self.wrap("ins", children, plain),
             Inline::Link(link) => {
                 let (url, title, children) = (&link.url, &link.title, &link.children);
                 if plain {

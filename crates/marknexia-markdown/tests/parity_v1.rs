@@ -1,11 +1,10 @@
-//! Mandatory Markdown parity gate. Every candidate runs the same frozen .NET
-//! oracle cases (`compat/fixtures/v1/{markdown,headings}`); there are no
-//! candidate-specific expected files. A difference fails the gate unless a
+//! Mandatory Markdown parity gate. The pulldown-cmark parser runs the frozen
+//! .NET oracle cases (`compat/fixtures/v1/{markdown,headings}`); there are no
+//! parser-specific expected files. A difference fails the gate unless a
 //! `compat/decisions/*.md` file with status "proposed — requires Task 8
 //! approval" records that exact candidate, case, field, expected value, and
 //! actual value. Stale allowances fail too, so decisions cannot drift.
 
-#[cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
 use marknexia_markdown::{MarkdownEngine, MarkdownOptions};
 use serde_json::Value;
 use std::{collections::BTreeSet, fs, path::PathBuf};
@@ -274,7 +273,6 @@ fn preview(value: Option<&Value>) -> String {
     }
 }
 
-#[cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
 fn run_mandatory_suite(candidate: &str, engine: &dyn MarkdownEngine) {
     let cases = manifest_case_paths();
     assert_membership(&cases, &directory_case_paths()).unwrap();
@@ -318,28 +316,9 @@ fn run_mandatory_suite(candidate: &str, engine: &dyn MarkdownEngine) {
     );
 }
 
-#[cfg(feature = "candidate-comrak")]
-#[test]
-fn comrak_passes_mandatory_parity_suite() {
-    run_mandatory_suite("comrak", &marknexia_markdown::ComrakAdapter);
-}
-
-#[cfg(feature = "candidate-pulldown")]
 #[test]
 fn pulldown_passes_mandatory_parity_suite() {
     run_mandatory_suite("pulldown", &marknexia_markdown::PulldownAdapter);
-}
-
-/// Without a candidate feature the gate above compiles to nothing, which would
-/// let `cargo test` pass without checking parity. Fail loudly instead. CI must
-/// run `--all-features` so both candidates and their allowances are checked.
-#[cfg(not(any(feature = "candidate-comrak", feature = "candidate-pulldown")))]
-#[test]
-fn parity_gate_requires_a_candidate_feature() {
-    panic!(
-        "no Markdown candidate enabled: run `cargo test -p marknexia-markdown --all-features`; \
-         the mandatory parity suite and stale-allowance checks were not run"
-    );
 }
 
 #[test]
@@ -400,10 +379,7 @@ fn mismatch_report_identifies_nested_fields() {
 #[test]
 fn every_decision_file_parses() {
     for allowance in decision_allowances() {
-        assert!(
-            ["comrak", "pulldown"].contains(&allowance.candidate.as_str()),
-            "{allowance:?}"
-        );
+        assert!(allowance.candidate == "pulldown", "{allowance:?}");
         assert!(
             manifest_case_paths().contains(&allowance.case),
             "{allowance:?}"
@@ -441,12 +417,12 @@ fn gate_accepts_only_exact_proposed_differences() {
     );
     assert!(changed.contains("stale allowance"), "{changed}");
     // Allowances are per candidate.
-    let other = gate("comrak", &[sample_mismatch("<p>b</p>\n")], &allowances).unwrap_err();
+    let other = gate("other", &[sample_mismatch("<p>b</p>\n")], &allowances).unwrap_err();
     assert!(other.contains("no matching proposed decision"), "{other}");
     // A fixed difference makes the allowance stale.
     let stale = gate("pulldown", &[], &allowances).unwrap_err();
     assert!(stale.contains("stale allowance in d.md"), "{stale}");
-    assert_eq!(gate("comrak", &[], &allowances), Ok(0));
+    assert_eq!(gate("other", &[], &allowances), Ok(0));
 }
 
 #[test]

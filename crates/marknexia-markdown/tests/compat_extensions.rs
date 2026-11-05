@@ -1,7 +1,5 @@
 //! Marknexia-owned extension behavior beyond the frozen corpus, checked
-//! identically for every candidate through the public engine API.
-
-#![cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
+//! identically through the public engine API.
 
 use marknexia_core::contracts::DiagnosticSeverity;
 use marknexia_markdown::{MarkdownEngine, MarkdownOptions, ParsedDocument};
@@ -121,13 +119,6 @@ fn check_all(engine: &dyn MarkdownEngine) {
     check_heading_ids(engine);
 }
 
-#[cfg(feature = "candidate-comrak")]
-#[test]
-fn comrak_follows_marknexia_extension_contract() {
-    check_all(&marknexia_markdown::ComrakAdapter);
-}
-
-#[cfg(feature = "candidate-pulldown")]
 #[test]
 fn pulldown_follows_marknexia_extension_contract() {
     check_all(&marknexia_markdown::PulldownAdapter);

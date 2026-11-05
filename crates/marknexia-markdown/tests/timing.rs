@@ -1,8 +1,6 @@
 //! Release-mode parse+render timing for the dependency decision. Ignored by
 //! default; run with:
-//! `cargo test --release -p marknexia-markdown --all-features -- --ignored candidate_parse_render_timing --nocapture`
-
-#![cfg(any(feature = "candidate-comrak", feature = "candidate-pulldown"))]
+//! `cargo test --release -p marknexia-markdown -- --ignored candidate_parse_render_timing --nocapture`
 
 use marknexia_markdown::{MarkdownEngine, MarkdownOptions};
 use serde_json::Value;
@@ -114,32 +112,6 @@ fn candidate_parse_render_timing() {
     if cfg!(debug_assertions) {
         println!("warning: debug build; timings are not decision evidence");
     }
-    #[cfg(feature = "candidate-comrak")]
-    {
-        report("comrak", &marknexia_markdown::ComrakAdapter, &small, &large);
-        // Library-native parse+render with equivalent extensions, for the
-        // overhead of the Marknexia model and Markdig-compatible writer.
-        let native = |source: &str| {
-            let mut options = comrak::Options::default();
-            options.extension.table = true;
-            options.extension.tasklist = true;
-            options.extension.strikethrough = true;
-            options.extension.footnotes = true;
-            options.extension.autolink = true;
-            options.extension.math_dollars = true;
-            options.extension.highlight = true;
-            options.render.r#unsafe = true;
-            black_box(comrak::markdown_to_html(source, &options));
-        };
-        print_result(
-            "comrak native renderer (baseline)",
-            &small,
-            &large,
-            measure_with(&small, 2000, native),
-            measure_with(&large, 60, native),
-        );
-    }
-    #[cfg(feature = "candidate-pulldown")]
     {
         report(
             "pulldown",

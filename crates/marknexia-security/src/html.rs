@@ -198,6 +198,7 @@ const REMOVED_WITH_CONTENT: &[&str] = &[
     "animate",
     "animateMotion",
     "animateTransform",
+    "animateColor",
     "clipPath",
     "desc",
     "discard",
