@@ -45,6 +45,9 @@ pub(crate) struct CallbackTokens {
     filter: bool,
     resource_failed: Rc<Cell<bool>>,
     document_loaded: Rc<Cell<bool>>,
+    /// The pinned document's navigation completed without success before
+    /// it ever loaded.
+    navigation_failed: Rc<Cell<bool>>,
     pending_deferrals: Rc<RefCell<Vec<ICoreWebView2Deferral>>>,
 }
 
@@ -60,6 +63,7 @@ impl CallbackTokens {
             filter: false,
             resource_failed: Rc::new(Cell::new(false)),
             document_loaded: Rc::new(Cell::new(false)),
+            navigation_failed: Rc::new(Cell::new(false)),
             pending_deferrals: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -182,14 +186,16 @@ impl CallbackTokens {
                     // WebView2 documents that an outstanding deferral blocks
                     // this request. Keep it live until controller.Close has
                     // succeeded; never complete it with no explicit response.
-                    match pending_deferrals.try_borrow_mut() {
-                        Ok(mut pending) => pending.push(deferral),
-                        Err(_) => {
-                            // Cannot store it: never release it either.
-                            fail_closed();
-                            std::mem::forget(deferral);
+                    // ManuallyDrop: if anything below panics (caught by the
+                    // guard), the deferral leaks instead of being released.
+                    let deferral = std::mem::ManuallyDrop::new(deferral);
+                    resource_panics.guard(|| match pending_deferrals.try_borrow_mut() {
+                        Ok(mut pending) => {
+                            pending.push(std::mem::ManuallyDrop::into_inner(deferral));
                         }
-                    }
+                        // Cannot store it: never release it either.
+                        Err(_) => fail_closed(),
+                    });
                 }
                 outcome
             }));
@@ -237,6 +243,8 @@ impl CallbackTokens {
         // Records only that the pinned document finished loading; no
         // application code runs inside the COM callback.
         let document_loaded = Rc::clone(&self.document_loaded);
+        let navigation_failed = Rc::clone(&self.navigation_failed);
+        let first_completion = Cell::new(true);
         let completed_panics = panics.clone();
         let completed_handler =
             NavigationCompletedEventHandler::create(Box::new(move |_, args| {
@@ -245,8 +253,14 @@ impl CallbackTokens {
                         if let Some(args) = args {
                             let mut success = windows::core::BOOL::default();
                             unsafe { args.IsSuccess(&mut success) }?;
+                            // Only the first completion is the pinned document's
+                            // own navigation; later failures are canceled
+                            // in-page navigations and do not count.
+                            let first = first_completion.replace(false);
                             if success.as_bool() {
                                 document_loaded.set(true);
+                            } else if first {
+                                navigation_failed.set(true);
                             }
                         }
                         Ok(())
@@ -366,6 +380,10 @@ impl CallbackTokens {
 
     pub(crate) fn resource_failed(&self) -> bool {
         self.resource_failed.get()
+    }
+
+    pub(crate) fn navigation_failed(&self) -> bool {
+        self.navigation_failed.get()
     }
 
     pub(crate) fn document_loaded(&self) -> bool {

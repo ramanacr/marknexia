@@ -77,7 +77,9 @@ use crate::{
         tab_slot,
     },
     app::{AppState as PortableAppState, FocusSurface},
-    documents::{self, RenderJob, RenderOutcome, RenderPool, RenderTickets},
+    documents::{
+        self, RenderJob, RenderOutcome, RenderPool, RenderTickets, StartupSignal, StartupTracker,
+    },
     keyboard::{KeyChord, ShellCommand, route_key},
     layout::{PixelRect, ShellLayout, ShellLayoutRequest},
     tabs::TabId,
@@ -157,18 +159,10 @@ struct AppState {
     /// Results arrived while the session was checked out; the message loop
     /// applies them after the outer call returns.
     render_results_deferred: bool,
-    /// Startup document tabs without a result yet, and whether any of them
-    /// rendered: when all fail, StartupFailed is signalled.
-    startup_pending: BTreeSet<u64>,
-    startup_rendered: bool,
-    /// WebView2 (or the COM STA it needs) could not start: no document can
-    /// be displayed in this process.
-    webview_unavailable: bool,
+    /// Decides FirstRender versus StartupFailed (exactly one, once).
+    startup: StartupTracker,
     /// Tabs whose rendered Markdown document is in the WebView session.
     rendered_tabs: BTreeSet<u64>,
-    /// The shell was started with document paths: `FirstRender` then means
-    /// a rendered document's navigation, not a placeholder's.
-    document_mode: bool,
 }
 
 impl AppState {
@@ -178,13 +172,10 @@ impl AppState {
             renders: RenderTickets::new(),
             render_pool: None,
             render_results_deferred: false,
-            startup_pending: BTreeSet::new(),
-            startup_rendered: false,
-            webview_unavailable: false,
+            startup: StartupTracker::default(),
             render_sender,
             render_results,
             rendered_tabs: BTreeSet::new(),
-            document_mode: false,
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -386,8 +377,10 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     };
     {
         let mut state = state.borrow_mut();
-        state.document_mode = document_mode;
-        state.startup_pending = startup_documents.iter().map(|(id, _)| id.get()).collect();
+        state.startup = StartupTracker::new(
+            document_mode,
+            startup_documents.iter().map(|(id, _)| id.get()),
+        );
     }
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
@@ -491,14 +484,16 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                     // and UIA still need COM on this thread.
                     state.apartment = Some(apartment);
                     state.shell_error = Some(format!("WebView2 unavailable: {error:?}"));
-                    state.webview_unavailable = true;
+                    let signal = state.startup.webview_unavailable();
+                    state.apply_startup(signal);
                 }
             }
         }
         Err(error) => {
             let mut state = state.borrow_mut();
             state.shell_error = Some(format!("COM STA unavailable: {error:?}"));
-            state.webview_unavailable = true;
+            let signal = state.startup.webview_unavailable();
+            state.apply_startup(signal);
         }
     }
     // Apply theme and bounds to the WebView session created above.
@@ -594,7 +589,8 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
         state_ref
             .tab_errors
             .insert(tab_id, format!("Could not start rendering: {error}"));
-        state_ref.startup_pending.remove(&tab_id);
+        let signal = state_ref.startup.failed(tab_id);
+        state_ref.apply_startup(signal);
     }
 }
 
@@ -685,16 +681,18 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         let mut state = state.borrow_mut();
         match added {
             // A startup tab stays pending until its navigation completes (or
-            // its controller fails to start): only then is it rendered.
+            // its controller or navigation fails): only then is it decided.
             Ok(()) if rendered && displayed => {
                 state.rendered_tabs.insert(tab_id);
             }
             Ok(()) => {
-                state.startup_pending.remove(&tab_id);
+                let signal = state.startup.failed(tab_id);
+                state.apply_startup(signal);
             }
             Err(error) => {
-                state.startup_pending.remove(&tab_id);
                 state.tab_errors.insert(tab_id, error);
+                let signal = state.startup.failed(tab_id);
+                state.apply_startup(signal);
             }
         }
     }
@@ -704,19 +702,21 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
     }
 }
 
-/// With document paths, signals `StartupFailed` once every startup document
-/// has a result (or closed) and none rendered, so a harness fails fast
+/// Re-evaluates startup readiness: with document paths, `StartupFailed`
+/// once nothing is pending and nothing rendered, so a harness fails fast
 /// instead of waiting for a `FirstRender` that cannot come.
 fn update_startup_readiness(state: &Rc<RefCell<AppState>>) {
     let mut state = state.borrow_mut();
-    let failed = documents::startup_failed(
-        state.document_mode,
-        state.startup_pending.is_empty(),
-        state.webview_unavailable,
-        state.startup_rendered,
-    );
-    if failed && let Some(readiness) = state.readiness.as_mut() {
-        readiness.startup_failed();
+    let signal = state.startup.evaluate();
+    state.apply_startup(signal);
+}
+
+impl AppState {
+    /// Raises the readiness event for a startup decision, if any.
+    fn apply_startup(&mut self, signal: Option<StartupSignal>) {
+        if let (Some(signal), Some(readiness)) = (signal, self.readiness.as_mut()) {
+            readiness.signal(signal);
+        }
     }
 }
 
@@ -1149,9 +1149,10 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
             state.renders.cancel(active.get());
             state.rendered_tabs.remove(&active.get());
             state.tab_errors.remove(&active.get());
-            state.startup_pending.remove(&active.get());
+            // Closed before it rendered: no longer a startup candidate.
+            let signal = state.startup.failed(active.get());
+            state.apply_startup(signal);
         }
-        update_startup_readiness(&state);
     }
     let previous = portable.borrow().active_tab();
     let applied = portable.borrow_mut().apply_command(command);
@@ -1330,49 +1331,59 @@ fn poll_webview(hwnd: HWND) {
         return;
     };
     let error = session.poll().err();
-    // An environment failure disables every document; a controller startup
-    // failure affects only its tab.
+    // An environment failure disables every document; other session errors
+    // are reported in the status bar. Tab-scoped failures (controller
+    // startup or setup, failed first navigation) come separately.
     let environment_failure = error
         .as_ref()
         .is_some_and(marknexia_webview::session::SessionError::is_environment_failure);
-    let failed_tab = error
-        .as_ref()
-        .and_then(marknexia_webview::session::SessionError::failed_startup_tab);
     let error = error.map(|error| format!("WebView2 poll: {error:?}"));
+    let tab_failures = session.drain_tab_failures();
     let (active, document_mode, rendered_tabs) = {
         let state = state.borrow();
         (
             state.webview_active,
-            state.document_mode,
+            state.startup.document_mode(),
             state.rendered_tabs.iter().copied().collect::<Vec<_>>(),
         )
     };
     let (controller_ready, active_loaded) = active
         .and_then(|tab| session.host(tab))
         .map_or((false, false), |host| (true, host.document_loaded()));
-    // With document paths, first render means the first rendered Markdown
-    // document finished navigating, whichever tab it is in.
-    let loaded_tabs: Vec<u64> = rendered_tabs
-        .iter()
-        .copied()
-        .filter(|tab| {
-            session
-                .host(*tab)
-                .is_some_and(|host| host.document_loaded())
-        })
-        .collect();
-    let document_loaded = if document_mode {
-        !loaded_tabs.is_empty()
+    // With document paths, first render means a rendered Markdown document
+    // finished navigating, whichever tab it is in; otherwise the active
+    // placeholder.
+    let loaded_tabs: Vec<u64> = if document_mode {
+        rendered_tabs
+            .iter()
+            .copied()
+            .filter(|tab| {
+                session
+                    .host(*tab)
+                    .is_some_and(|host| host.document_loaded())
+            })
+            .collect()
     } else {
-        active_loaded
+        active.filter(|_| active_loaded).into_iter().collect()
     };
     let accelerators = session.drain_accelerators();
     restore_session(&state, session);
-    if document_mode && !loaded_tabs.is_empty() {
+    {
         let mut state = state.borrow_mut();
-        state.startup_rendered = true;
-        for tab in &loaded_tabs {
-            state.startup_pending.remove(tab);
+        for (tab_id, failure) in &tab_failures {
+            state.tab_errors.insert(
+                *tab_id,
+                format!("The document view could not start ({failure:?})."),
+            );
+            let signal = state.startup.failed(*tab_id);
+            state.apply_startup(signal);
+        }
+        for tab_id in &loaded_tabs {
+            let signal = state.startup.rendered(*tab_id);
+            state.apply_startup(signal);
+        }
+        if controller_ready && let Some(readiness) = state.readiness.as_mut() {
+            readiness.controller_ready();
         }
     }
     // Shell chords pressed inside the document run here, outside COM.
@@ -1389,26 +1400,17 @@ fn poll_webview(hwnd: HWND) {
     if let Some(error) = error {
         {
             let mut state = state.borrow_mut();
-            if let Some(tab_id) = failed_tab {
-                // Only this tab cannot show its document.
-                state.startup_pending.remove(&tab_id);
-                state.tab_errors.insert(
-                    tab_id,
-                    format!("The document view could not start ({error})."),
-                );
-            } else {
-                state.shell_error = Some(error);
-                state.webview_unavailable |= environment_failure;
+            state.shell_error = Some(error);
+            if environment_failure {
+                let signal = state.startup.webview_unavailable();
+                state.apply_startup(signal);
             }
         }
-        update_startup_readiness(&state);
+        refresh_status(&state);
+    } else if !tab_failures.is_empty() {
         refresh_status(&state);
     }
-    if let Some(readiness) = state.borrow_mut().readiness.as_mut() {
-        readiness.observe(controller_ready, document_loaded);
-    }
 }
-
 /// Named manual-reset events that let an external measurement harness
 /// observe startup milestones of this process without UI scraping:
 /// `Local\Marknexia.WebViewReady.<pid>` when the active tab's controller
@@ -1439,16 +1441,19 @@ impl Readiness {
         }
     }
 
-    fn startup_failed(&mut self) {
-        signal_once(&mut self.startup_failed, &mut self.failure_signaled);
+    fn controller_ready(&mut self) {
+        signal_once(&mut self.webview_ready, &mut self.webview_signaled);
     }
 
-    fn observe(&mut self, controller_ready: bool, document_loaded: bool) {
-        if controller_ready {
-            signal_once(&mut self.webview_ready, &mut self.webview_signaled);
-        }
-        if document_loaded {
-            signal_once(&mut self.first_render, &mut self.render_signaled);
+    /// Exactly one of these is ever raised: `StartupTracker` decides once.
+    fn signal(&mut self, signal: StartupSignal) {
+        match signal {
+            StartupSignal::FirstRender => {
+                signal_once(&mut self.first_render, &mut self.render_signaled);
+            }
+            StartupSignal::StartupFailed => {
+                signal_once(&mut self.startup_failed, &mut self.failure_signaled);
+            }
         }
     }
 }

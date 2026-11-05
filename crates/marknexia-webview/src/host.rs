@@ -411,6 +411,14 @@ impl WebViewHost {
             .is_some_and(CallbackTokens::resource_failed)
     }
 
+    /// True when the pinned document's navigation completed without success
+    /// before it ever loaded.
+    pub fn navigation_failed(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::navigation_failed)
+    }
+
     /// True once the pinned document completed a successful navigation.
     pub fn document_loaded(&self) -> bool {
         self.callbacks

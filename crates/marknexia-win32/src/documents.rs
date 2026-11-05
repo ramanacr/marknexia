@@ -3,7 +3,7 @@
 //! OS call is the handle-type check in [`read_source`]; no HWND or COM.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fmt, fs,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -461,19 +461,92 @@ pub fn build_document(
         .map_err(|error| OpenError::Display(format!("{error:?}")))
 }
 
-/// Whether a shell started with document paths must signal `StartupFailed`:
-/// paths were requested, nothing rendered, and either every startup
-/// document has a result (or closed) or WebView2 cannot start at all.
-#[must_use]
-pub fn startup_failed(
-    document_mode: bool,
-    startup_pending_empty: bool,
-    webview_unavailable: bool,
-    startup_rendered: bool,
-) -> bool {
-    document_mode && !startup_rendered && (startup_pending_empty || webview_unavailable)
+/// A startup readiness signal for a measurement harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupSignal {
+    /// The first document finished navigating.
+    FirstRender,
+    /// No startup document can render.
+    StartupFailed,
 }
 
+/// Decides `FirstRender` versus `StartupFailed`. Exactly one of them is
+/// ever returned, once.
+/// - Without document paths, `FirstRender` follows the placeholder.
+/// - With document paths, every startup tab is pending until its
+///   navigation completes ([`Self::rendered`]) or it fails or closes
+///   ([`Self::failed`]). `FirstRender` comes from the first rendered
+///   document; `StartupFailed` comes when nothing is pending and nothing
+///   rendered, or at once when WebView2 is unavailable.
+#[derive(Debug, Default)]
+pub struct StartupTracker {
+    document_mode: bool,
+    pending: BTreeSet<u64>,
+    webview_unavailable: bool,
+    signaled: Option<StartupSignal>,
+}
+
+impl StartupTracker {
+    /// `document_mode` follows the requested paths; `pending` holds the tabs
+    /// that opened for them (possibly none).
+    #[must_use]
+    pub fn new(document_mode: bool, pending: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            document_mode,
+            pending: pending.into_iter().collect(),
+            webview_unavailable: false,
+            signaled: None,
+        }
+    }
+
+    #[must_use]
+    pub fn document_mode(&self) -> bool {
+        self.document_mode
+    }
+
+    #[must_use]
+    pub fn signaled(&self) -> Option<StartupSignal> {
+        self.signaled
+    }
+
+    /// A rendered document finished navigating (in document mode), or the
+    /// placeholder did (without document paths).
+    pub fn rendered(&mut self, tab_id: u64) -> Option<StartupSignal> {
+        self.pending.remove(&tab_id);
+        self.signal(StartupSignal::FirstRender)
+    }
+
+    /// A startup tab failed (read, render, controller or navigation) or
+    /// closed before rendering.
+    pub fn failed(&mut self, tab_id: u64) -> Option<StartupSignal> {
+        self.pending.remove(&tab_id);
+        self.evaluate()
+    }
+
+    /// WebView2 cannot start: no document can render in this process.
+    pub fn webview_unavailable(&mut self) -> Option<StartupSignal> {
+        self.webview_unavailable = true;
+        self.evaluate()
+    }
+
+    /// Re-checks after startup tabs were registered (some paths may not
+    /// have opened a tab at all).
+    pub fn evaluate(&mut self) -> Option<StartupSignal> {
+        if self.document_mode && (self.pending.is_empty() || self.webview_unavailable) {
+            self.signal(StartupSignal::StartupFailed)
+        } else {
+            None
+        }
+    }
+
+    fn signal(&mut self, signal: StartupSignal) -> Option<StartupSignal> {
+        if self.signaled.is_some() {
+            return None;
+        }
+        self.signaled = Some(signal);
+        Some(signal)
+    }
+}
 /// Pending renders by tab. The renderer cannot be cancelled, so a result is
 /// accepted only while its ticket is still the tab's current one: closing the
 /// tab (or starting a newer render for it) makes an in-flight result stale,

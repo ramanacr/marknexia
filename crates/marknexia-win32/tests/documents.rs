@@ -12,8 +12,9 @@ use std::{
 use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{PageIdentity, RenderError};
 use marknexia_win32::documents::{
-    OpenError, RenderJob, RenderOutcome, RenderPool, RenderTickets, SourceEncoding, build_document,
-    check_document_path, decode_source, read_source, startup_failed, startup_paths, tab_title,
+    OpenError, RenderJob, RenderOutcome, RenderPool, RenderTickets, SourceEncoding, StartupSignal,
+    StartupTracker, build_document, check_document_path, decode_source, read_source, startup_paths,
+    tab_title,
 };
 
 fn os(values: &[&str]) -> Vec<OsString> {
@@ -409,15 +410,32 @@ fn stale_render_results_are_discarded_and_queued_jobs_cancelled() {
 }
 
 #[test]
-fn startup_failure_follows_requested_paths_and_webview_availability() {
-    // No paths: never a startup failure.
-    assert!(!startup_failed(false, true, true, false));
-    // Paths requested but no tab opened (nothing pending), nothing rendered.
-    assert!(startup_failed(true, true, false, false));
-    // Still rendering, WebView2 available: not yet.
-    assert!(!startup_failed(true, false, false, false));
-    // WebView2 cannot start: fail even while renders are pending.
-    assert!(startup_failed(true, false, true, false));
-    // Something rendered: never a failure.
-    assert!(!startup_failed(true, true, true, true));
+fn exactly_one_of_first_render_or_startup_failed_is_signaled() {
+    use StartupSignal::{FirstRender, StartupFailed};
+    // No paths: the placeholder renders; nothing can fail it.
+    let mut tracker = StartupTracker::new(false, []);
+    assert_eq!(tracker.evaluate(), None);
+    assert_eq!(tracker.webview_unavailable(), None);
+    assert_eq!(tracker.rendered(1), Some(FirstRender));
+    assert_eq!(tracker.rendered(2), None);
+    // Paths requested but no tab opened.
+    let mut tracker = StartupTracker::new(true, []);
+    assert_eq!(tracker.evaluate(), Some(StartupFailed));
+    assert_eq!(tracker.rendered(1), None, "never both");
+    // One tab fails, the other renders: FirstRender only.
+    let mut tracker = StartupTracker::new(true, [1, 2]);
+    assert_eq!(tracker.failed(1), None);
+    assert_eq!(tracker.rendered(2), Some(FirstRender));
+    assert_eq!(tracker.failed(2), None);
+    assert_eq!(tracker.webview_unavailable(), None);
+    // A transient controller failure is final for that tab: StartupFailed
+    // only, and a later navigation completion cannot add FirstRender.
+    let mut tracker = StartupTracker::new(true, [1]);
+    assert_eq!(tracker.failed(1), Some(StartupFailed));
+    assert_eq!(tracker.rendered(1), None);
+    assert_eq!(tracker.signaled(), Some(StartupFailed));
+    // WebView2 unavailable while a render is pending.
+    let mut tracker = StartupTracker::new(true, [1]);
+    assert_eq!(tracker.webview_unavailable(), Some(StartupFailed));
+    assert_eq!(tracker.rendered(1), None);
 }

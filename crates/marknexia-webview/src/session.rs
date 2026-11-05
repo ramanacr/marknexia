@@ -42,11 +42,19 @@ pub enum SessionError {
     /// A panic was caught inside a WebView2 callback, so a failure or page
     /// notification may have been lost. Reported once per caught panic.
     CallbackPanicked,
-    /// The controller for `tab_id` could not be created.
-    ControllerStartupFailed {
-        tab_id: u64,
-        error: HostError,
-    },
+}
+
+/// Why one tab's document cannot be shown. Reported per tab through
+/// [`WebViewSession::drain_tab_failures`]; other tabs are unaffected, and a
+/// failed tab is not retried until the environment is recreated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabFailure {
+    /// The controller could not be created.
+    ControllerStartup(HostError),
+    /// The controller was created but could not be set up for the document.
+    ControllerSetup(HostError),
+    /// The document's first navigation completed without success.
+    NavigationFailed,
 }
 
 impl SessionError {
@@ -55,16 +63,6 @@ impl SessionError {
     #[must_use]
     pub fn is_environment_failure(&self) -> bool {
         matches!(self, Self::Environment(_))
-    }
-
-    /// The tab whose controller could not start, if this is that error.
-    /// Other tabs are unaffected.
-    #[must_use]
-    pub fn failed_startup_tab(&self) -> Option<u64> {
-        match self {
-            Self::ControllerStartupFailed { tab_id, .. } => Some(*tab_id),
-            _ => None,
-        }
     }
 }
 
@@ -117,6 +115,10 @@ pub struct WebViewSession {
     /// observer guard: a panic caught in any of them is reported by the next
     /// `poll`, even after that controller or subscription is gone.
     callback_panics: PanicFlag,
+    /// Tabs whose controller failed; skipped by the retry loop until the
+    /// environment is recreated or the document is removed.
+    failed_tabs: BTreeSet<u64>,
+    tab_failures: Vec<(u64, TabFailure)>,
 }
 
 impl WebViewSession {
@@ -167,6 +169,21 @@ impl WebViewSession {
                 blue: 255,
             },
             callback_panics: PanicFlag::default(),
+            failed_tabs: BTreeSet::new(),
+            tab_failures: Vec::new(),
+        }
+    }
+
+    /// Tab-scoped failures since the last drain, in order.
+    pub fn drain_tab_failures(&mut self) -> Vec<(u64, TabFailure)> {
+        std::mem::take(&mut self.tab_failures)
+    }
+
+    /// Records a tab-scoped failure once; the tab is no longer retried.
+    fn fail_tab(&mut self, tab_id: u64, failure: TabFailure) {
+        self.pending_hosts.remove(&tab_id);
+        if self.failed_tabs.insert(tab_id) {
+            self.tab_failures.push((tab_id, failure));
         }
     }
 
@@ -263,6 +280,7 @@ impl WebViewSession {
         self.recreating_tabs.remove(&tab_id);
         self.controller_generations.remove(&tab_id);
         self.process_observers.remove(&tab_id);
+        self.failed_tabs.remove(&tab_id);
         if let Some(mut host) = self.hosts.remove(&tab_id)
             && let Err(error) = host.close()
         {
@@ -323,6 +341,7 @@ impl WebViewSession {
         let controller_generation = self.next_controller_generation;
         self.controller_generations
             .insert(tab_id, controller_generation);
+        let lost_events = Rc::clone(&events);
         let result = environment.create_host_async(
             self.parent,
             &self.callback_panics,
@@ -334,11 +353,23 @@ impl WebViewSession {
                     result,
                 ));
             }),
+            // The completion panicked: still queue a failure, so the tab
+            // never stays pending.
+            Box::new(move || {
+                if let Ok(mut events) = lost_events.try_borrow_mut() {
+                    events.push_back(SessionEvent::HostCreated(
+                        generation,
+                        controller_generation,
+                        tab_id,
+                        Err(HostError::CallbackPanicked),
+                    ));
+                }
+            }),
         );
         if let Err(error) = result {
-            self.pending_hosts.remove(&tab_id);
+            // Tab-scoped: later tabs still start in the same pass.
             self.controller_generations.remove(&tab_id);
-            return Err(SessionError::ControllerStartupFailed { tab_id, error });
+            self.fail_tab(tab_id, TabFailure::ControllerStartup(error));
         }
         Ok(())
     }
@@ -382,9 +413,22 @@ impl WebViewSession {
                 if !self.hosts.contains_key(&tab_id)
                     && !self.orphaned_hosts.contains_key(&tab_id)
                     && !self.recreating_tabs.contains(&tab_id)
+                    && !self.failed_tabs.contains(&tab_id)
                 {
                     self.begin_host(tab_id)?;
                 }
+            }
+            // A document whose first navigation failed is a tab failure.
+            let failed_navigations: Vec<u64> = self
+                .hosts
+                .iter()
+                .filter(|(tab_id, host)| {
+                    host.navigation_failed() && !self.failed_tabs.contains(tab_id)
+                })
+                .map(|(tab_id, _)| *tab_id)
+                .collect();
+            for tab_id in failed_navigations {
+                self.fail_tab(tab_id, TabFailure::NavigationFailed);
             }
         }
         self.finish_environment_restore()?;
@@ -425,6 +469,8 @@ impl WebViewSession {
                 self.browser_observer = Some(observer);
                 self.browser_subscription = Some(subscription);
                 self.environment = Some(environment);
+                // A new environment is the explicit retry for failed tabs.
+                self.failed_tabs.clear();
                 for tab_id in self.documents.keys().copied().collect::<Vec<_>>() {
                     self.begin_host(tab_id)?;
                 }
@@ -448,13 +494,23 @@ impl WebViewSession {
                     Ok(host) => host,
                     Err(error) => {
                         self.controller_generations.remove(&tab_id);
-                        return Err(SessionError::ControllerStartupFailed { tab_id, error });
+                        self.fail_tab(tab_id, TabFailure::ControllerStartup(error));
+                        return Ok(());
                     }
                 };
                 // Before any callback is registered on this controller.
                 host.share_callback_panics(&self.callback_panics);
-                host.set_bounds(self.viewport)?;
-                host.set_default_background(self.background)?;
+                if let Err(error) = host
+                    .set_bounds(self.viewport)
+                    .and_then(|()| host.set_default_background(self.background))
+                {
+                    self.controller_generations.remove(&tab_id);
+                    if host.close().is_err() {
+                        self.orphaned_hosts.entry(tab_id).or_default().push(host);
+                    }
+                    self.fail_tab(tab_id, TabFailure::ControllerSetup(error));
+                    return Ok(());
+                }
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
                     if host.close().is_err() {
                         self.orphaned_hosts.entry(tab_id).or_default().push(host);
@@ -480,7 +536,8 @@ impl WebViewSession {
                     if host.close().is_err() {
                         self.orphaned_hosts.entry(tab_id).or_default().push(host);
                     }
-                    return Err(SessionError::Host(error));
+                    self.fail_tab(tab_id, TabFailure::ControllerSetup(error));
+                    return Ok(());
                 }
                 self.process_observers.insert(tab_id, observer);
                 self.hosts.insert(tab_id, host);
@@ -642,7 +699,11 @@ impl WebViewSession {
         if self.browser_recovering
             && !self.creating_environment
             && self.pending_hosts.is_empty()
-            && self.hosts.len() == self.documents.len()
+            // Failed tabs count as settled; they are not retried.
+            && self
+                .documents
+                .keys()
+                .all(|tab_id| self.hosts.contains_key(tab_id) || self.failed_tabs.contains(tab_id))
         {
             let action = self.recovery.environment_restored();
             if action == RecoveryAction::None && self.recovery.is_healthy() {
@@ -776,20 +837,40 @@ mod panic_tests {
     #[test]
     fn only_environment_errors_disable_every_document() {
         use crate::{environment::EnvironmentError, host::HostError};
-        let environment = SessionError::Environment(EnvironmentError::MissingEnvironment);
-        assert!(environment.is_environment_failure());
-        assert_eq!(environment.failed_startup_tab(), None);
-        let controller = SessionError::ControllerStartupFailed {
-            tab_id: 4,
-            error: HostError::ControllerStartupFailed(-1),
-        };
-        assert!(!controller.is_environment_failure());
-        assert_eq!(controller.failed_startup_tab(), Some(4));
-        assert!(!SessionError::CallbackPanicked.is_environment_failure());
-        assert_eq!(
-            SessionError::Host(HostError::CallFailed(-1)).failed_startup_tab(),
-            None
+        assert!(
+            SessionError::Environment(EnvironmentError::MissingEnvironment)
+                .is_environment_failure()
         );
+        assert!(
+            !SessionError::Host(HostError::ControllerStartupFailed(-1)).is_environment_failure()
+        );
+        assert!(!SessionError::CallbackPanicked.is_environment_failure());
+    }
+
+    /// A tab failure is reported once, and the failed tab is no longer
+    /// retried until the environment is recreated or the tab is removed.
+    #[test]
+    fn a_failed_tab_is_reported_once_and_not_retried() {
+        use super::TabFailure;
+        use crate::host::HostError;
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+        let mut session = WebViewSession::new(
+            apartment,
+            HWND::default(),
+            std::env::temp_dir().join("marknexia-failed-tab-test"),
+            Rc::downgrade(&observer),
+        );
+        let failure = TabFailure::ControllerStartup(HostError::ControllerStartupFailed(-1));
+        session.fail_tab(3, failure);
+        session.fail_tab(3, failure);
+        assert_eq!(session.drain_tab_failures(), [(3, failure)]);
+        assert!(session.drain_tab_failures().is_empty());
+        assert!(session.failed_tabs.contains(&3));
+        // Removing the tab forgets the failure.
+        session.documents.insert(3, crate::probe::document(3, 1));
+        session.remove_document(3).unwrap();
+        assert!(!session.failed_tabs.contains(&3));
     }
 
     /// The session's own flag: a recorded panic is reported by the next poll,

@@ -264,6 +264,23 @@ These supersede the matching statements above.
     `share_callback_panics`) and the browser-exit subscription (via
     `observe_browser_exit`, which now takes the session flag) both report
     through `poll` once.
+- **Tab-scoped controller failures (2026-11-06).**
+  - A tab whose controller fails is recorded once in a failed-tabs set.
+    That covers creation (synchronous or in `HostCreated`), setup
+    (bounds, background, callbacks, binding) and a first navigation that
+    completes without success.
+  - The failure is reported through `WebViewSession::drain_tab_failures`,
+    not as a `poll` error.
+  - The retry loop skips failed tabs and continues with the others. A
+    recreated environment is the explicit retry.
+  - Environment restore treats failed tabs as settled.
+  - If a controller-created completion panics, a failed `HostCreated` is
+    still queued.
+  - If building the host panics, the controller is closed before it is
+    released.
+  - `StartupTracker` decides `FirstRender` versus `StartupFailed`: exactly
+    one is ever raised, and a test covers the transient-failure case.
+  - IPC$ and non-ASCII UNC server and share names are refused.
 - **StartupFailed (2026-11-05).**
   - An environment failure disables every document and signals
     StartupFailed.

@@ -240,9 +240,14 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
         let controller_result = Rc::new(RefCell::new(None));
         let callback_state = Rc::clone(&controller_result);
         environment
-            .create_host_async(parent, &PanicFlag::default(), Box::new(move |result| {
-                *callback_state.borrow_mut() = Some(result);
-            }))
+            .create_host_async(
+                parent,
+                &PanicFlag::default(),
+                Box::new(move |result| {
+                    *callback_state.borrow_mut() = Some(result);
+                }),
+                Box::new(|| {}),
+            )
             .unwrap();
         pump_until(&controller_result, Duration::from_secs(30));
         let mut host = controller_result.borrow_mut().take().unwrap().unwrap();
@@ -266,9 +271,14 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
         let second_result = Rc::new(RefCell::new(None));
         let callback_state = Rc::clone(&second_result);
         environment
-            .create_host_async(parent, &PanicFlag::default(), Box::new(move |result| {
-                *callback_state.borrow_mut() = Some(result);
-            }))
+            .create_host_async(
+                parent,
+                &PanicFlag::default(),
+                Box::new(move |result| {
+                    *callback_state.borrow_mut() = Some(result);
+                }),
+                Box::new(|| {}),
+            )
             .unwrap();
         pump_until(&second_result, Duration::from_secs(30));
         let mut second_host = second_result.borrow_mut().take().unwrap().unwrap();

@@ -310,18 +310,26 @@ impl WebViewEnvironment {
             .map_err(|error| EnvironmentError::CallFailed(error.code().0))
     }
 
-    /// Starts controller creation; the completion handler runs under the
-    /// panic guard like [`Self::create_async`].
+    /// Starts controller creation. The completion handler runs under the
+    /// panic guard like [`Self::create_async`]:
+    /// - if building the host panics, the controller is closed before it is
+    ///   released and `completed` receives `Err(CallbackPanicked)`;
+    /// - if `completed` itself panics, `lost` runs (under the guard) so the
+    ///   caller can still record a failed result instead of waiting forever.
     pub fn create_host_async(
         &self,
         parent: HWND,
         panics: &PanicFlag,
         completed: Box<dyn FnOnce(Result<WebViewHost, HostError>)>,
+        lost: Box<dyn FnOnce()>,
     ) -> Result<(), HostError> {
         let shared_environment = self.clone();
         let panics = panics.clone();
         let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
             move |result, controller| {
+                // Kept so a panic while building the host can still close
+                // the controller before it is released.
+                let close_on_panic = controller.clone();
                 let outcome =
                     panics
                         .call(|| match result {
@@ -332,8 +340,18 @@ impl WebViewEnvironment {
                                 },
                             ),
                         })
-                        .unwrap_or(Err(HostError::CallbackPanicked));
-                panics.guard(|| completed(outcome));
+                        .unwrap_or_else(|| {
+                            if let Some(controller) = close_on_panic.as_ref() {
+                                // SAFETY: the controller belongs to this STA
+                                // callback; Close is its documented teardown.
+                                let _ = panics.call(|| unsafe { controller.Close() });
+                            }
+                            Err(HostError::CallbackPanicked)
+                        });
+                drop(close_on_panic);
+                if panics.call(|| completed(outcome)).is_none() {
+                    panics.guard(lost);
+                }
                 Ok(())
             },
         ));
