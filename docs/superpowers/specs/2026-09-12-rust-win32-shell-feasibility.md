@@ -244,7 +244,7 @@ These supersede the matching statements above.
 - `cargo deny check` failed only on licenses reached through the optional
   `candidate-comrak` feature (comrak `BSD-2-Clause`, finl_unicode
   `Unicode-DFS-2016`); `deny.toml` is unchanged. Owner decision
-  (2026-11-05): comrak was removed, and `cargo deny check` passes.
+  (2026-09-28): comrak was removed, and `cargo deny check` passes.
 - Release builds pass for `x86_64` (483–488 KB) and `aarch64`
   (440 KB, compile-only).
 

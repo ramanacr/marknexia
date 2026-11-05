@@ -1,6 +1,6 @@
 # Rust content dependency decision: Markdown parser
 
-Status: **Decided.** Owner decision (2026-11-05): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed. The comparison below is kept as the record of the bake-off; references to comrak, to `candidate-comrak` and to "both candidates" describe the code before that decision.
+Status: **Decided.** Owner decision (2026-09-28): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed. The comparison below is kept as the record of the bake-off; references to comrak, to `candidate-comrak` and to "both candidates" describe the code before that decision.
 
 Scope: feasibility plan Task 4, Steps 1, 2, and 4, for the Markdown parser only. The sanitizer (`ammonia`, Step 3) and the highlighting approach are evaluated separately and are not decided here. Candidate HTML is raw, unsanitized, and content-unsafe.
 

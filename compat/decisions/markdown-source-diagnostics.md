@@ -2,7 +2,7 @@
 
 Status: **proposed — requires Task 8 approval**
 
-Scope: `crates/marknexia-markdown` (pulldown-cmark; owner decision (2026-11-05): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed.)
+Scope: `crates/marknexia-markdown` (pulldown-cmark; owner decision (2026-09-28): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed.)
 
 ## Observable difference
 

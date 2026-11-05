@@ -78,7 +78,7 @@ The first Rust release will not:
 
 Candidates must pass compatibility, licensing, security, maintenance, and binary-size evaluation:
 
-- Markdown: `comrak` versus `pulldown-cmark`. Owner decision (2026-11-05): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed.
+- Markdown: `comrak` versus `pulldown-cmark`. Owner decision (2026-09-28): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed.
 - Sanitization: `ammonia` plus Marknexia URL, SVG, CSS, and attribute policy.
 - Highlighting: `syntect` versus a narrowly configured Tree-sitter implementation.
 - Serialization: `serde` and `serde_json`.

@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! Markdown parser bake-off; no parser is selected here.
+//! Markdown parsing. pulldown-cmark is the selected parser (owner decision
+//! 2026-09-28).
 //!
-//! Candidate adapters translate third-party syntax trees into a
+//! The adapter translates pulldown-cmark's event stream into a
 //! Marknexia-owned model; `extensions` reproduces the .NET Markdig 0.40
 //! pipeline on top of it. Output is content-unsafe: it includes unsanitized
 //! raw HTML (including parity-required mis-nested alert markup) and must never

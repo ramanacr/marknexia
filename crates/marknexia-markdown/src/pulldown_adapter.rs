@@ -1,4 +1,5 @@
-//! pulldown-cmark candidate: folds the pulldown event stream into the
+//! pulldown-cmark, the selected parser (owner decision 2026-09-28): folds
+//! the pulldown event stream into the
 //! Marknexia document model. Rendering and every Markdig-specific behavior
 //! live in `extensions`.
 
@@ -19,8 +20,8 @@ use pulldown_cmark::{
 };
 use std::ops::Range;
 
-/// Exploratory candidate. Output is content-unsafe; never pass it to WebView
-/// without sanitization.
+/// The selected Markdown parser (owner decision 2026-09-28). Output is
+/// content-unsafe; never pass it to WebView without sanitization.
 pub struct PulldownAdapter;
 
 impl MarkdownEngine for PulldownAdapter {
