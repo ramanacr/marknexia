@@ -23,14 +23,16 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
+        System::Threading::{AttachThreadInput, GetCurrentThreadId},
         UI::{
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY,
+                SendInput, VIRTUAL_KEY, VK_MENU,
             },
             WindowsAndMessaging::{
-                EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
-                IsWindowVisible, PostMessageW, WM_CLOSE,
+                BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW,
+                GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE,
+                SetForegroundWindow, ShowWindowAsync, SwitchToThisWindow, WM_CLOSE,
             },
         },
     },
@@ -187,7 +189,74 @@ pub fn send_chord_to(process_id: u32, keys: &[VIRTUAL_KEY]) {
     assert_eq!(
         foreground_owner(),
         process_id,
-        "shell must be foreground before SendInput"
+        "shell must be foreground before SendInput; foreground is {}",
+        foreground_description()
     );
     send_chord(keys);
+}
+
+/// The foreground window's class, title and owning process, for failure
+/// messages when activation is refused.
+pub fn foreground_description() -> String {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_invalid() {
+        return "no window".to_owned();
+    }
+    let mut class = [0u16; 256];
+    let class_len = unsafe { GetClassNameW(foreground, &mut class) }.max(0) as usize;
+    let mut title = [0u16; 256];
+    let title_len = unsafe { GetWindowTextW(foreground, &mut title) }.max(0) as usize;
+    format!(
+        "class {:?}, title {:?}, process {}",
+        String::from_utf16_lossy(&class[..class_len]),
+        String::from_utf16_lossy(&title[..title_len]),
+        foreground_owner()
+    )
+}
+
+/// Whether this run is on a GitHub Actions runner (`CI` and `GITHUB_ACTIONS`
+/// both `true`), the only place the synthetic Alt unlock is used.
+pub fn on_github_actions() -> bool {
+    let set = |name: &str| std::env::var(name).is_ok_and(|v| v.eq_ignore_ascii_case("true"));
+    set("CI") && set("GITHUB_ACTIONS")
+}
+
+/// One activation attempt for the launched shell window. Windows refuses
+/// `SetForegroundWindow` from a background process, so this tries, in order:
+/// 1. on GitHub Actions only, a synthetic Alt press, which releases the
+///    foreground lock;
+/// 2. attaching this thread's input to the foreground thread (when one
+///    exists), then `BringWindowToTop` and `SetForegroundWindow`;
+/// 3. `SwitchToThisWindow`, which the shell's task switching also uses;
+/// 4. on every third attempt, an asynchronous minimize and restore.
+///
+/// No system setting (such as `SPI_SETFOREGROUNDLOCKTIMEOUT`) is changed.
+pub fn activate_attempt(hwnd: HWND, attempt: u32) {
+    if on_github_actions() {
+        send_chord(&[VK_MENU]);
+    }
+    let current = unsafe { GetCurrentThreadId() };
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_thread = if foreground.is_invalid() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(foreground, None) }
+    };
+    let attached = foreground_thread != 0
+        && foreground_thread != current
+        && unsafe { AttachThreadInput(current, foreground_thread, true) }.as_bool();
+    let _ = unsafe { BringWindowToTop(hwnd) };
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    if attached {
+        let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
+    }
+    unsafe { SwitchToThisWindow(hwnd, true) };
+    if attempt % 3 == 2 {
+        // Asynchronous: a busy shell cannot block this test thread.
+        unsafe {
+            let _ = ShowWindowAsync(hwnd, SW_MINIMIZE);
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+        let _ = unsafe { SetForegroundWindow(hwnd) };
+    }
 }

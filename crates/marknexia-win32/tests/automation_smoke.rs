@@ -10,13 +10,11 @@ use std::{
 
 use windows::{
     Win32::{
-        Foundation::HWND,
         System::{
             Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoUninitialize,
             },
-            Threading::{AttachThreadInput, GetCurrentThreadId},
             Variant::VARIANT,
         },
         UI::{
@@ -27,11 +25,7 @@ use windows::{
                 UIA_SelectionItemPatternId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
                 UIA_TextPatternId,
             },
-            Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_TAB},
-            WindowsAndMessaging::{
-                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SW_MINIMIZE,
-                SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
-            },
+            Input::KeyboardAndMouse::{VK_CONTROL, VK_TAB},
         },
     },
     core::Interface,
@@ -44,7 +38,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 #[path = "support/shell.rs"]
 mod shell_support;
 
-use shell_support::{ShellProcess, find_shell_window, foreground_owner, send_chord, send_chord_to};
+use shell_support::{
+    ShellProcess, activate_attempt, find_shell_window, foreground_owner, send_chord_to,
+};
 
 /// Single-threaded COM apartment for the UIA client, released on drop.
 struct Apartment;
@@ -139,43 +135,6 @@ fn visible_document_element(
         .find(|document| {
             unsafe { document.CurrentIsOffscreen() }.is_ok_and(|offscreen| !offscreen.as_bool())
         })
-}
-
-/// Activation of the shell window on GitHub Actions only (`CI=true` and
-/// `GITHUB_ACTIONS=true`). Windows refuses
-/// `SetForegroundWindow` from a background process, so this:
-/// 1. attaches this thread's input to the current foreground thread (when
-///    one exists), raises the shell with `BringWindowToTop` and
-///    `SetForegroundWindow`, then detaches;
-/// 2. on every third attempt, minimizes and restores the shell, which
-///    activates a restored top-level window.
-///
-/// No system setting (such as `SPI_SETFOREGROUNDLOCKTIMEOUT`) is changed.
-fn ci_activate(hwnd: HWND, attempt: u32) {
-    let current = unsafe { GetCurrentThreadId() };
-    let foreground = unsafe { GetForegroundWindow() };
-    let foreground_thread = if foreground.is_invalid() {
-        0
-    } else {
-        unsafe { GetWindowThreadProcessId(foreground, None) }
-    };
-    let attached = foreground_thread != 0
-        && foreground_thread != current
-        && unsafe { AttachThreadInput(current, foreground_thread, true) }.as_bool();
-    let _ = unsafe { BringWindowToTop(hwnd) };
-    let _ = unsafe { SetForegroundWindow(hwnd) };
-    if attached {
-        let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
-    }
-    if attempt % 3 == 2 {
-        // Asynchronous: the shell thread processes the show commands, so a
-        // busy shell cannot block this test thread.
-        unsafe {
-            let _ = ShowWindowAsync(hwnd, SW_MINIMIZE);
-            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
-        }
-        let _ = unsafe { SetForegroundWindow(hwnd) };
-    }
 }
 
 fn select_and_observe(
@@ -308,23 +267,14 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     // the foreground (e.g. on CI runners). UI Automation SetFocus may activate
     // the target window, so try both until the launched shell owns the
     // foreground.
+    // The synthetic Alt unlock inside `activate_attempt` is only used on
+    // GitHub Actions runners, never on a developer desktop where a synthetic
+    // key could reach another application.
     let shell_is_foreground = || foreground_owner() == shell.id();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    // On CI runners no user owns the foreground, and Windows refuses
-    // SetForegroundWindow from a background process. A synthetic Alt press
-    // releases the foreground lock. It is only used on GitHub Actions runners
-    // (CI=true and GITHUB_ACTIONS=true), never on a developer desktop where a
-    // synthetic key could reach another application.
-    let is_true =
-        |name: &str| std::env::var(name).is_ok_and(|value| value.eq_ignore_ascii_case("true"));
-    let on_ci = is_true("CI") && is_true("GITHUB_ACTIONS");
+    let deadline = Instant::now() + Duration::from_secs(20);
     let mut attempt = 0_u32;
     while !shell_is_foreground() && Instant::now() < deadline {
-        if on_ci {
-            send_chord(&[VK_MENU]);
-            ci_activate(hwnd, attempt);
-        }
-        let _ = unsafe { SetForegroundWindow(hwnd) };
+        activate_attempt(hwnd, attempt);
         let _ = unsafe { root.SetFocus() };
         thread::sleep(Duration::from_millis(200));
         attempt += 1;

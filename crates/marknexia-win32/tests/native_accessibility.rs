@@ -50,11 +50,11 @@ use windows::{
                 DPI_AWARENESS_PER_MONITOR_AWARE, GetAwarenessFromDpiAwarenessContext,
                 GetDpiForWindow, GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
             },
-            Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_W},
+            Input::KeyboardAndMouse::{VK_CONTROL, VK_W},
             WindowsAndMessaging::{
                 FindWindowExW, GetClientRect, SMTO_ABORTIFHUNG, SPI_GETHIGHCONTRAST,
-                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SetForegroundWindow,
-                SystemParametersInfoW, WM_NULL,
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SystemParametersInfoW,
+                WM_NULL,
             },
         },
     },
@@ -77,7 +77,9 @@ const PRINT_CLIENT_FULL_CONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(1 | 2);
 #[path = "support/shell.rs"]
 mod shell_support;
 
-use shell_support::{ShellProcess, find_shell_window, foreground_owner, send_chord, send_chord_to};
+use shell_support::{
+    ShellProcess, activate_attempt, find_shell_window, foreground_owner, send_chord_to,
+};
 
 /// Single-threaded COM apartment for the UIA client, released on drop.
 struct Apartment;
@@ -221,21 +223,15 @@ impl Launched {
     /// shell, and use a synthetic Alt press (which releases the foreground
     /// lock) only on a GitHub Actions runner, never on a developer desktop.
     fn activate(&self) {
-        let on_ci = env_is_true("CI") && env_is_true("GITHUB_ACTIONS");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut attempt = 0;
         while !self.is_foreground() && Instant::now() < deadline {
-            if on_ci {
-                send_chord(&[VK_MENU]);
-            }
-            let _ = unsafe { SetForegroundWindow(self.hwnd) };
+            activate_attempt(self.hwnd, attempt);
+            attempt += 1;
             let _ = unsafe { self.root.SetFocus() };
             thread::sleep(Duration::from_millis(200));
         }
     }
-}
-
-fn env_is_true(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 // ---------------------------------------------------------------------------
