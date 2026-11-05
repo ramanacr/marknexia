@@ -21,7 +21,7 @@ use webview2_com::{
 };
 use windows::{
     Win32::{
-        Foundation::HGLOBAL,
+        Foundation::{E_UNEXPECTED, HGLOBAL},
         System::Com::{STREAM_SEEK_SET, StructuredStorage::CreateStreamOnHGlobal},
     },
     core::{PCWSTR, PWSTR},
@@ -108,74 +108,81 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         let resource_failed = Rc::clone(&self.resource_failed);
         let pending_deferrals = Rc::clone(&self.pending_deferrals);
+        let resource_panics = panics.clone();
         let resource_handler =
             WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else {
                     return Ok(());
                 };
-                let deferral = match unsafe { args.GetDeferral() } {
-                    Ok(deferral) => deferral,
-                    Err(_) => {
-                        // No deferral exists to hold. Try an immediate explicit
-                        // deny, then force controller teardown if that also
-                        // fails; this edge requires native verification.
-                        return match unsafe { args.SetResponse(&deny_response) } {
-                            Ok(()) => Ok(()),
-                            Err(error) => {
-                                resource_failed.set(true);
-                                // No deferral exists to hold this request. Close
-                                // the controller synchronously so an unset
-                                // response cannot fall through to the network.
-                                if security_abort
-                                    .upgrade()
-                                    .is_none_or(|abort| abort().is_err())
-                                {
-                                    resource_failed.set(true);
-                                }
-                                Err(error)
-                            }
-                        };
+                // Fail closed: mark the boundary failed and close the
+                // controller synchronously so an unanswered request cannot
+                // fall through to the network.
+                let fail_closed = || {
+                    resource_failed.set(true);
+                    if let Some(abort) = security_abort.upgrade() {
+                        let _ = abort();
                     }
                 };
-                let mut gate = ResourceGate::new(deferral);
-                let assignment = install_response(
-                    &mut gate,
-                    || {
-                        response_decision(&args, weak_document.upgrade().as_deref())
-                            .and_then(|response| create_response(&response_environment, response))
-                            .and_then(|response| unsafe { args.SetResponse(&response) })
-                    },
-                    || unsafe { args.SetResponse(&deny_response) },
-                );
-                if assignment.is_err() {
-                    resource_failed.set(true);
-                    // Keep the deferral alive and close immediately. The STA
-                    // poll will subsequently release the closed host state.
-                    if security_abort
-                        .upgrade()
-                        .is_none_or(|abort| abort().is_err())
-                    {
-                        resource_failed.set(true);
+                let outcome = resource_panics.call(|| {
+                    let deferral = match unsafe { args.GetDeferral() } {
+                        Ok(deferral) => deferral,
+                        Err(_) => {
+                            // No deferral exists to hold. Try an immediate
+                            // explicit deny, then force controller teardown if
+                            // that also fails.
+                            return match unsafe { args.SetResponse(&deny_response) } {
+                                Ok(()) => Ok(()),
+                                Err(error) => {
+                                    fail_closed();
+                                    Err(error)
+                                }
+                            };
+                        }
+                    };
+                    let mut gate = ResourceGate::new(deferral);
+                    // The gate lives outside this inner guard, so a panic
+                    // while deciding the response cannot release the deferral.
+                    let completion = resource_panics
+                        .call(|| {
+                            let assignment = install_response(
+                                &mut gate,
+                                || {
+                                    response_decision(&args, weak_document.upgrade().as_deref())
+                                        .and_then(|response| {
+                                            create_response(&response_environment, response)
+                                        })
+                                        .and_then(|response| unsafe { args.SetResponse(&response) })
+                                },
+                                || unsafe { args.SetResponse(&deny_response) },
+                            );
+                            if assignment.is_err() {
+                                // Keep the deferral alive and close immediately.
+                                fail_closed();
+                            }
+                            let completion = gate
+                                .complete_if_responded(|deferral| unsafe { deferral.Complete() });
+                            if completion.is_err() {
+                                fail_closed();
+                            }
+                            completion
+                        })
+                        .unwrap_or_else(|| {
+                            fail_closed();
+                            Err(E_UNEXPECTED.into())
+                        });
+                    if let Some(deferral) = gate.take_pending() {
+                        // WebView2 documents that an outstanding deferral
+                        // blocks this request. Keep it live until
+                        // controller.Close has succeeded; never complete it
+                        // with no explicit response.
+                        pending_deferrals.borrow_mut().push(deferral);
                     }
-                }
-                let completion =
-                    gate.complete_if_responded(|deferral| unsafe { deferral.Complete() });
-                if completion.is_err() {
-                    resource_failed.set(true);
-                    if security_abort
-                        .upgrade()
-                        .is_none_or(|abort| abort().is_err())
-                    {
-                        resource_failed.set(true);
-                    }
-                }
-                if let Some(deferral) = gate.take_pending() {
-                    // WebView2 documents that an outstanding deferral blocks
-                    // this request. Keep it live until controller.Close has
-                    // succeeded; never complete it with no explicit response.
-                    pending_deferrals.borrow_mut().push(deferral);
-                }
-                completion
+                    completion
+                });
+                outcome.unwrap_or_else(|| {
+                    fail_closed();
+                    Err(E_UNEXPECTED.into())
+                })
             }));
         let mut token = 0;
         unsafe {
@@ -186,18 +193,30 @@ impl CallbackTokens {
         self.resource = Some(token);
 
         let weak_document = Rc::downgrade(document);
+        let navigation_panics = panics.clone();
         let navigation_handler =
             NavigationStartingEventHandler::create(Box::new(move |_, args| {
-                if let Some(args) = args {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let decision = navigation_panics.call(|| {
                     let mut uri = PWSTR::null();
-                    unsafe { args.Uri(&mut uri) }?;
+                    let uri_result = unsafe { args.Uri(&mut uri) };
                     let uri = webview2_com::take_pwstr(uri);
-                    let permitted = weak_document
-                        .upgrade()
-                        .is_some_and(|doc| doc.permits_navigation(&uri));
-                    unsafe { args.SetCancel(!permitted) }?;
+                    uri_result.map(|()| {
+                        weak_document
+                            .upgrade()
+                            .is_some_and(|doc| doc.permits_navigation(&uri))
+                    })
+                });
+                // Only an explicit permit lets the navigation continue; a
+                // failed URI read or a panic cancels it.
+                let permitted = matches!(decision, Some(Ok(true)));
+                let cancelled = unsafe { args.SetCancel(!permitted) };
+                match decision {
+                    Some(Err(error)) => cancelled.and(Err(error)),
+                    _ => cancelled,
                 }
-                Ok(())
             }));
         unsafe {
             self.core
@@ -209,16 +228,21 @@ impl CallbackTokens {
         // Records only that the pinned document finished loading; no
         // application code runs inside the COM callback.
         let document_loaded = Rc::clone(&self.document_loaded);
+        let completed_panics = panics.clone();
         let completed_handler =
             NavigationCompletedEventHandler::create(Box::new(move |_, args| {
-                if let Some(args) = args {
-                    let mut success = windows::core::BOOL::default();
-                    unsafe { args.IsSuccess(&mut success) }?;
-                    if success.as_bool() {
-                        document_loaded.set(true);
-                    }
-                }
-                Ok(())
+                completed_panics
+                    .call(|| {
+                        if let Some(args) = args {
+                            let mut success = windows::core::BOOL::default();
+                            unsafe { args.IsSuccess(&mut success) }?;
+                            if success.as_bool() {
+                                document_loaded.set(true);
+                            }
+                        }
+                        Ok(())
+                    })
+                    .unwrap_or(Ok(()))
             }));
         unsafe {
             self.core
@@ -228,27 +252,32 @@ impl CallbackTokens {
         self.navigation_completed = Some(token);
 
         let weak_document = Rc::downgrade(document);
-        let panics = panics.clone();
+        let message_panics = panics.clone();
         let message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
-            if let (Some(args), Some(document)) = (args, weak_document.upgrade()) {
-                let mut source = PWSTR::null();
-                let mut json = PWSTR::null();
-                let source_result = unsafe { args.Source(&mut source) };
-                let source = webview2_com::take_pwstr(source);
-                source_result?;
-                let json_result = unsafe { args.WebMessageAsJson(&mut json) };
-                let json = webview2_com::take_pwstr(json);
-                json_result?;
-                if let (Ok(message), Some(messages)) = (
-                    document.parse_message(json.as_bytes(), &source),
-                    messages.upgrade(),
-                ) {
-                    // The COM callback only enqueues into host-owned state.
-                    // Application code is invoked later by session.poll.
-                    panics.guard(|| messages.borrow_mut().push_back(message));
-                }
-            }
-            Ok(())
+            // The whole body, including parsing the untrusted JSON, runs
+            // under the guard. The callback only enqueues into host-owned
+            // state; application code runs later in session.poll.
+            message_panics
+                .call(|| {
+                    if let (Some(args), Some(document)) = (args, weak_document.upgrade()) {
+                        let mut source = PWSTR::null();
+                        let mut json = PWSTR::null();
+                        let source_result = unsafe { args.Source(&mut source) };
+                        let source = webview2_com::take_pwstr(source);
+                        source_result?;
+                        let json_result = unsafe { args.WebMessageAsJson(&mut json) };
+                        let json = webview2_com::take_pwstr(json);
+                        json_result?;
+                        if let (Ok(message), Some(messages)) = (
+                            document.parse_message(json.as_bytes(), &source),
+                            messages.upgrade(),
+                        ) {
+                            messages.borrow_mut().push_back(message);
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
         }));
         unsafe {
             self.core
@@ -257,12 +286,16 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         self.message = Some(token);
 
+        let window_panics = panics.clone();
         let new_window_handler =
             NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
-                if let Some(args) = args {
-                    unsafe { args.SetHandled(true) }?;
-                }
-                Ok(())
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                window_panics
+                    .call(|| unsafe { args.SetHandled(true) })
+                    // Never let a new window open: retry outside the guard.
+                    .unwrap_or_else(|| unsafe { args.SetHandled(true) })
             }));
         unsafe {
             self.core

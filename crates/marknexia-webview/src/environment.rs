@@ -154,17 +154,10 @@ pub struct BrowserExit {
 pub struct BrowserExitSubscription {
     environment: Option<ICoreWebView2Environment5>,
     token: i64,
-    /// Panics caught in the browser-exit callback, surfaced by poll.
-    panics: crate::panic_flag::PanicFlag,
     _apartment: Rc<StaApartment>,
 }
 
 impl BrowserExitSubscription {
-    /// True once after a panic was caught in the browser-exit callback.
-    pub(crate) fn take_callback_panic(&self) -> bool {
-        self.panics.take()
-    }
-
     pub fn close(&mut self) -> Result<(), EnvironmentError> {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(());
@@ -201,28 +194,41 @@ impl WebViewEnvironment {
         &self,
         observer: Weak<dyn Fn(BrowserExit)>,
     ) -> Result<BrowserExitSubscription, EnvironmentError> {
+        self.observe_browser_exit_with(observer, &crate::panic_flag::PanicFlag::default())
+    }
+
+    /// Like [`Self::observe_browser_exit`], recording a panic caught in the
+    /// callback in `panics` (the owning session's flag).
+    pub(crate) fn observe_browser_exit_with(
+        &self,
+        observer: Weak<dyn Fn(BrowserExit)>,
+        panics: &crate::panic_flag::PanicFlag,
+    ) -> Result<BrowserExitSubscription, EnvironmentError> {
         let environment = self
             .inner
             .cast::<ICoreWebView2Environment5>()
             .map_err(|error| EnvironmentError::CallFailed(error.code().0))?;
-        let panics = crate::panic_flag::PanicFlag::default();
         let callback_panics = panics.clone();
         let handler = BrowserProcessExitedEventHandler::create(Box::new(move |_, args| {
-            if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
-                let mut kind = COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND::default();
-                let mut process_id = 0;
-                // SAFETY: event args are live for this STA callback. Both
-                // outputs are local values and are not retained by COM.
-                unsafe { args.BrowserProcessExitKind(&mut kind) }?;
-                unsafe { args.BrowserProcessId(&mut process_id) }?;
-                callback_panics.guard(|| {
-                    observer(BrowserExit {
-                        kind: kind.into(),
-                        process_id,
-                    })
-                });
-            }
-            Ok(())
+            // The whole body runs under the guard; a panic is recorded and
+            // surfaced by the next session poll.
+            callback_panics
+                .call(|| {
+                    if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
+                        let mut kind = COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND::default();
+                        let mut process_id = 0;
+                        // SAFETY: event args are live for this STA callback. Both
+                        // outputs are local values and are not retained by COM.
+                        unsafe { args.BrowserProcessExitKind(&mut kind) }?;
+                        unsafe { args.BrowserProcessId(&mut process_id) }?;
+                        observer(BrowserExit {
+                            kind: kind.into(),
+                            process_id,
+                        });
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
         }));
         let mut token = 0;
         // SAFETY: COM retains the handler after this STA registration. The
@@ -232,7 +238,6 @@ impl WebViewEnvironment {
         Ok(BrowserExitSubscription {
             environment: Some(environment),
             token,
-            panics,
             _apartment: Rc::clone(&self._apartment),
         })
     }

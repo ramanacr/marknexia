@@ -125,7 +125,8 @@ pub struct WebViewHost {
     page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
     accelerator_token: Option<i64>,
     accelerators: Rc<RefCell<VecDeque<ShellAccelerator>>>,
-    /// Panics caught in this controller's callbacks, surfaced by poll.
+    /// Where panics caught in this controller's callbacks are recorded (the
+    /// owning session's flag once `share_callback_panics` ran).
     callback_panics: PanicFlag,
     _environment: WebViewEnvironment,
 }
@@ -197,39 +198,45 @@ impl WebViewHost {
         let queue = Rc::downgrade(&self.accelerators);
         let panics = self.callback_panics.clone();
         let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
-            let Some(args) = args else {
-                return Ok(());
-            };
-            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
-            let mut key = 0_u32;
-            // SAFETY: event args are valid for this STA callback; outputs are
-            // live stack values that COM does not retain.
-            unsafe {
-                args.KeyEventKind(&mut kind)?;
-                args.VirtualKey(&mut key)?;
-            }
-            if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
-                && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
-            {
-                return Ok(());
-            }
-            // SAFETY: GetKeyState reads this thread's keyboard state, which
-            // WebView2 synchronizes before raising the event on the UI thread.
-            let down = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
-            let Ok(key) = u16::try_from(key) else {
-                return Ok(());
-            };
-            if let Some(chord) = ShellAccelerator::from_key(
-                key,
-                down(VK_CONTROL.0),
-                down(VK_SHIFT.0),
-                down(VK_MENU.0),
-            ) && let Some(queue) = queue.upgrade()
-            {
-                unsafe { args.SetHandled(true)? };
-                panics.guard(|| queue.borrow_mut().push_back(chord));
-            }
-            Ok(())
+            // The whole body runs under the guard; a panic is recorded and
+            // the key is left to WebView2.
+            panics
+                .call(|| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+                    let mut key = 0_u32;
+                    // SAFETY: event args are valid for this STA callback; outputs are
+                    // live stack values that COM does not retain.
+                    unsafe {
+                        args.KeyEventKind(&mut kind)?;
+                        args.VirtualKey(&mut key)?;
+                    }
+                    if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                        && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+                    {
+                        return Ok(());
+                    }
+                    // SAFETY: GetKeyState reads this thread's keyboard state, which
+                    // WebView2 synchronizes before raising the event on the UI thread.
+                    let down = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
+                    let Ok(key) = u16::try_from(key) else {
+                        return Ok(());
+                    };
+                    if let Some(chord) = ShellAccelerator::from_key(
+                        key,
+                        down(VK_CONTROL.0),
+                        down(VK_SHIFT.0),
+                        down(VK_MENU.0),
+                    ) && let Some(queue) = queue.upgrade()
+                    {
+                        unsafe { args.SetHandled(true)? };
+                        queue.borrow_mut().push_back(chord);
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
         }));
         let mut token = 0;
         // SAFETY: registered on the creating STA; the token is removed before
@@ -312,14 +319,18 @@ impl WebViewHost {
         let core = self.core.as_ref().ok_or(HostError::Closed)?;
         let panics = self.callback_panics.clone();
         let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
-            if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
-                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-                // SAFETY: the event args are owned for this STA callback. The
-                // output is a live stack value and is not retained by COM.
-                unsafe { args.ProcessFailedKind(&mut kind) }?;
-                panics.guard(|| observer(ProcessFailure::from(kind)));
-            }
-            Ok(())
+            panics
+                .call(|| {
+                    if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                        // SAFETY: the event args are owned for this STA callback. The
+                        // output is a live stack value and is not retained by COM.
+                        unsafe { args.ProcessFailedKind(&mut kind) }?;
+                        observer(ProcessFailure::from(kind));
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
         }));
         let mut token = 0;
         // SAFETY: the core and callback are used on their creating STA. COM
@@ -405,10 +416,11 @@ impl WebViewHost {
             .is_some_and(CallbackTokens::document_loaded)
     }
 
-    /// True once after a panic was caught in one of this controller's
-    /// callbacks (a notification may have been lost).
-    pub(crate) fn take_callback_panic(&self) -> bool {
-        self.callback_panics.take()
+    /// Routes panics caught in this controller's callbacks to lag (the
+    /// owning session's), so they are reported even after this controller
+    /// is closed, orphaned or replaced. Call before registering callbacks.
+    pub(crate) fn share_callback_panics(&mut self, flag: &PanicFlag) {
+        self.callback_panics = flag.clone();
     }
 
     /// Drain validated page messages after Windows dispatch, outside COM.

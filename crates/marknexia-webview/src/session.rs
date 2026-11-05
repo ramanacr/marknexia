@@ -14,6 +14,7 @@ use crate::{
         BrowserExit, BrowserExitSubscription, EnvironmentError, StaApartment, WebViewEnvironment,
     },
     host::{HostColor, HostError, ProcessFailure, ViewportBounds, WebViewHost},
+    panic_flag::PanicFlag,
     policy::{DocumentError, HostDocument},
     protocol::PageToHost,
     recovery::{RecoveryAction, RecoveryCoordinator},
@@ -88,6 +89,10 @@ pub struct WebViewSession {
     closed: bool,
     viewport: ViewportBounds,
     background: HostColor,
+    /// Shared by every controller, browser-exit subscription and the page
+    /// observer guard: a panic caught in any of them is reported by the next
+    /// `poll`, even after that controller or subscription is gone.
+    callback_panics: PanicFlag,
 }
 
 impl WebViewSession {
@@ -137,6 +142,7 @@ impl WebViewSession {
                 green: 255,
                 blue: 255,
             },
+            callback_panics: PanicFlag::default(),
         }
     }
 
@@ -365,18 +371,9 @@ impl WebViewSession {
         self.take_callback_panics()
     }
 
-    /// Surfaces panics caught in controller and browser-exit callbacks.
+    /// Surfaces, once, a panic caught in any callback since the last poll.
     fn take_callback_panics(&self) -> Result<(), SessionError> {
-        // Evaluate every flag so each is cleared, not only the first.
-        let hosts = self
-            .hosts
-            .values()
-            .fold(false, |seen, host| host.take_callback_panic() | seen);
-        let browser = self
-            .browser_subscription
-            .as_ref()
-            .is_some_and(BrowserExitSubscription::take_callback_panic);
-        if hosts || browser {
+        if self.callback_panics.take() {
             Err(SessionError::CallbackPanicked)
         } else {
             Ok(())
@@ -397,7 +394,8 @@ impl WebViewSession {
                         .borrow_mut()
                         .push_back(SessionEvent::BrowserExited(generation, exit));
                 });
-                let subscription = environment.observe_browser_exit(Rc::downgrade(&observer))?;
+                let subscription = environment
+                    .observe_browser_exit_with(Rc::downgrade(&observer), &self.callback_panics)?;
                 self.browser_observer = Some(observer);
                 self.browser_subscription = Some(subscription);
                 self.environment = Some(environment);
@@ -427,6 +425,8 @@ impl WebViewSession {
                         return Err(SessionError::Host(error));
                     }
                 };
+                // Before any callback is registered on this controller.
+                host.share_callback_panics(&self.callback_panics);
                 host.set_bounds(self.viewport)?;
                 host.set_default_background(self.background)?;
                 let Some(document) = self.documents.get(&tab_id).cloned() else {
@@ -493,7 +493,9 @@ impl WebViewSession {
                     && self.hosts.contains_key(&tab_id) =>
             {
                 if let Some(observer) = self.page_observer.upgrade() {
-                    observer(message);
+                    // Application code: a panic is recorded, not unwound
+                    // into the shell's message loop.
+                    self.callback_panics.guard(|| observer(message));
                 }
             }
             SessionEvent::PageMessage(_, _, _, _) => {}
@@ -737,6 +739,39 @@ impl Drop for WebViewSession {
 }
 
 #[cfg(test)]
+mod panic_tests {
+    use std::rc::Rc;
+
+    use windows::Win32::Foundation::HWND;
+
+    use super::{SessionError, WebViewSession};
+    use crate::{environment::StaApartment, protocol::PageToHost};
+
+    /// A controller or subscription records into the session's shared flag;
+    /// once it is gone, the next poll still reports the panic, exactly once.
+    #[test]
+    fn a_panic_recorded_by_a_retired_callback_is_reported_once() {
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+        let mut session = WebViewSession::new(
+            apartment,
+            HWND::default(),
+            std::env::temp_dir().join("marknexia-panic-test"),
+            Rc::downgrade(&observer),
+        );
+        {
+            // What a host's callback holds after `share_callback_panics`.
+            let retired_host_flag = session.callback_panics.clone();
+            retired_host_flag.guard(|| panic!("injected callback panic"));
+        }
+        assert!(matches!(
+            session.poll(),
+            Err(SessionError::CallbackPanicked)
+        ));
+        assert!(session.poll().is_ok());
+    }
+}
+#[cfg(test)]
 #[allow(unsafe_code)] // Ignored native tests create a real HWND on the STA.
 mod native_tests {
     use std::{
@@ -895,6 +930,39 @@ mod native_tests {
         assert!(messages.borrow().is_empty());
         session.close().unwrap();
         assert!(session.host(7).is_none() && session.host(8).is_none());
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
+    /// An injected panicking page observer: poll reports the panic once and
+    /// the session keeps working.
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_panicking_page_observer_is_reported_by_poll_once() {
+        let (parent, mut session, _messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some()
+        });
+        let panicking: Rc<dyn Fn(PageToHost)> = Rc::new(|_| panic!("injected observer panic"));
+        session.page_observer = Rc::downgrade(&panicking);
+        session
+            .events
+            .borrow_mut()
+            .push_back(SessionEvent::PageMessage(
+                session.generation,
+                session.controller_generations[&7],
+                7,
+                PageToHost::Ready {
+                    protocol: 1,
+                    document_epoch: 1,
+                    tab_id: 7,
+                },
+            ));
+        assert!(matches!(
+            session.poll(),
+            Err(super::SessionError::CallbackPanicked)
+        ));
+        assert!(session.poll().is_ok());
+        session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
 

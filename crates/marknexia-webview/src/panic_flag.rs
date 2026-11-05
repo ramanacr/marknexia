@@ -1,10 +1,16 @@
-//! Records a panic caught inside a COM callback so it is not lost.
+//! Records a panic caught inside a WebView2 callback so it is not lost.
 //!
-//! Release builds unwind, so callbacks wrap application work in
-//! `catch_unwind` (a panic must not cross the COM boundary). A caught panic
-//! means a failure notification (process failure, browser exit, page
-//! message, accelerator) may have been dropped; the flag lets the next
-//! `WebViewSession::poll` report it as an error instead.
+//! Release builds unwind, and a panic must never unwind across an
+//! `extern "system"` COM callback. Every WebView2 event handler body runs
+//! under [`PanicFlag::call`]: web resource requests, navigation starting
+//! and completed, web messages (including parsing the untrusted JSON), new
+//! window requests, accelerator keys, process failures and browser exit.
+//! Each handler fails closed on a panic (deny and close the controller,
+//! cancel the navigation, mark the new window handled). The session also
+//! guards the application's page observer. A caught panic means a
+//! notification may have been dropped, so `WebViewSession::poll` reports it
+//! once as `SessionError::CallbackPanicked`, including panics recorded by a
+//! controller or browser-exit subscription that has since been retired.
 
 use std::{
     cell::Cell,
@@ -18,8 +24,18 @@ pub(crate) struct PanicFlag(Rc<Cell<bool>>);
 impl PanicFlag {
     /// Runs `work`; a panic is caught and recorded.
     pub(crate) fn guard(&self, work: impl FnOnce()) {
-        if catch_unwind(AssertUnwindSafe(work)).is_err() {
-            self.0.set(true);
+        let _ = self.call(work);
+    }
+
+    /// Runs `work` and returns its value, or `None` after recording a
+    /// caught panic. Callers decide the fail-closed result.
+    pub(crate) fn call<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        match catch_unwind(AssertUnwindSafe(work)) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                self.0.set(true);
+                None
+            }
         }
     }
 
