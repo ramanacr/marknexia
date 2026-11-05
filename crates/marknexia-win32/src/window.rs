@@ -376,11 +376,19 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         }
     };
     {
+        // Startup tabs: the document tabs, or the active placeholder.
+        let startup_tabs: Vec<u64> = if document_mode {
+            startup_documents.iter().map(|(id, _)| id.get()).collect()
+        } else {
+            portable
+                .borrow()
+                .active_tab()
+                .map(TabId::get)
+                .into_iter()
+                .collect()
+        };
         let mut state = state.borrow_mut();
-        state.startup = StartupTracker::new(
-            document_mode,
-            startup_documents.iter().map(|(id, _)| id.get()),
-        );
+        state.startup = StartupTracker::new(document_mode, startup_tabs);
     }
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
@@ -1379,6 +1387,9 @@ fn poll_webview(hwnd: HWND) {
             state.apply_startup(signal);
         }
         for tab_id in &loaded_tabs {
+            // A document that loads clears any earlier failure for its tab
+            // (a recreated environment retried it).
+            state.tab_errors.remove(tab_id);
             let signal = state.startup.rendered(*tab_id);
             state.apply_startup(signal);
         }

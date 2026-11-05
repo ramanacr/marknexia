@@ -471,13 +471,15 @@ pub enum StartupSignal {
 }
 
 /// Decides `FirstRender` versus `StartupFailed`. Exactly one of them is
-/// ever returned, once.
-/// - Without document paths, `FirstRender` follows the placeholder.
-/// - With document paths, every startup tab is pending until its
-///   navigation completes ([`Self::rendered`]) or it fails or closes
-///   ([`Self::failed`]). `FirstRender` comes from the first rendered
-///   document; `StartupFailed` comes when nothing is pending and nothing
-///   rendered, or at once when WebView2 is unavailable.
+/// ever returned, once, in both startup modes.
+/// - Startup tabs are the document tabs, or without document paths the
+///   active placeholder (the empty-shell perf scenario waits for its
+///   first render, and fails fast on `StartupFailed`).
+/// - Each startup tab is pending until its navigation completes
+///   ([`Self::rendered`]) or it fails or closes ([`Self::failed`]).
+/// - `FirstRender` comes from the first rendered startup document;
+///   `StartupFailed` comes when nothing is pending and nothing rendered,
+///   or at once when WebView2 is unavailable.
 #[derive(Debug, Default)]
 pub struct StartupTracker {
     document_mode: bool,
@@ -487,8 +489,9 @@ pub struct StartupTracker {
 }
 
 impl StartupTracker {
-    /// `document_mode` follows the requested paths; `pending` holds the tabs
-    /// that opened for them (possibly none).
+    /// `document_mode` follows the requested paths; `pending` holds the
+    /// startup tabs: those that opened for the paths (possibly none), or the
+    /// active placeholder without paths.
     #[must_use]
     pub fn new(document_mode: bool, pending: impl IntoIterator<Item = u64>) -> Self {
         Self {
@@ -532,7 +535,7 @@ impl StartupTracker {
     /// Re-checks after startup tabs were registered (some paths may not
     /// have opened a tab at all).
     pub fn evaluate(&mut self) -> Option<StartupSignal> {
-        if self.document_mode && (self.pending.is_empty() || self.webview_unavailable) {
+        if self.pending.is_empty() || self.webview_unavailable {
             self.signal(StartupSignal::StartupFailed)
         } else {
             None

@@ -160,8 +160,8 @@ function Invoke-Run([string]$UserData) {
         while (-not $sample.Contains('firstRenderMs')) {
             if ($clock.ElapsedMilliseconds -gt $TimeoutMs) { throw "Run timed out; reached: $($sample.Keys -join ', ')" }
             if ($process.HasExited) { throw "Shell exited early with code $($process.ExitCode)." }
-            if ($documentPath -and (Test-EventSignaled "Local\Marknexia.StartupFailed.$id")) {
-                throw "The shell could not render the scenario document (StartupFailed); its status bar names the error."
+            if (Test-EventSignaled "Local\Marknexia.StartupFailed.$id") {
+                throw "The shell signalled StartupFailed (no startup document or placeholder can render); its status bar names the error."
             }
             if (-not $sample.Contains('shellVisibleMs')) {
                 $window = [PerfWindowProbe]::FindVisibleShell([uint32]$id)

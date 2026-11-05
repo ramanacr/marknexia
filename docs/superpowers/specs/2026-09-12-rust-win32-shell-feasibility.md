@@ -281,6 +281,32 @@ These supersede the matching statements above.
   - `StartupTracker` decides `FirstRender` versus `StartupFailed`: exactly
     one is ever raised, and a test covers the transient-failure case.
   - IPC$ and non-ASCII UNC server and share names are refused.
+- **Review fixes (2026-11-06, second round).**
+  - **Failed tabs.**
+    - A failed tab's controller is hidden and closed (or orphaned for a
+      later close), including after a failed first navigation.
+    - Renderer recreation and every `begin_host` path skip failed tabs.
+    - A document that later loads clears its tab's error.
+    - Closing a tab or removing its document drops its pending failures
+      and errors.
+  - **Lost completions.** A controller completion lost to a panic is
+    recorded in a panic-free `Cell` list. `poll` turns it into a failed
+    `HostCreated`.
+  - **Readiness without document paths.** The active placeholder is the
+    startup tab, so exactly one of `FirstRender` or `StartupFailed` fires
+    in the empty-shell scenario too. The collector now fails fast on
+    `StartupFailed` for every scenario.
+  - **Native tests.**
+    - `automation_smoke.rs` and `native_accessibility.rs` share
+      `tests/support/shell.rs`.
+    - Every launch gets a unique absolute temporary
+      `MARKNEXIA_WEBVIEW2_USER_DATA` folder, which is removed after a
+      graceful close and after the WebView2 processes exit.
+    - Keys go through `send_chord_to`, which re-checks the foreground
+      owner immediately before `SendInput`.
+    - The structure-event list is cleared just before Ctrl+W.
+    - `PrintWindow` runs only after `SendMessageTimeout(WM_NULL)` proves
+      the shell's UI thread responds.
 - **StartupFailed (2026-11-05).**
   - An environment failure disables every document and signals
     StartupFailed.

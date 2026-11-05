@@ -412,12 +412,18 @@ fn stale_render_results_are_discarded_and_queued_jobs_cancelled() {
 #[test]
 fn exactly_one_of_first_render_or_startup_failed_is_signaled() {
     use StartupSignal::{FirstRender, StartupFailed};
-    // No paths: the placeholder renders; nothing can fail it.
-    let mut tracker = StartupTracker::new(false, []);
+    // No paths: the active placeholder is the startup tab.
+    let mut tracker = StartupTracker::new(false, [2]);
     assert_eq!(tracker.evaluate(), None);
-    assert_eq!(tracker.webview_unavailable(), None);
-    assert_eq!(tracker.rendered(1), Some(FirstRender));
+    assert_eq!(tracker.rendered(2), Some(FirstRender));
+    assert_eq!(tracker.webview_unavailable(), None, "never both");
+    // No paths and no WebView2: StartupFailed, so empty-shell fails fast.
+    let mut tracker = StartupTracker::new(false, [2]);
+    assert_eq!(tracker.webview_unavailable(), Some(StartupFailed));
     assert_eq!(tracker.rendered(2), None);
+    // No paths, the placeholder's controller fails.
+    let mut tracker = StartupTracker::new(false, [2]);
+    assert_eq!(tracker.failed(2), Some(StartupFailed));
     // Paths requested but no tab opened.
     let mut tracker = StartupTracker::new(true, []);
     assert_eq!(tracker.evaluate(), Some(StartupFailed));

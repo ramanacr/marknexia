@@ -1,7 +1,7 @@
 //! STA-owned controller fleet. COM callbacks enqueue events; the host pumps them.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     rc::{Rc, Weak},
@@ -119,6 +119,10 @@ pub struct WebViewSession {
     /// environment is recreated or the document is removed.
     failed_tabs: BTreeSet<u64>,
     tab_failures: Vec<(u64, TabFailure)>,
+    /// Controller completions lost to a panic, as (generation, controller
+    /// generation, tab). A `Cell` so recording can never fail; `poll` turns
+    /// each into a failed `HostCreated`.
+    lost_hosts: Rc<Cell<Vec<(u64, u64, u64)>>>,
 }
 
 impl WebViewSession {
@@ -171,6 +175,7 @@ impl WebViewSession {
             callback_panics: PanicFlag::default(),
             failed_tabs: BTreeSet::new(),
             tab_failures: Vec::new(),
+            lost_hosts: Rc::new(Cell::new(Vec::new())),
         }
     }
 
@@ -179,9 +184,20 @@ impl WebViewSession {
         std::mem::take(&mut self.tab_failures)
     }
 
-    /// Records a tab-scoped failure once; the tab is no longer retried.
+    /// Records a tab-scoped failure once; the tab is no longer retried. Any
+    /// live controller for it is closed (or orphaned for a later close), so
+    /// a failed tab never keeps a hidden or half-loaded controller.
     fn fail_tab(&mut self, tab_id: u64, failure: TabFailure) {
         self.pending_hosts.remove(&tab_id);
+        self.recreating_tabs.remove(&tab_id);
+        self.controller_generations.remove(&tab_id);
+        self.process_observers.remove(&tab_id);
+        if let Some(mut host) = self.hosts.remove(&tab_id) {
+            let _ = host.set_visible(false);
+            if host.close().is_err() {
+                self.orphaned_hosts.entry(tab_id).or_default().push(host);
+            }
+        }
         if self.failed_tabs.insert(tab_id) {
             self.tab_failures.push((tab_id, failure));
         }
@@ -281,6 +297,7 @@ impl WebViewSession {
         self.controller_generations.remove(&tab_id);
         self.process_observers.remove(&tab_id);
         self.failed_tabs.remove(&tab_id);
+        self.tab_failures.retain(|(failed, _)| *failed != tab_id);
         if let Some(mut host) = self.hosts.remove(&tab_id)
             && let Err(error) = host.close()
         {
@@ -326,7 +343,12 @@ impl WebViewSession {
     }
 
     fn begin_host(&mut self, tab_id: u64) -> Result<(), SessionError> {
-        if self.hosts.contains_key(&tab_id) || !self.pending_hosts.insert(tab_id) {
+        // A failed tab is retried only after `failed_tabs` is cleared (a
+        // recreated environment), never by an ordinary begin_host path.
+        if self.failed_tabs.contains(&tab_id)
+            || self.hosts.contains_key(&tab_id)
+            || !self.pending_hosts.insert(tab_id)
+        {
             return Ok(());
         }
         let Some(environment) = self.environment.as_ref() else {
@@ -341,7 +363,7 @@ impl WebViewSession {
         let controller_generation = self.next_controller_generation;
         self.controller_generations
             .insert(tab_id, controller_generation);
-        let lost_events = Rc::clone(&events);
+        let lost_hosts = Rc::clone(&self.lost_hosts);
         let result = environment.create_host_async(
             self.parent,
             &self.callback_panics,
@@ -356,14 +378,10 @@ impl WebViewSession {
             // The completion panicked: still queue a failure, so the tab
             // never stays pending.
             Box::new(move || {
-                if let Ok(mut events) = lost_events.try_borrow_mut() {
-                    events.push_back(SessionEvent::HostCreated(
-                        generation,
-                        controller_generation,
-                        tab_id,
-                        Err(HostError::CallbackPanicked),
-                    ));
-                }
+                // Cannot fail: poll turns this into a failed HostCreated.
+                let mut lost = lost_hosts.take();
+                lost.push((generation, controller_generation, tab_id));
+                lost_hosts.set(lost);
             }),
         );
         if let Err(error) = result {
@@ -382,6 +400,16 @@ impl WebViewSession {
         self.abort_failed_resources()?;
         if self.security_failed {
             return Err(SessionError::ResourceBoundaryFailed);
+        }
+        for (generation, controller_generation, tab_id) in self.lost_hosts.take() {
+            self.events
+                .borrow_mut()
+                .push_back(SessionEvent::HostCreated(
+                    generation,
+                    controller_generation,
+                    tab_id,
+                    Err(HostError::CallbackPanicked),
+                ));
         }
         loop {
             self.enqueue_page_messages();
@@ -644,6 +672,10 @@ impl WebViewSession {
 
     fn retry_renderer_recreation(&mut self) -> Result<(), SessionError> {
         for tab_id in self.recreating_tabs.iter().copied().collect::<Vec<_>>() {
+            if self.failed_tabs.contains(&tab_id) {
+                self.recreating_tabs.remove(&tab_id);
+                continue;
+            }
             if let Some(host) = self.hosts.get_mut(&tab_id) {
                 host.close()?;
             }
@@ -871,6 +903,37 @@ mod panic_tests {
         session.documents.insert(3, crate::probe::document(3, 1));
         session.remove_document(3).unwrap();
         assert!(!session.failed_tabs.contains(&3));
+    }
+
+    /// A completion lost to a panic (recorded by the `lost` callback) still
+    /// fails its tab on the next poll, so the tab never stays pending.
+    #[test]
+    fn a_lost_controller_completion_fails_its_tab_on_the_next_poll() {
+        use super::TabFailure;
+        use crate::host::HostError;
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+        let mut session = WebViewSession::new(
+            apartment,
+            HWND::default(),
+            std::env::temp_dir().join("marknexia-lost-host-test"),
+            Rc::downgrade(&observer),
+        );
+        session.pending_hosts.insert(5);
+        session.controller_generations.insert(5, 9);
+        let mut lost = session.lost_hosts.take();
+        lost.push((session.generation, 9, 5));
+        session.lost_hosts.set(lost);
+        session.poll().unwrap();
+        assert_eq!(
+            session.drain_tab_failures(),
+            [(
+                5,
+                TabFailure::ControllerStartup(HostError::CallbackPanicked)
+            )]
+        );
+        assert!(!session.pending_hosts.contains(&5));
+        assert!(session.failed_tabs.contains(&5));
     }
 
     /// The session's own flag: a recorded panic is reported by the next poll,
