@@ -161,6 +161,9 @@ struct AppState {
     /// rendered: when all fail, StartupFailed is signalled.
     startup_pending: BTreeSet<u64>,
     startup_rendered: bool,
+    /// WebView2 (or the COM STA it needs) could not start: no document can
+    /// be displayed in this process.
+    webview_unavailable: bool,
     /// Tabs whose rendered Markdown document is in the WebView session.
     rendered_tabs: BTreeSet<u64>,
     /// The shell was started with document paths: `FirstRender` then means
@@ -177,6 +180,7 @@ impl AppState {
             render_results_deferred: false,
             startup_pending: BTreeSet::new(),
             startup_rendered: false,
+            webview_unavailable: false,
             render_sender,
             render_results,
             rendered_tabs: BTreeSet::new(),
@@ -484,16 +488,22 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                     // and UIA still need COM on this thread.
                     state.apartment = Some(apartment);
                     state.shell_error = Some(format!("WebView2 unavailable: {error:?}"));
+                    state.webview_unavailable = true;
                 }
             }
         }
         Err(error) => {
-            state.borrow_mut().shell_error = Some(format!("COM STA unavailable: {error:?}"))
+            let mut state = state.borrow_mut();
+            state.shell_error = Some(format!("COM STA unavailable: {error:?}"));
+            state.webview_unavailable = true;
         }
     }
     // Apply theme and bounds to the WebView session created above.
     update_theme(hwnd);
     reflow(hwnd, dpi);
+    // With document paths and no WebView2 nothing can render: signal
+    // StartupFailed now so a harness does not wait for its timeout.
+    update_startup_readiness(&state);
     refresh_status(&state);
     Ok(())
 }
@@ -650,6 +660,7 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
             .insert(tab_id, message.clone());
         text_document(tab_id, &title, &message)
     });
+    let mut displayed = true;
     let added = match take_session(state) {
         Some(mut session) => {
             let added = document.and_then(|document| {
@@ -660,14 +671,18 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
             restore_session(state, session);
             added
         }
-        // Without WebView2 nothing can be displayed; the shell error says so.
-        None => document.map(drop),
+        // Without WebView2 nothing can be displayed; the shell error says so,
+        // and the document does not count as rendered.
+        None => {
+            displayed = false;
+            document.map(drop)
+        }
     };
     {
         let mut state = state.borrow_mut();
         state.startup_pending.remove(&tab_id);
         match added {
-            Ok(()) if rendered => {
+            Ok(()) if rendered && displayed => {
                 state.rendered_tabs.insert(tab_id);
                 state.startup_rendered |= state.document_mode;
             }
@@ -688,7 +703,8 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
 /// instead of waiting for a `FirstRender` that cannot come.
 fn update_startup_readiness(state: &Rc<RefCell<AppState>>) {
     let mut state = state.borrow_mut();
-    let failed = state.document_mode && state.startup_pending.is_empty() && !state.startup_rendered;
+    let nothing_rendered = state.startup_pending.is_empty() || state.webview_unavailable;
+    let failed = state.document_mode && nothing_rendered && !state.startup_rendered;
     if failed && let Some(readiness) = state.readiness.as_mut() {
         readiness.startup_failed();
     }
