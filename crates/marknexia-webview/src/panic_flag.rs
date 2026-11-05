@@ -4,7 +4,9 @@
 //! `extern "system"` COM callback. Every WebView2 event handler body runs
 //! under [`PanicFlag::call`]: web resource requests, navigation starting
 //! and completed, web messages (including parsing the untrusted JSON), new
-//! window requests, accelerator keys, process failures and browser exit.
+//! window requests, accelerator keys, process failures, browser exit, and the
+//! environment- and controller-created completions (a panic there delivers
+//! an `Err(CallbackPanicked)` result).
 //! Each handler fails closed on a panic (deny and close the controller,
 //! cancel the navigation, mark the new window handled). The session also
 //! guards the application's page observer. A caught panic means a
@@ -18,8 +20,11 @@ use std::{
     rc::Rc,
 };
 
+/// Shared record of panics caught in WebView2 callbacks. The session owns
+/// one and passes it to every environment, controller and subscription
+/// callback it registers.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct PanicFlag(Rc<Cell<bool>>);
+pub struct PanicFlag(Rc<Cell<bool>>);
 
 impl PanicFlag {
     /// Runs `work`; a panic is caught and recorded.
@@ -40,7 +45,7 @@ impl PanicFlag {
     }
 
     /// True once per recorded panic.
-    pub(crate) fn take(&self) -> bool {
+    pub fn take(&self) -> bool {
         self.0.replace(false)
     }
 }

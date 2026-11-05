@@ -13,7 +13,7 @@ pub mod environment;
 #[allow(unsafe_code)] // Controller ownership and calls stay in the native adapter.
 pub mod host;
 #[cfg(windows)]
-mod panic_flag;
+pub mod panic_flag;
 pub mod policy;
 pub mod probe;
 pub mod protocol;

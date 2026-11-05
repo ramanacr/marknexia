@@ -123,6 +123,9 @@ impl CallbackTokens {
                         let _ = abort();
                     }
                 };
+                // The gate is owned out here, outside both guards: whatever
+                // panics, its deferral is never released before Close.
+                let mut held: Option<ResourceGate<ICoreWebView2Deferral>> = None;
                 let outcome = resource_panics.call(|| {
                     let deferral = match unsafe { args.GetDeferral() } {
                         Ok(deferral) => deferral,
@@ -139,13 +142,13 @@ impl CallbackTokens {
                             };
                         }
                     };
-                    let mut gate = ResourceGate::new(deferral);
-                    // The gate lives outside this inner guard, so a panic
-                    // while deciding the response cannot release the deferral.
-                    let completion = resource_panics
+                    let gate = held.insert(ResourceGate::new(deferral));
+                    // A panic while deciding the response is caught here and
+                    // fails closed; the gate stays in `held`.
+                    resource_panics
                         .call(|| {
                             let assignment = install_response(
-                                &mut gate,
+                                gate,
                                 || {
                                     response_decision(&args, weak_document.upgrade().as_deref())
                                         .and_then(|response| {
@@ -169,20 +172,26 @@ impl CallbackTokens {
                         .unwrap_or_else(|| {
                             fail_closed();
                             Err(E_UNEXPECTED.into())
-                        });
-                    if let Some(deferral) = gate.take_pending() {
-                        // WebView2 documents that an outstanding deferral
-                        // blocks this request. Keep it live until
-                        // controller.Close has succeeded; never complete it
-                        // with no explicit response.
-                        pending_deferrals.borrow_mut().push(deferral);
-                    }
-                    completion
+                        })
                 });
-                outcome.unwrap_or_else(|| {
+                let outcome = outcome.unwrap_or_else(|| {
                     fail_closed();
                     Err(E_UNEXPECTED.into())
-                })
+                });
+                if let Some(deferral) = held.as_mut().and_then(ResourceGate::take_pending) {
+                    // WebView2 documents that an outstanding deferral blocks
+                    // this request. Keep it live until controller.Close has
+                    // succeeded; never complete it with no explicit response.
+                    match pending_deferrals.try_borrow_mut() {
+                        Ok(mut pending) => pending.push(deferral),
+                        Err(_) => {
+                            // Cannot store it: never release it either.
+                            fail_closed();
+                            std::mem::forget(deferral);
+                        }
+                    }
+                }
+                outcome
             }));
         let mut token = 0;
         unsafe {

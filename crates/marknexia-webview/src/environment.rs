@@ -22,7 +22,10 @@ use windows::{
 };
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
-use crate::host::{HostError, WebViewHost};
+use crate::{
+    host::{HostError, WebViewHost},
+    panic_flag::PanicFlag,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeStatus {
@@ -124,6 +127,8 @@ pub enum EnvironmentError {
     StartupFailed(i32),
     MissingEnvironment,
     CallFailed(i32),
+    /// The environment-created callback panicked; the panic was recorded.
+    CallbackPanicked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,10 +159,18 @@ pub struct BrowserExit {
 pub struct BrowserExitSubscription {
     environment: Option<ICoreWebView2Environment5>,
     token: i64,
+    /// The flag the callback records into (kept for tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    panics: PanicFlag,
     _apartment: Rc<StaApartment>,
 }
 
 impl BrowserExitSubscription {
+    #[cfg(test)]
+    pub(crate) fn panic_flag_for_test(&self) -> &PanicFlag {
+        &self.panics
+    }
+
     pub fn close(&mut self) -> Result<(), EnvironmentError> {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(());
@@ -190,19 +203,12 @@ impl WebViewEnvironment {
     pub(crate) fn native_environment(&self) -> &ICoreWebView2Environment {
         &self.inner
     }
+    /// Observes browser-process exit. A panic caught in the callback is
+    /// recorded in `panics` (the owning session's flag).
     pub fn observe_browser_exit(
         &self,
         observer: Weak<dyn Fn(BrowserExit)>,
-    ) -> Result<BrowserExitSubscription, EnvironmentError> {
-        self.observe_browser_exit_with(observer, &crate::panic_flag::PanicFlag::default())
-    }
-
-    /// Like [`Self::observe_browser_exit`], recording a panic caught in the
-    /// callback in `panics` (the owning session's flag).
-    pub(crate) fn observe_browser_exit_with(
-        &self,
-        observer: Weak<dyn Fn(BrowserExit)>,
-        panics: &crate::panic_flag::PanicFlag,
+        panics: &PanicFlag,
     ) -> Result<BrowserExitSubscription, EnvironmentError> {
         let environment = self
             .inner
@@ -238,15 +244,22 @@ impl WebViewEnvironment {
         Ok(BrowserExitSubscription {
             environment: Some(environment),
             token,
+            panics: panics.clone(),
             _apartment: Rc::clone(&self._apartment),
         })
     }
 
+    /// Starts environment creation. The completion handler runs under the
+    /// panic guard: a panic while building the result delivers
+    /// `Err(CallbackPanicked)` to `completed`, and a panic inside `completed`
+    /// is recorded in `panics`.
     pub fn create_async(
         apartment: Rc<StaApartment>,
         user_data_folder: &Path,
+        panics: &PanicFlag,
         completed: Box<dyn FnOnce(Result<Self, EnvironmentError>)>,
     ) -> Result<(), EnvironmentError> {
+        let panics = panics.clone();
         std::fs::create_dir_all(user_data_folder).map_err(|_| EnvironmentError::UserDataFolder)?;
         let folder_utf16: Vec<u16> = user_data_folder
             .as_os_str()
@@ -256,16 +269,18 @@ impl WebViewEnvironment {
         let folder = PCWSTR::from_raw(folder_utf16.as_ptr());
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |result, environment| {
-                let outcome = match result {
-                    Err(error) => Err(EnvironmentError::StartupFailed(error.code().0)),
-                    Ok(()) => environment
-                        .map(|inner| Self {
-                            inner,
-                            _apartment: apartment,
-                        })
-                        .ok_or(EnvironmentError::MissingEnvironment),
-                };
-                completed(outcome);
+                let outcome = panics
+                    .call(|| match result {
+                        Err(error) => Err(EnvironmentError::StartupFailed(error.code().0)),
+                        Ok(()) => environment
+                            .map(|inner| Self {
+                                inner,
+                                _apartment: apartment,
+                            })
+                            .ok_or(EnvironmentError::MissingEnvironment),
+                    })
+                    .unwrap_or(Err(EnvironmentError::CallbackPanicked));
+                panics.guard(|| completed(outcome));
                 Ok(())
             },
         ));
@@ -295,25 +310,30 @@ impl WebViewEnvironment {
             .map_err(|error| EnvironmentError::CallFailed(error.code().0))
     }
 
+    /// Starts controller creation; the completion handler runs under the
+    /// panic guard like [`Self::create_async`].
     pub fn create_host_async(
         &self,
         parent: HWND,
+        panics: &PanicFlag,
         completed: Box<dyn FnOnce(Result<WebViewHost, HostError>)>,
     ) -> Result<(), HostError> {
         let shared_environment = self.clone();
+        let panics = panics.clone();
         let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
             move |result, controller| {
-                let outcome = match result {
-                    Err(error) => Err(HostError::ControllerStartupFailed(error.code().0)),
-                    Ok(()) => {
-                        controller
-                            .ok_or(HostError::MissingController)
-                            .and_then(|controller| {
-                                WebViewHost::from_controller(controller, shared_environment)
-                            })
-                    }
-                };
-                completed(outcome);
+                let outcome =
+                    panics
+                        .call(|| match result {
+                            Err(error) => Err(HostError::ControllerStartupFailed(error.code().0)),
+                            Ok(()) => controller.ok_or(HostError::MissingController).and_then(
+                                |controller| {
+                                    WebViewHost::from_controller(controller, shared_environment)
+                                },
+                            ),
+                        })
+                        .unwrap_or(Err(HostError::CallbackPanicked));
+                panics.guard(|| completed(outcome));
                 Ok(())
             },
         ));

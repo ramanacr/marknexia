@@ -256,10 +256,23 @@ These supersede the matching statements above.
     controller was closed, orphaned or replaced.
   - A native test injects a panicking page observer, and `poll` reports it
     exactly once.
-- **StartupFailed (2026-11-05).** StartupFailed is also signalled in two
-  more cases:
-  - `poll` reports an environment or controller startup error;
-  - paths were requested but none opened a tab.
+  - The environment- and controller-created completions are guarded too.
+    A panic there delivers an `Err(CallbackPanicked)` result.
+  - The resource handler keeps its deferral outside both guards. If it
+    cannot be stored, it is leaked rather than released before `Close`.
+  - A native test checks the real connections: a removed controller (via
+    `share_callback_panics`) and the browser-exit subscription (via
+    `observe_browser_exit`, which now takes the session flag) both report
+    through `poll` once.
+- **StartupFailed (2026-11-05).**
+  - An environment failure disables every document and signals
+    StartupFailed.
+  - A controller startup failure (`SessionError::ControllerStartupFailed`)
+    affects only its tab: that tab leaves the pending set and shows its
+    own error.
+  - A startup tab stays pending until its navigation completes. If nothing
+    is pending and nothing rendered, StartupFailed is signalled.
+  - Paths that were requested but opened no tab also signal StartupFailed.
 - **Header policy.** The document response header is the page's meta
   policy plus the header-only `frame-ancestors 'none'`.
 - **Identity binding.** The check still rebuilds the policy and base from

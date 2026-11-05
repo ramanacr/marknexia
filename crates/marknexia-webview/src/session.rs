@@ -42,18 +42,29 @@ pub enum SessionError {
     /// A panic was caught inside a WebView2 callback, so a failure or page
     /// notification may have been lost. Reported once per caught panic.
     CallbackPanicked,
+    /// The controller for `tab_id` could not be created.
+    ControllerStartupFailed {
+        tab_id: u64,
+        error: HostError,
+    },
 }
 
 impl SessionError {
-    /// The WebView2 environment or a controller could not start, so no
-    /// document can be displayed (the shell then signals `StartupFailed`).
+    /// The WebView2 environment could not start: no document can be shown
+    /// in this session.
     #[must_use]
-    pub fn is_startup_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::Environment(_)
-                | Self::Host(HostError::ControllerStartupFailed(_) | HostError::MissingController)
-        )
+    pub fn is_environment_failure(&self) -> bool {
+        matches!(self, Self::Environment(_))
+    }
+
+    /// The tab whose controller could not start, if this is that error.
+    /// Other tabs are unaffected.
+    #[must_use]
+    pub fn failed_startup_tab(&self) -> Option<u64> {
+        match self {
+            Self::ControllerStartupFailed { tab_id, .. } => Some(*tab_id),
+            _ => None,
+        }
     }
 }
 
@@ -282,6 +293,7 @@ impl WebViewSession {
         let result = WebViewEnvironment::create_async(
             Rc::clone(&self.apartment),
             &self.user_data_folder,
+            &self.callback_panics,
             Box::new(move |result| {
                 events
                     .borrow_mut()
@@ -313,6 +325,7 @@ impl WebViewSession {
             .insert(tab_id, controller_generation);
         let result = environment.create_host_async(
             self.parent,
+            &self.callback_panics,
             Box::new(move |result| {
                 events.borrow_mut().push_back(SessionEvent::HostCreated(
                     generation,
@@ -325,7 +338,7 @@ impl WebViewSession {
         if let Err(error) = result {
             self.pending_hosts.remove(&tab_id);
             self.controller_generations.remove(&tab_id);
-            return Err(SessionError::Host(error));
+            return Err(SessionError::ControllerStartupFailed { tab_id, error });
         }
         Ok(())
     }
@@ -408,7 +421,7 @@ impl WebViewSession {
                         .push_back(SessionEvent::BrowserExited(generation, exit));
                 });
                 let subscription = environment
-                    .observe_browser_exit_with(Rc::downgrade(&observer), &self.callback_panics)?;
+                    .observe_browser_exit(Rc::downgrade(&observer), &self.callback_panics)?;
                 self.browser_observer = Some(observer);
                 self.browser_subscription = Some(subscription);
                 self.environment = Some(environment);
@@ -435,7 +448,7 @@ impl WebViewSession {
                     Ok(host) => host,
                     Err(error) => {
                         self.controller_generations.remove(&tab_id);
-                        return Err(SessionError::Host(error));
+                        return Err(SessionError::ControllerStartupFailed { tab_id, error });
                     }
                 };
                 // Before any callback is registered on this controller.
@@ -761,21 +774,30 @@ mod panic_tests {
     use crate::{environment::StaApartment, protocol::PageToHost};
 
     #[test]
-    fn environment_and_controller_startup_errors_are_startup_failures() {
+    fn only_environment_errors_disable_every_document() {
         use crate::{environment::EnvironmentError, host::HostError};
-        assert!(
-            SessionError::Environment(EnvironmentError::MissingEnvironment).is_startup_failure()
+        let environment = SessionError::Environment(EnvironmentError::MissingEnvironment);
+        assert!(environment.is_environment_failure());
+        assert_eq!(environment.failed_startup_tab(), None);
+        let controller = SessionError::ControllerStartupFailed {
+            tab_id: 4,
+            error: HostError::ControllerStartupFailed(-1),
+        };
+        assert!(!controller.is_environment_failure());
+        assert_eq!(controller.failed_startup_tab(), Some(4));
+        assert!(!SessionError::CallbackPanicked.is_environment_failure());
+        assert_eq!(
+            SessionError::Host(HostError::CallFailed(-1)).failed_startup_tab(),
+            None
         );
-        assert!(SessionError::Host(HostError::ControllerStartupFailed(-1)).is_startup_failure());
-        assert!(!SessionError::Host(HostError::CallFailed(-1)).is_startup_failure());
-        assert!(!SessionError::CallbackPanicked.is_startup_failure());
-        assert!(!SessionError::MissingTab.is_startup_failure());
     }
 
-    /// A controller or subscription records into the session's shared flag;
-    /// once it is gone, the next poll still reports the panic, exactly once.
+    /// The session's own flag: a recorded panic is reported by the next poll,
+    /// exactly once. The native test
+    /// `native_controller_and_browser_exit_callbacks_share_the_session_flag`
+    /// checks that controllers and subscriptions are connected to it.
     #[test]
-    fn a_panic_recorded_by_a_retired_callback_is_reported_once() {
+    fn a_panic_recorded_in_the_session_flag_is_reported_once() {
         let apartment = Rc::new(StaApartment::enter().unwrap());
         let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
         let mut session = WebViewSession::new(
@@ -785,9 +807,8 @@ mod panic_tests {
             Rc::downgrade(&observer),
         );
         {
-            // What a host's callback holds after `share_callback_panics`.
-            let retired_host_flag = session.callback_panics.clone();
-            retired_host_flag.guard(|| panic!("injected callback panic"));
+            let clone = session.callback_panics.clone();
+            clone.guard(|| panic!("injected callback panic"));
         }
         assert!(matches!(
             session.poll(),
@@ -955,6 +976,40 @@ mod native_tests {
         assert!(messages.borrow().is_empty());
         session.close().unwrap();
         assert!(session.host(7).is_none() && session.host(8).is_none());
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
+    /// The real connection: a controller (through `share_callback_panics`)
+    /// and the browser-exit subscription (through `observe_browser_exit`)
+    /// record into the session flag, so `poll` reports their panics once,
+    /// also after the controller is removed.
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_controller_and_browser_exit_callbacks_share_the_session_flag() {
+        let (parent, mut session, _messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session.host(7).is_some() && session.browser_subscription.is_some()
+        });
+        let host_flag = session.host(7).unwrap().panic_flag_for_test().clone();
+        session.remove_document(7).unwrap();
+        host_flag.guard(|| panic!("injected controller callback panic"));
+        assert!(matches!(
+            session.poll(),
+            Err(super::SessionError::CallbackPanicked)
+        ));
+        assert!(session.poll().is_ok());
+        session
+            .browser_subscription
+            .as_ref()
+            .unwrap()
+            .panic_flag_for_test()
+            .guard(|| panic!("injected browser-exit callback panic"));
+        assert!(matches!(
+            session.poll(),
+            Err(super::SessionError::CallbackPanicked)
+        ));
+        assert!(session.poll().is_ok());
+        session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
 

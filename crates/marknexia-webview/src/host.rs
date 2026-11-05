@@ -46,6 +46,8 @@ pub enum HostError {
     InvalidMessage,
     AlreadyBound,
     Closed,
+    /// The controller-created callback panicked; the panic was recorded.
+    CallbackPanicked,
 }
 
 impl HostError {
@@ -421,6 +423,11 @@ impl WebViewHost {
     /// is closed, orphaned or replaced. Call before registering callbacks.
     pub(crate) fn share_callback_panics(&mut self, flag: &PanicFlag) {
         self.callback_panics = flag.clone();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_flag_for_test(&self) -> &PanicFlag {
+        &self.callback_panics
     }
 
     /// Drain validated page messages after Windows dispatch, outside COM.

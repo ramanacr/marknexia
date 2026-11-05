@@ -683,14 +683,17 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
     };
     {
         let mut state = state.borrow_mut();
-        state.startup_pending.remove(&tab_id);
         match added {
+            // A startup tab stays pending until its navigation completes (or
+            // its controller fails to start): only then is it rendered.
             Ok(()) if rendered && displayed => {
                 state.rendered_tabs.insert(tab_id);
-                state.startup_rendered |= state.document_mode;
             }
-            Ok(()) => {}
+            Ok(()) => {
+                state.startup_pending.remove(&tab_id);
+            }
             Err(error) => {
+                state.startup_pending.remove(&tab_id);
                 state.tab_errors.insert(tab_id, error);
             }
         }
@@ -1327,10 +1330,14 @@ fn poll_webview(hwnd: HWND) {
         return;
     };
     let error = session.poll().err();
-    // Environment or controller startup failed: no document can render.
-    let startup_failure = error
+    // An environment failure disables every document; a controller startup
+    // failure affects only its tab.
+    let environment_failure = error
         .as_ref()
-        .is_some_and(marknexia_webview::session::SessionError::is_startup_failure);
+        .is_some_and(marknexia_webview::session::SessionError::is_environment_failure);
+    let failed_tab = error
+        .as_ref()
+        .and_then(marknexia_webview::session::SessionError::failed_startup_tab);
     let error = error.map(|error| format!("WebView2 poll: {error:?}"));
     let (active, document_mode, rendered_tabs) = {
         let state = state.borrow();
@@ -1345,17 +1352,29 @@ fn poll_webview(hwnd: HWND) {
         .map_or((false, false), |host| (true, host.document_loaded()));
     // With document paths, first render means the first rendered Markdown
     // document finished navigating, whichever tab it is in.
-    let document_loaded = if document_mode {
-        rendered_tabs.iter().any(|tab| {
+    let loaded_tabs: Vec<u64> = rendered_tabs
+        .iter()
+        .copied()
+        .filter(|tab| {
             session
                 .host(*tab)
                 .is_some_and(|host| host.document_loaded())
         })
+        .collect();
+    let document_loaded = if document_mode {
+        !loaded_tabs.is_empty()
     } else {
         active_loaded
     };
     let accelerators = session.drain_accelerators();
     restore_session(&state, session);
+    if document_mode && !loaded_tabs.is_empty() {
+        let mut state = state.borrow_mut();
+        state.startup_rendered = true;
+        for tab in &loaded_tabs {
+            state.startup_pending.remove(tab);
+        }
+    }
     // Shell chords pressed inside the document run here, outside COM.
     for chord in accelerators {
         if let Some(command) = route_key(KeyChord::new(
@@ -1370,8 +1389,17 @@ fn poll_webview(hwnd: HWND) {
     if let Some(error) = error {
         {
             let mut state = state.borrow_mut();
-            state.shell_error = Some(error);
-            state.webview_unavailable |= startup_failure;
+            if let Some(tab_id) = failed_tab {
+                // Only this tab cannot show its document.
+                state.startup_pending.remove(&tab_id);
+                state.tab_errors.insert(
+                    tab_id,
+                    format!("The document view could not start ({error})."),
+                );
+            } else {
+                state.shell_error = Some(error);
+                state.webview_unavailable |= environment_failure;
+            }
         }
         update_startup_readiness(&state);
         refresh_status(&state);

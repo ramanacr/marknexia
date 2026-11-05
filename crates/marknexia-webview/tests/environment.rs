@@ -5,6 +5,7 @@ use marknexia_webview::environment::{
     RuntimeStatus, StaApartment, WebViewEnvironment,
 };
 use marknexia_webview::host::{ProcessFailure, ViewportBounds};
+use marknexia_webview::panic_flag::PanicFlag;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
@@ -161,6 +162,7 @@ fn native_shared_environment_completes_on_sta_without_blocking_the_host() {
         WebViewEnvironment::create_async(
             Rc::clone(&apartment),
             &folder,
+            &PanicFlag::default(),
             Box::new(move |result| {
                 *callback_state.borrow_mut() = Some(result);
             }),
@@ -211,6 +213,7 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
         WebViewEnvironment::create_async(
             Rc::clone(&apartment),
             &folder,
+            &PanicFlag::default(),
             Box::new(move |result| *callback_state.borrow_mut() = Some(result)),
         )
         .unwrap();
@@ -223,7 +226,7 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
             observed_exits.borrow_mut().push(event);
         });
         let mut exit_subscription = environment
-            .observe_browser_exit(Rc::downgrade(&exit_observer))
+            .observe_browser_exit(Rc::downgrade(&exit_observer), &PanicFlag::default())
             .unwrap();
         assert_eq!(Rc::strong_count(&exit_observer), 1);
 
@@ -237,7 +240,7 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
         let controller_result = Rc::new(RefCell::new(None));
         let callback_state = Rc::clone(&controller_result);
         environment
-            .create_host_async(parent, Box::new(move |result| {
+            .create_host_async(parent, &PanicFlag::default(), Box::new(move |result| {
                 *callback_state.borrow_mut() = Some(result);
             }))
             .unwrap();
@@ -263,7 +266,7 @@ fn native_two_controllers_apply_independent_bounds_and_visibility() {
         let second_result = Rc::new(RefCell::new(None));
         let callback_state = Rc::clone(&second_result);
         environment
-            .create_host_async(parent, Box::new(move |result| {
+            .create_host_async(parent, &PanicFlag::default(), Box::new(move |result| {
                 *callback_state.borrow_mut() = Some(result);
             }))
             .unwrap();
