@@ -38,6 +38,9 @@ pub enum SessionError {
     Environment(EnvironmentError),
     Host(HostError),
     ResourceBoundaryFailed,
+    /// A panic was caught inside a WebView2 callback, so a failure or page
+    /// notification may have been lost. Reported once per caught panic.
+    CallbackPanicked,
 }
 
 impl From<EnvironmentError> for SessionError {
@@ -359,7 +362,25 @@ impl WebViewSession {
         if self.visibility_pending {
             self.apply_selected_visibility()?;
         }
-        Ok(())
+        self.take_callback_panics()
+    }
+
+    /// Surfaces panics caught in controller and browser-exit callbacks.
+    fn take_callback_panics(&self) -> Result<(), SessionError> {
+        // Evaluate every flag so each is cleared, not only the first.
+        let hosts = self
+            .hosts
+            .values()
+            .fold(false, |seen, host| host.take_callback_panic() | seen);
+        let browser = self
+            .browser_subscription
+            .as_ref()
+            .is_some_and(BrowserExitSubscription::take_callback_panic);
+        if hosts || browser {
+            Err(SessionError::CallbackPanicked)
+        } else {
+            Ok(())
+        }
     }
 
     fn apply_event(&mut self, event: SessionEvent) -> Result<(), SessionError> {

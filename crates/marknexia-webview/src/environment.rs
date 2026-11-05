@@ -2,7 +2,6 @@
 
 use std::{
     os::windows::ffi::OsStrExt,
-    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     rc::{Rc, Weak},
 };
@@ -155,10 +154,17 @@ pub struct BrowserExit {
 pub struct BrowserExitSubscription {
     environment: Option<ICoreWebView2Environment5>,
     token: i64,
+    /// Panics caught in the browser-exit callback, surfaced by poll.
+    panics: crate::panic_flag::PanicFlag,
     _apartment: Rc<StaApartment>,
 }
 
 impl BrowserExitSubscription {
+    /// True once after a panic was caught in the browser-exit callback.
+    pub(crate) fn take_callback_panic(&self) -> bool {
+        self.panics.take()
+    }
+
     pub fn close(&mut self) -> Result<(), EnvironmentError> {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(());
@@ -199,6 +205,8 @@ impl WebViewEnvironment {
             .inner
             .cast::<ICoreWebView2Environment5>()
             .map_err(|error| EnvironmentError::CallFailed(error.code().0))?;
+        let panics = crate::panic_flag::PanicFlag::default();
+        let callback_panics = panics.clone();
         let handler = BrowserProcessExitedEventHandler::create(Box::new(move |_, args| {
             if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
                 let mut kind = COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND::default();
@@ -207,12 +215,12 @@ impl WebViewEnvironment {
                 // outputs are local values and are not retained by COM.
                 unsafe { args.BrowserProcessExitKind(&mut kind) }?;
                 unsafe { args.BrowserProcessId(&mut process_id) }?;
-                let _ = catch_unwind(AssertUnwindSafe(|| {
+                callback_panics.guard(|| {
                     observer(BrowserExit {
                         kind: kind.into(),
                         process_id,
                     })
-                }));
+                });
             }
             Ok(())
         }));
@@ -224,6 +232,7 @@ impl WebViewEnvironment {
         Ok(BrowserExitSubscription {
             environment: Some(environment),
             token,
+            panics,
             _apartment: Rc::clone(&self._apartment),
         })
     }

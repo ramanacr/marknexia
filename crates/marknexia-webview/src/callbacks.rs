@@ -4,7 +4,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     ffi::c_void,
-    panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
 
@@ -31,6 +30,7 @@ use windows::{
 use crate::{
     broker::{BrokerRequest, ResourceKind},
     host::HostError,
+    panic_flag::PanicFlag,
     policy::{HostDocument, ResponseSpec},
     protocol::PageToHost,
 };
@@ -70,6 +70,7 @@ impl CallbackTokens {
         environment: &ICoreWebView2Environment,
         document: &Rc<HostDocument>,
         messages: Weak<RefCell<VecDeque<PageToHost>>>,
+        panics: &PanicFlag,
     ) -> Result<(), HostError> {
         let settings = unsafe { self.core.Settings() }.map_err(HostError::from_com)?;
         for operation in [
@@ -227,6 +228,7 @@ impl CallbackTokens {
         self.navigation_completed = Some(token);
 
         let weak_document = Rc::downgrade(document);
+        let panics = panics.clone();
         let message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
             if let (Some(args), Some(document)) = (args, weak_document.upgrade()) {
                 let mut source = PWSTR::null();
@@ -243,9 +245,7 @@ impl CallbackTokens {
                 ) {
                     // The COM callback only enqueues into host-owned state.
                     // Application code is invoked later by session.poll.
-                    let _ = catch_unwind(AssertUnwindSafe(|| {
-                        messages.borrow_mut().push_back(message);
-                    }));
+                    panics.guard(|| messages.borrow_mut().push_back(message));
                 }
             }
             Ok(())

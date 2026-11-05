@@ -3,7 +3,6 @@
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
 
@@ -32,6 +31,7 @@ use windows::{
 use crate::{
     callbacks::CallbackTokens,
     environment::WebViewEnvironment,
+    panic_flag::PanicFlag,
     policy::HostDocument,
     protocol::{HostToPage, PageToHost, serialize_host_message},
 };
@@ -125,6 +125,8 @@ pub struct WebViewHost {
     page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
     accelerator_token: Option<i64>,
     accelerators: Rc<RefCell<VecDeque<ShellAccelerator>>>,
+    /// Panics caught in this controller's callbacks, surfaced by poll.
+    callback_panics: PanicFlag,
     _environment: WebViewEnvironment,
 }
 
@@ -179,6 +181,7 @@ impl WebViewHost {
             page_messages: Rc::new(RefCell::new(VecDeque::new())),
             accelerator_token: None,
             accelerators: Rc::new(RefCell::new(VecDeque::new())),
+            callback_panics: PanicFlag::default(),
             _environment: environment,
         })
     }
@@ -192,6 +195,7 @@ impl WebViewHost {
         }
         let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
         let queue = Rc::downgrade(&self.accelerators);
+        let panics = self.callback_panics.clone();
         let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
                 return Ok(());
@@ -223,7 +227,7 @@ impl WebViewHost {
             ) && let Some(queue) = queue.upgrade()
             {
                 unsafe { args.SetHandled(true)? };
-                let _ = catch_unwind(AssertUnwindSafe(|| queue.borrow_mut().push_back(chord)));
+                panics.guard(|| queue.borrow_mut().push_back(chord));
             }
             Ok(())
         }));
@@ -306,13 +310,14 @@ impl WebViewHost {
         observer: Weak<dyn Fn(ProcessFailure)>,
     ) -> Result<(), HostError> {
         let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let panics = self.callback_panics.clone();
         let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
             if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
                 let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
                 // SAFETY: the event args are owned for this STA callback. The
                 // output is a live stack value and is not retained by COM.
                 unsafe { args.ProcessFailedKind(&mut kind) }?;
-                let _ = catch_unwind(AssertUnwindSafe(|| observer(ProcessFailure::from(kind))));
+                panics.guard(|| observer(ProcessFailure::from(kind)));
             }
             Ok(())
         }));
@@ -349,6 +354,7 @@ impl WebViewHost {
             self._environment.native_environment(),
             &document,
             Rc::downgrade(&self.page_messages),
+            &self.callback_panics,
         ) {
             // Retain failed removal tokens in the host if cleanup itself
             // fails. The session can retry `close` before releasing COM.
@@ -397,6 +403,12 @@ impl WebViewHost {
         self.callbacks
             .as_ref()
             .is_some_and(CallbackTokens::document_loaded)
+    }
+
+    /// True once after a panic was caught in one of this controller's
+    /// callbacks (a notification may have been lost).
+    pub(crate) fn take_callback_panic(&self) -> bool {
+        self.callback_panics.take()
     }
 
     /// Drain validated page messages after Windows dispatch, outside COM.
