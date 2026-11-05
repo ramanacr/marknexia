@@ -27,7 +27,7 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-                SendInput, VIRTUAL_KEY, VK_MENU,
+                SendInput, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW,
@@ -79,6 +79,13 @@ impl ShellProcess {
 
 impl Drop for ShellProcess {
     fn drop(&mut self) {
+        // On a runner, leave no modifier logically down after a failed or
+        // interrupted chord: a stuck Ctrl reaches the runner's console later
+        // (Ctrl+Break put a later pwsh step into its debugger, run
+        // 42106410645). Key-up events type nothing.
+        if on_github_actions() {
+            release_modifiers();
+        }
         // A graceful close lets WebView2 shut its browser process down.
         if let Some(window) = find_shell_window(self.id()) {
             // SAFETY: posting to a window of another process; no pointers.
@@ -193,6 +200,24 @@ pub fn send_chord_to(process_id: u32, keys: &[VIRTUAL_KEY]) {
         foreground_description()
     );
     send_chord(keys);
+}
+
+/// Sends key-up events for Ctrl, Alt and Shift.
+pub fn release_modifiers() {
+    let inputs: Vec<INPUT> = [VK_CONTROL, VK_MENU, VK_SHIFT]
+        .iter()
+        .map(|vk| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: *vk,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        })
+        .collect();
+    let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 }
 
 /// The foreground window's class, title and owning process, for failure

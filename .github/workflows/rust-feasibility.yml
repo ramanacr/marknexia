@@ -41,19 +41,19 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
       - name: Portable dependency boundary
-        run: pwsh -NoProfile -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
+        run: pwsh -NoProfile -NonInteractive -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
       - name: Dependency policy
         run: cargo deny check advisories bans licenses sources
       - name: Headless release evidence contracts
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          pwsh -NoProfile -File tests/perf/no_synthetic_pe_disk.tests.ps1
-          pwsh -NoProfile -File tests/perf/test_rust_architecture.tests.ps1
-          pwsh -NoProfile -File tests/perf/measure_rust_artifacts.tests.ps1
-          pwsh -NoProfile -File tests/perf/measure_rust_desktop_perf.tests.ps1
-          pwsh -NoProfile -File tests/perf/compare_rust_builds.tests.ps1
-          pwsh -NoProfile -File tests/perf/stage_webview2_loader.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/no_synthetic_pe_disk.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/test_rust_architecture.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_artifacts.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_desktop_perf.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/compare_rust_builds.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
@@ -95,17 +95,17 @@ jobs:
           $second = Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release"
           $reportRoot = Join-Path $env:RUNNER_TEMP "rust-feasibility-$architecture"
           New-Item -ItemType Directory -Path $reportRoot -Force | Out-Null
-          pwsh -NoProfile -File source-a/scripts/Compare-RustBuilds.ps1 -FirstRoot $first -SecondRoot $second -OutputPath (Join-Path $reportRoot 'unsigned-reproducibility.json')
-          pwsh -NoProfile -File source-a/scripts/Test-RustArchitecture.ps1 -Path (Join-Path $first 'marknexia-win32.exe') -Expected $architecture
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Compare-RustBuilds.ps1 -FirstRoot $first -SecondRoot $second -OutputPath (Join-Path $reportRoot 'unsigned-reproducibility.json')
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-RustArchitecture.ps1 -Path (Join-Path $first 'marknexia-win32.exe') -Expected $architecture
           $artifactRoot = Join-Path $reportRoot 'vertical-slice-artifacts'
           New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
           Copy-Item -LiteralPath (Join-Path $first 'marknexia-win32.exe') -Destination $artifactRoot
           $loaderLock = Get-Content source-a/packaging/webview/loader.lock.json -Raw | ConvertFrom-Json
           $sdkPackage = Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg'
           Invoke-WebRequest -Uri $loaderLock.source -OutFile $sdkPackage
-          pwsh -NoProfile -File source-a/scripts/Stage-WebView2Loader.ps1 -Architecture $architecture -PackagePath $sdkPackage -OutputPath (Join-Path $artifactRoot 'WebView2Loader.dll')
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Stage-WebView2Loader.ps1 -Architecture $architecture -PackagePath $sdkPackage -OutputPath (Join-Path $artifactRoot 'WebView2Loader.dll')
           $digest = (Get-FileHash -LiteralPath source-a/test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
-          pwsh -NoProfile -File source-a/scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifactRoot -NativeArtifactPath (Join-Path $artifactRoot 'marknexia-win32.exe') -OutputPath (Join-Path $reportRoot 'vertical-slice-artifacts.json') -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 1
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifactRoot -NativeArtifactPath (Join-Path $artifactRoot 'marknexia-win32.exe') -OutputPath (Join-Path $reportRoot 'vertical-slice-artifacts.json') -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-feasibility-${{ matrix.target }}
@@ -155,7 +155,7 @@ jobs:
             Stop-Process -Id $prompt.Id -Force
           }
       - name: Native gates
-        run: pwsh -NoProfile -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
+        run: pwsh -NoProfile -NonInteractive -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
       - name: Desktop performance (empty shell, 30 cold + 30 warm)
         if: always()
         timeout-minutes: 15
@@ -167,9 +167,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $evidence, $artifacts | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/marknexia-win32.exe" $artifacts
           $digest = (Get-FileHash -LiteralPath test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
-          pwsh -NoProfile -File scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifacts -NativeArtifactPath (Join-Path $artifacts 'marknexia-win32.exe') -OutputPath "$evidence/artifacts.json" -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 60
-          pwsh -NoProfile -File scripts/Collect-RustDesktopPerf.ps1 -ArtifactMeasurementPath "$evidence/artifacts.json" -ArtifactsRoot $artifacts -Scenario tests/perf/scenarios/empty-shell.json -OutputPath "$evidence/empty-shell-samples.json" -Runs 30
-          pwsh -NoProfile -File scripts/Measure-RustDesktopPerf.ps1 -Scenario tests/perf/scenarios/empty-shell.json -SamplesPath "$evidence/empty-shell-samples.json" -ArtifactMeasurementPath "$evidence/artifacts.json" -OutputPath "$evidence/empty-shell-desktop.json"
+          pwsh -NoProfile -NonInteractive -File scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifacts -NativeArtifactPath (Join-Path $artifacts 'marknexia-win32.exe') -OutputPath "$evidence/artifacts.json" -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 60
+          pwsh -NoProfile -NonInteractive -File scripts/Collect-RustDesktopPerf.ps1 -ArtifactMeasurementPath "$evidence/artifacts.json" -ArtifactsRoot $artifacts -Scenario tests/perf/scenarios/empty-shell.json -OutputPath "$evidence/empty-shell-samples.json" -Runs 30
+          pwsh -NoProfile -NonInteractive -File scripts/Measure-RustDesktopPerf.ps1 -Scenario tests/perf/scenarios/empty-shell.json -SamplesPath "$evidence/empty-shell-samples.json" -ArtifactMeasurementPath "$evidence/artifacts.json" -OutputPath "$evidence/empty-shell-desktop.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

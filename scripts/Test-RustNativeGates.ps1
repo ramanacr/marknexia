@@ -45,6 +45,24 @@ function Invoke-Gate([string]$Name, [scriptblock]$Body, [int]$Attempts = 1) {
     $results[$Name] = [ordered]@{ passed = $false; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); attempts = $Attempts; failedAttempts = $failures; error = $failures[-1] }
 }
 
+# The hosted windows-11-arm image can raise a "Microsoft account" sign-in
+# prompt (a system CoreWindow) at any time; it takes the foreground, and
+# Windows then refuses to activate the shell under test (run 42106410645).
+# On GitHub Actions only, a watcher closes that prompt's process while the
+# gates run and logs each close. The ephemeral runner never signs in.
+$promptWatcher = $null
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    $promptWatcher = Start-ThreadJob {
+        while ($true) {
+            foreach ($prompt in Get-Process | Where-Object { $_.MainWindowTitle -eq 'Microsoft account' }) {
+                "closed sign-in prompt: $($prompt.Id) $($prompt.ProcessName) $($prompt.Path)"
+                Stop-Process -Id $prompt.Id -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 Invoke-Gate 'webview-environment' {
     cargo test --locked --target $Target -p marknexia-webview --test environment -- --ignored --test-threads=1
 }
@@ -91,11 +109,20 @@ Invoke-Gate 'uia-native-accessibility' {
     cargo test --locked --target $Target -p marknexia-win32 --test native_accessibility -- --ignored --test-threads=1 --nocapture
 } -Attempts 3
 Invoke-Gate 'shell-visible-contract' {
-    pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
+    pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
+}
+
+$closedPrompts = @()
+if ($promptWatcher) {
+    Stop-Job $promptWatcher
+    $closedPrompts = @(Receive-Job $promptWatcher)
+    Remove-Job $promptWatcher
+    $closedPrompts | ForEach-Object { $_ }
 }
 
 $summary = [ordered]@{
     schemaVersion = 'rust-native-gates-v1'
+    closedSignInPrompts = $closedPrompts
     target = $Target
     commit = (git rev-parse HEAD).Trim()
     operatingSystem = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, BuildNumber, OSArchitecture)
