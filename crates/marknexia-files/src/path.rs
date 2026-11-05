@@ -6,8 +6,13 @@ fn is_reserved_component(segment: &str) -> bool {
     if segment.ends_with([' ', '.']) {
         return true;
     }
-    // Win32 ignores trailing spaces before the extension: "COM1 .md" is COM1.
-    let base = segment.split('.').next().unwrap_or_default().trim_end();
+    // Win32 strips trailing spaces and dots (U+0020, U+002E only) before the
+    // extension: "COM1 .md" is COM1, "COM1\u{a0}.md" is not.
+    let base = segment
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(['\u{20}', '.']);
     let upper = base.to_ascii_uppercase();
     if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&upper.as_str()) {
         return true;
