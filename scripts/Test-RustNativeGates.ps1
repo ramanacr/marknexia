@@ -7,7 +7,9 @@ Runs the native (ignored) Rust feasibility gates on an interactive Windows host.
 Runs the WebView2 environment and session native tests, the browser-process
 exit recovery test (terminating only the WebView2 browser process that the
 test itself started), the UI Automation smoke test against the built shell,
-and the shell visibility contract. Intended for local evidence hosts and for
+the native accessibility gate (DPI awareness and target size, UIA structure
+events, and the high-contrast palette, read only), and the shell visibility
+contract. Intended for local evidence hosts and for
 CI runners with an interactive desktop, on x64 and native ARM64.
 
 Writes a JSON summary to -OutputPath. Exits non-zero if any gate fails.
@@ -72,6 +74,12 @@ $exe = Join-Path $root "target\$Target\release\marknexia-win32.exe"
 Invoke-Gate 'uia-smoke' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test automation_smoke -- --ignored --test-threads=1
+}
+# DPI awareness and 44-DIP tab targets, UIA structure events on tab close,
+# and the palette against the current (read-only) high-contrast state.
+Invoke-Gate 'uia-native-accessibility' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_accessibility -- --ignored --test-threads=1 --nocapture
 }
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe

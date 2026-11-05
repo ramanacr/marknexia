@@ -329,15 +329,79 @@ These supersede the matching statements above.
 - Release builds pass for `x86_64` (483–488 KB) and `aarch64`
   (440 KB, compile-only).
 
+## Native accessibility gate (written 2026-11-06, awaiting a native run)
+
+`crates/marknexia-win32/tests/native_accessibility.rs` holds three ignored
+tests. `scripts/Test-RustNativeGates.ps1` runs them as the gate
+`uia-native-accessibility`, after `uia-smoke`, against the built shell
+(`MARKNEXIA_SHELL_EXE`). The tests compile and pass clippy. They were not run
+on 2026-11-06: the workstation was locked (foreground `LockApp`), so they
+need CI or an unlocked interactive desktop. State: *compiled*, not yet
+*native-tested*.
+
+1. **DPI awareness and target size.**
+   `shell_is_per_monitor_v2_and_tab_items_meet_the_44_dip_target`:
+   - The test thread is made per-monitor-v2 aware, so UIA rectangles are
+     physical pixels.
+   - `GetWindowDpiAwarenessContext(shell)` must equal
+     `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`
+     (`AreDpiAwarenessContextsEqual`), and its awareness must be
+     `DPI_AWARENESS_PER_MONITOR_AWARE`.
+   - Each UIA `TabItem` `BoundingRectangle` must be at least
+     `44 * GetDpiForWindow(shell) / 96` physical pixels in width and in
+     height. The test prints the DPI, the scale and each tab's size.
+   - Design decision: the 44-DIP minimum applies to tab items with no
+     exception. `layout.rs` (`Dip::INTERACTION_TARGET`, rounded up) sizes the
+     tab strip height. `tab_slot` gives each tab an equal share of the strip
+     width. The UIA rectangle is that slot over the full strip height.
+2. **UIA structure events.**
+   `closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child`:
+   - It registers an `IUIAutomationStructureChangedEventHandler`
+     (windows-rs `#[implement]`) on the `TabControl` with `TreeScope_Subtree`.
+   - It closes the active tab. The provider exposes no UIA close affordance:
+     `SelectionItem` only, no `Invoke` pattern and no close-button child. The
+     test asserts that. It then uses the Ctrl+W fallback through `SendInput`,
+     only after it asserts that the launched shell owns the foreground. The
+     synthetic Alt activation runs only when `CI=true` and
+     `GITHUB_ACTIONS=true`.
+   - It asserts a `ChildRemoved` or `ChildrenInvalidated` event whose sender
+     is the `TabControl`, one `TabItem` fewer (FindAll and the raw-view
+     walker agree), the survivor's name, and `UIA_E_ELEMENTNOTAVAILABLE`
+     from the closed tab's element.
+   - Source review: the shell raises `ChildrenInvalidated` on the fragment
+     root with a null runtime ID (`notify_children_changed`), and only after
+     the WebView switch to the next tab succeeds. `accessibility.rs` was not
+     changed: there is no native evidence yet that the event is missing. If
+     the gate fails here, the fix belongs in `accessibility.rs`.
+3. **High contrast (read only).**
+   `palette_selection_follows_the_current_high_contrast_state`:
+   - No system setting is changed. The test only reads `SPI_GETHIGHCONTRAST`.
+   - It captures the shell client area with `PrintWindow`
+     (`PW_CLIENTONLY | PW_RENDERFULLCONTENT`) and samples the inactive and
+     active tab fills. Each brand palette paints them in two different colors
+     (`surface`, `elevated`). The high-contrast palette paints both with
+     `COLOR_BTNFACE`.
+   - High contrast off: the fills must equal the Light or the Dark palette
+     pair, and must not be the high-contrast pair.
+   - High contrast on: both fills must be `COLOR_BTNFACE`.
+   - `tests/theme.rs` already covers the palette mapping headlessly.
+   - **Deferred:** toggling high contrast while the shell runs
+     (`WM_SETTINGCHANGE` / `WM_SYSCOLORCHANGE` and repaint) needs a change to
+     a system setting. It is deferred to manual or production verification.
+
 ## Implemented, awaiting native verification
 
-- **Structure events.** `ChildrenInvalidated` on tab close and
-  `AutomationFocusChanged` on keyboard selection are implemented but not yet
+- **Structure events.** `ChildrenInvalidated` on tab close is now asserted by
+  the `uia-native-accessibility` gate above, which has not run natively yet.
+  `AutomationFocusChanged` on keyboard selection is implemented but not
   asserted natively.
 
 ## Not yet verified or not implemented
 
-- Native `WM_DPICHANGED` across monitors, and high-contrast capture.
+- Native `WM_DPICHANGED` across monitors. A second monitor with a different
+  DPI is not available to the gate; it checks one DPI only.
+- High contrast toggled at runtime (deferred to manual or production
+  verification; see the gate above).
 - WebView2 focus changes reflected back into portable focus state, for
   example when the user clicks into the document.
 - Page-to-host bridge actions (links, copy), the Mermaid runtime and local
