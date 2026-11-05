@@ -22,8 +22,11 @@ use std::{
 
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, WPARAM},
-        System::Threading::{AttachThreadInput, GetCurrentThreadId},
+        Foundation::{CloseHandle, HWND, LPARAM, WPARAM},
+        System::Threading::{
+            AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        },
         UI::{
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -36,7 +39,7 @@ use windows::{
             },
         },
     },
-    core::BOOL,
+    core::{BOOL, PWSTR},
 };
 
 pub const SHELL_CLASS: &str = "MarknexiaRustWindow";
@@ -220,6 +223,55 @@ pub fn release_modifiers() {
     let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 }
 
+/// GitHub Actions only: the hosted windows-11-arm image raises a "Microsoft
+/// account" sign-in prompt (a system `Windows.UI.Core.CoreWindow`) that holds
+/// the foreground (runs 42104089745, 42110166762). The ephemeral runner never
+/// signs in, so the prompt is asked to close; nothing is typed into it.
+fn close_runner_sign_in_prompt() {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_invalid() {
+        return;
+    }
+    let mut class = [0u16; 256];
+    let class_len = unsafe { GetClassNameW(foreground, &mut class) }.max(0) as usize;
+    let mut title = [0u16; 256];
+    let title_len = unsafe { GetWindowTextW(foreground, &mut title) }.max(0) as usize;
+    if String::from_utf16_lossy(&class[..class_len]) == "Windows.UI.Core.CoreWindow"
+        && String::from_utf16_lossy(&title[..title_len]) == "Microsoft account"
+    {
+        eprintln!(
+            "closing the runner's sign-in prompt ({})",
+            foreground_description()
+        );
+        // SAFETY: posting to a window of another process; no pointers.
+        let _ = unsafe { PostMessageW(Some(foreground), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// The executable path of a process, when it can be queried.
+fn process_image(process_id: u32) -> String {
+    let Ok(process) =
+        (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
+    else {
+        return "unknown".to_owned();
+    };
+    let mut path = [0u16; 1024];
+    let mut length = path.len() as u32;
+    let queried = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(path.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    match queried {
+        Ok(()) => String::from_utf16_lossy(&path[..length as usize]),
+        Err(_) => "unknown".to_owned(),
+    }
+}
+
 /// The foreground window's class, title and owning process, for failure
 /// messages when activation is refused.
 pub fn foreground_description() -> String {
@@ -231,11 +283,13 @@ pub fn foreground_description() -> String {
     let class_len = unsafe { GetClassNameW(foreground, &mut class) }.max(0) as usize;
     let mut title = [0u16; 256];
     let title_len = unsafe { GetWindowTextW(foreground, &mut title) }.max(0) as usize;
+    let owner = foreground_owner();
     format!(
-        "class {:?}, title {:?}, process {}",
+        "class {:?}, title {:?}, process {} ({})",
         String::from_utf16_lossy(&class[..class_len]),
         String::from_utf16_lossy(&title[..title_len]),
-        foreground_owner()
+        owner,
+        process_image(owner)
     )
 }
 
@@ -258,6 +312,7 @@ pub fn on_github_actions() -> bool {
 /// No system setting (such as `SPI_SETFOREGROUNDLOCKTIMEOUT`) is changed.
 pub fn activate_attempt(hwnd: HWND, attempt: u32) {
     if on_github_actions() {
+        close_runner_sign_in_prompt();
         send_chord(&[VK_MENU]);
     }
     let current = unsafe { GetCurrentThreadId() };
