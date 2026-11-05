@@ -446,6 +446,9 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                 )
             };
             let mut startup_error = None;
+            // Placeholders that could not join the session (or be shown):
+            // as startup tabs they resolve as failed, never stay pending.
+            let mut failed_placeholders = Vec::new();
             for (tab_id, title) in tabs {
                 // Document tabs join the session when their render arrives.
                 if state.borrow().renders.is_pending(tab_id.get()) {
@@ -465,13 +468,25 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
                 });
                 if let Err(error) = added {
                     startup_error = Some(format!("WebView2 document: {error}"));
+                    failed_placeholders.push(tab_id.get());
                 }
             }
             let mut shown = None;
-            if let Some(active) = active
-                && session.select_tab(active.get()).is_ok()
+            if let Some(active) = active {
+                if session.select_tab(active.get()).is_ok() {
+                    shown = Some(active.get());
+                } else if !state.borrow().renders.is_pending(active.get()) {
+                    // A placeholder that cannot be shown; a document tab
+                    // whose render is pending is expected to be unselectable.
+                    failed_placeholders.push(active.get());
+                }
+            }
             {
-                shown = Some(active.get());
+                let mut state = state.borrow_mut();
+                for tab_id in failed_placeholders {
+                    let signal = state.startup.failed(tab_id);
+                    state.apply_startup(signal);
+                }
             }
             match session.start() {
                 Ok(()) => {

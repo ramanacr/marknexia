@@ -90,6 +90,8 @@ pub struct WebViewSession {
     documents: BTreeMap<u64, HostDocument>,
     hosts: BTreeMap<u64, WebViewHost>,
     orphaned_hosts: BTreeMap<u64, Vec<WebViewHost>>,
+    /// Per tab, how many orphans whose close keeps failing were reported.
+    orphan_failures_reported: BTreeMap<u64, usize>,
     process_observers: BTreeMap<u64, Rc<dyn Fn(ProcessFailure)>>,
     browser_observer: Option<Rc<dyn Fn(BrowserExit)>>,
     browser_subscription: Option<BrowserExitSubscription>,
@@ -141,6 +143,7 @@ impl WebViewSession {
             documents: BTreeMap::new(),
             hosts: BTreeMap::new(),
             orphaned_hosts: BTreeMap::new(),
+            orphan_failures_reported: BTreeMap::new(),
             process_observers: BTreeMap::new(),
             browser_observer: None,
             browser_subscription: None,
@@ -429,6 +432,7 @@ impl WebViewSession {
         if self.environment_recreate_pending {
             self.recreate_environment()?;
         }
+        let mut orphan_error = None;
         if self.environment.is_some()
             && !self.teardown_pending
             && !self.environment_recreate_pending
@@ -436,7 +440,8 @@ impl WebViewSession {
             if !self.browser_recovering {
                 self.retry_renderer_recreation()?;
             }
-            self.close_orphaned_hosts()?;
+            // A stuck orphan does not stop new controllers from starting.
+            orphan_error = self.close_orphaned_hosts();
             for tab_id in self.documents.keys().copied().collect::<Vec<_>>() {
                 if !self.hosts.contains_key(&tab_id)
                     && !self.orphaned_hosts.contains_key(&tab_id)
@@ -465,6 +470,9 @@ impl WebViewSession {
         }
         if self.visibility_pending {
             self.apply_selected_visibility()?;
+        }
+        if let Some(error) = orphan_error {
+            return Err(error);
         }
         self.take_callback_panics()
     }
@@ -664,7 +672,9 @@ impl WebViewSession {
         if let Some(error) = first_error {
             return Err(SessionError::Host(error));
         }
-        self.close_orphaned_hosts()?;
+        if let Some(error) = self.close_orphaned_hosts() {
+            return Err(error);
+        }
         self.teardown_pending = false;
         let action = self.recovery.controllers_closed();
         self.apply_recovery_action(action)
@@ -690,16 +700,35 @@ impl WebViewSession {
         Ok(())
     }
 
-    fn close_orphaned_hosts(&mut self) -> Result<(), SessionError> {
+    /// Retries closing every orphaned controller. One that keeps failing
+    /// stays orphaned without stopping the others or the caller; each newly
+    /// failing orphan is reported once (the first such error is returned).
+    fn close_orphaned_hosts(&mut self) -> Option<SessionError> {
+        let mut first_new = None;
         for tab_id in self.orphaned_hosts.keys().copied().collect::<Vec<_>>() {
-            if let Some(hosts) = self.orphaned_hosts.get_mut(&tab_id) {
-                for host in hosts {
-                    host.close()?;
+            let Some(hosts) = self.orphaned_hosts.get_mut(&tab_id) else {
+                continue;
+            };
+            let mut errors = Vec::new();
+            hosts.retain_mut(|host| match host.close() {
+                Ok(()) => false,
+                Err(error) => {
+                    errors.push(error);
+                    true
                 }
+            });
+            if hosts.is_empty() {
+                self.orphaned_hosts.remove(&tab_id);
+                self.orphan_failures_reported.remove(&tab_id);
+                continue;
             }
-            self.orphaned_hosts.remove(&tab_id);
+            let reported = self.orphan_failures_reported.entry(tab_id).or_default();
+            if errors.len() > *reported {
+                first_new.get_or_insert(SessionError::Host(errors[*reported]));
+            }
+            *reported = errors.len();
         }
-        Ok(())
+        first_new
     }
 
     fn recreate_environment(&mut self) -> Result<(), SessionError> {

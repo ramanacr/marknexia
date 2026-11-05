@@ -59,7 +59,9 @@ impl ShellProcess {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let profile = std::path::absolute(&profile).expect("absolute profile path");
-        std::fs::create_dir_all(&profile).expect("create test WebView2 profile");
+        // create_dir, not create_dir_all: the name is unique, so this fails
+        // rather than adopt an existing folder that Drop would then delete.
+        std::fs::create_dir(&profile).expect("create test WebView2 profile");
         let child = Command::new(executable)
             .args(args)
             .env("MARKNEXIA_WEBVIEW2_USER_DATA", &profile)

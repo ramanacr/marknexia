@@ -421,6 +421,16 @@ fn exactly_one_of_first_render_or_startup_failed_is_signaled() {
     let mut tracker = StartupTracker::new(false, [2]);
     assert_eq!(tracker.webview_unavailable(), Some(StartupFailed));
     assert_eq!(tracker.rendered(2), None);
+    // No paths, the active placeholder cannot join the session or be
+    // shown: it resolves as failed at once, never stays pending.
+    let mut tracker = StartupTracker::new(false, [2]);
+    assert_eq!(
+        tracker.failed(1),
+        None,
+        "an inactive placeholder is not a startup tab"
+    );
+    assert_eq!(tracker.failed(2), Some(StartupFailed));
+    assert_eq!(tracker.rendered(2), None);
     // No paths, the placeholder's controller fails.
     let mut tracker = StartupTracker::new(false, [2]);
     assert_eq!(tracker.failed(2), Some(StartupFailed));

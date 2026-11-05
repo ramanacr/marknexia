@@ -307,6 +307,21 @@ These supersede the matching statements above.
     - The structure-event list is cleared just before Ctrl+W.
     - `PrintWindow` runs only after `SendMessageTimeout(WM_NULL)` proves
       the shell's UI thread responds.
+- **Review fixes (2026-11-06, third round).**
+  - **Startup.** A placeholder that cannot join the session, or an active
+    placeholder that cannot be shown, resolves as a failed startup tab, so
+    the empty-shell run fails fast instead of timing out.
+  - **Orphans.**
+    - An orphaned controller whose close keeps failing stays orphaned and
+      is retried.
+    - It no longer stops `poll` from starting other controllers.
+    - Each newly failing orphan is reported once.
+  - **Native tests.**
+    - The test profile is created with `create_dir`, so `Drop` removes
+      only a folder the test created.
+    - The structure-event wait first lets earlier events settle for
+      500 ms, then checks that the closed tab's name is gone.
+    - The responsiveness probe before `PrintWindow` allows 5 s.
 - **StartupFailed (2026-11-05).**
   - An environment failure disables every document and signals
     StartupFailed.

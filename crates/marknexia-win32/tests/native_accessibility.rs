@@ -386,8 +386,21 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
     shell.activate();
     let _ = unsafe { tabs[0].SetFocus() };
     thread::sleep(Duration::from_millis(300));
-    // Only events raised by the close below count: drop anything recorded
-    // while selecting and focusing.
+    // Only events raised by the close below count. Wait until earlier
+    // events (selection, focus) have stopped arriving for 500 ms, then drop
+    // them.
+    let quiet = Duration::from_millis(500);
+    let deadline = Instant::now() + TIMEOUT;
+    let mut seen = events.lock().expect("event list").len();
+    let mut stable_since = Instant::now();
+    while stable_since.elapsed() < quiet && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+        let now = events.lock().expect("event list").len();
+        if now != seen {
+            seen = now;
+            stable_since = Instant::now();
+        }
+    }
     events.lock().expect("event list").clear();
     // Re-checks the foreground immediately before SendInput.
     send_chord_to(shell.shell.id(), &[VK_CONTROL, VK_W]);
@@ -411,6 +424,10 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
         (remaining.len() == 1).then_some(remaining)
     });
     assert_eq!(name(&remaining[0]), names[1]);
+    assert!(
+        remaining.iter().all(|tab| name(tab) != names[0]),
+        "the closed tab's name must be gone from the tab items"
+    );
     // The raw view agrees with FindAll: no stale sibling through navigation.
     let walker = unsafe { shell.automation.RawViewWalker() }.expect("RawViewWalker");
     let first = unsafe { walker.GetFirstChildElement(&shell.tab_control) }.expect("first child");
@@ -464,7 +481,7 @@ fn tab_fills(colors: Palette) -> (u32, u32) {
 /// shell's client area. Tab 0 must be the active tab.
 fn sample_tab_fills(shell_hwnd: HWND, strip: HWND, dpi: u32) -> Option<(u32, u32)> {
     // PrintWindow sends WM_PRINT synchronously and would block on a hung
-    // shell: first prove its UI thread answers within two seconds.
+    // shell: first prove its UI thread answers within five seconds.
     let mut reply = 0_usize;
     let responsive = unsafe {
         SendMessageTimeoutW(
@@ -473,7 +490,8 @@ fn sample_tab_fills(shell_hwnd: HWND, strip: HWND, dpi: u32) -> Option<(u32, u32
             WPARAM(0),
             LPARAM(0),
             SMTO_ABORTIFHUNG,
-            2000,
+            // Generous for slower ARM64 runners.
+            5000,
             Some(&mut reply),
         )
     };
