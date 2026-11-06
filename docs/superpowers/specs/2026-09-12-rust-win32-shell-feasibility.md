@@ -456,7 +456,7 @@ need CI or an unlocked interactive desktop. State: *compiled*, not yet
 
 Plan tasks 1, 2 and 6 (`docs/superpowers/plans/2026-11-06-rust-win32-production.md`).
 Observable differences from .NET are in
-`compat/decisions/shell-chrome-differences.md` (CHROME-1 to CHROME-10,
+`compat/decisions/shell-chrome-differences.md` (CHROME-1 to CHROME-15,
 proposed).
 
 - **Implemented.**
@@ -498,3 +498,14 @@ proposed).
   image setting in `tests/documents.rs`, the remote-images header policy in
   `marknexia-webview/tests/rendered_document.rs`, and the new accelerator
   chords and scroll script in `marknexia-webview/tests/accelerators.rs`.
+- **Review fixes (2026-11-06).** `native_chrome.rs` runs in
+  `Test-RustNativeGates.ps1` as the gate `uia-native-chrome` (3 attempts).
+  `Test-RustNativeShell.ps1` isolates the settings file and WebView2
+  profile. Sidebar paths are gated before any file-system access and their
+  existence checks run on workers; recent files are added after a
+  successful render. `from_rendered` takes the expected remote-image
+  setting and the header allows `https:` only. Chrome actions queue outside
+  `AppState`; tree items carry a generation; worker posts check that the
+  window is still the shell's; scrolling needs a loaded document; high
+  contrast uses ButtonText on ButtonFace; new diagnostics raise a UIA
+  notification. Still compiled only: the workstation stayed locked.
