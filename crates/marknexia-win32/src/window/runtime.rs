@@ -16,9 +16,10 @@
 use std::{
     cell::RefCell,
     ffi::c_void,
+    path::PathBuf,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -30,7 +31,10 @@ use marknexia_webview::{
         Bootstrap, DownloadLimits, MISSING_DIAGNOSTIC, OFFLINE_INSTALLER_PAGE, RuntimeSetup,
         SetupFailure, SetupPhase, SetupStep, TempStager, failure_message,
     },
-    bootstrap_native::{AuthenticodeVerifier, ProcessRunner, WinHttpDownloader},
+    bootstrap_native::{
+        AuthenticodeVerifier, DownloadAbort, FileVersionReader, ProcessRunner, WinHttpDownloader,
+        delete_at_restart,
+    },
     environment::{EvergreenRuntime, NativeBrowserVersionProbe, RuntimeStatus},
 };
 use windows::{
@@ -53,7 +57,7 @@ use windows::{
 };
 
 use super::{AppState, WindowError, app_state_handle, chrome, create_child};
-use crate::layout::PixelRect;
+use crate::{layout::PixelRect, reentry};
 
 pub(super) const ID_RUNTIME_TEXT: usize = 2030;
 pub(super) const ID_RUNTIME_INSTALL: usize = 2031;
@@ -92,6 +96,10 @@ pub(super) struct RuntimeUi {
     active: bool,
     controls: Option<Controls>,
     cancel: Option<Arc<AtomicBool>>,
+    /// Closes the running request handle, so a blocked receive returns.
+    abort: Option<DownloadAbort>,
+    /// The staged paths while the installer runs (published by the runner).
+    running: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
     /// Cleared at WM_DESTROY: the worker stops posting.
     alive: Arc<AtomicBool>,
     sender: mpsc::Sender<Event>,
@@ -109,6 +117,8 @@ impl RuntimeUi {
             active: false,
             controls: None,
             cancel: None,
+            abort: None,
+            running: Arc::default(),
             alive: Arc::new(AtomicBool::new(true)),
             sender,
             events,
@@ -118,14 +128,48 @@ impl RuntimeUi {
         }
     }
 
-    /// Stops the worker's notifications and asks a running download to
-    /// stop (WM_DESTROY). A running installer is not stopped.
+    /// Stops the worker's notifications and a running download
+    /// (WM_DESTROY). A running installer is not stopped: its staged file
+    /// and folder are scheduled for deletion at the next restart, because
+    /// the worker that would delete them ends with the process.
     pub(super) fn shutdown(&mut self) {
         self.alive.store(false, Ordering::Release);
         if let Some(cancel) = self.cancel.take() {
             cancel.store(true, Ordering::Release);
         }
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some((file, folder)) = running {
+            delete_at_restart(Some(&file), &folder);
+        }
     }
+
+    /// Whether `control` is this module's window for command `id`.
+    fn is_control(&self, id: usize, control: HWND) -> bool {
+        self.controls.is_some_and(|controls| {
+            let expected = match id {
+                ID_RUNTIME_INSTALL => controls.install,
+                ID_RUNTIME_CANCEL => controls.cancel,
+                ID_RUNTIME_LINK => controls.link,
+                _ => return false,
+            };
+            !control.is_invalid() && control == expected
+        })
+    }
+}
+
+/// Command and notification sources must be this module's own controls.
+fn from_control(hwnd: HWND, id: usize, control: HWND) -> bool {
+    // SAFETY: `hwnd` is this thread's shell window.
+    unsafe { app_state_handle(hwnd) }.is_some_and(|state| {
+        reentry::read(&state, |state| state.runtime.is_control(id, control)).unwrap_or(false)
+    })
 }
 
 impl Drop for RuntimeUi {
@@ -287,27 +331,43 @@ pub(super) fn handle_message(
     match message {
         // Only wakes the loop; `poll` runs at the loop tail.
         WM_RUNTIME_EVENT => Some(LRESULT(0)),
-        WM_COMMAND if (wparam.0 >> 16) & 0xffff == 0 => match wparam.0 & 0xffff {
-            ID_RUNTIME_INSTALL => {
-                begin_install(hwnd);
-                Some(LRESULT(0))
+        // BN_CLICKED from one of this module's own controls only: the
+        // lParam must be that control's window.
+        WM_COMMAND
+            if (wparam.0 >> 16) & 0xffff == 0
+                && matches!(
+                    wparam.0 & 0xffff,
+                    ID_RUNTIME_INSTALL | ID_RUNTIME_CANCEL | ID_RUNTIME_LINK
+                ) =>
+        {
+            if !from_control(hwnd, wparam.0 & 0xffff, HWND(lparam.0 as *mut c_void)) {
+                return Some(LRESULT(0));
             }
-            ID_RUNTIME_CANCEL => {
-                request_cancel(hwnd);
-                Some(LRESULT(0))
+            match wparam.0 & 0xffff {
+                ID_RUNTIME_INSTALL => {
+                    begin_install(hwnd);
+                    Some(LRESULT(0))
+                }
+                ID_RUNTIME_CANCEL => {
+                    request_cancel(hwnd);
+                    Some(LRESULT(0))
+                }
+                // The fallback button.
+                ID_RUNTIME_LINK => {
+                    open_offline_page(hwnd);
+                    Some(LRESULT(0))
+                }
+                _ => None,
             }
-            // The fallback button.
-            ID_RUNTIME_LINK => {
-                open_offline_page(hwnd);
-                Some(LRESULT(0))
-            }
-            _ => None,
-        },
+        }
         WM_NOTIFY => {
             // SAFETY: for WM_NOTIFY, lParam points to an NMHDR (or a larger
             // structure that starts with one) valid for this message.
             let header = unsafe { (lparam.0 as *const NMHDR).as_ref() }?;
-            if header.idFrom == ID_RUNTIME_LINK && matches!(header.code, NM_CLICK | NM_RETURN) {
+            if header.idFrom == ID_RUNTIME_LINK
+                && matches!(header.code, NM_CLICK | NM_RETURN)
+                && from_control(hwnd, ID_RUNTIME_LINK, header.hwndFrom)
+            {
                 open_offline_page(hwnd);
                 return Some(LRESULT(0));
             }
@@ -352,11 +412,20 @@ fn begin_install(hwnd: HWND) {
         }
         ui.setup.begin_install().map(|attempt| {
             let cancel = Arc::new(AtomicBool::new(false));
+            let abort = DownloadAbort::new();
             ui.cancel = Some(Arc::clone(&cancel));
-            (attempt, cancel, ui.sender.clone(), Arc::clone(&ui.alive))
+            ui.abort = Some(abort.clone());
+            (
+                attempt,
+                cancel,
+                abort,
+                Arc::clone(&ui.running),
+                ui.sender.clone(),
+                Arc::clone(&ui.alive),
+            )
         })
     };
-    let Some((attempt, cancel, sender, alive)) = started else {
+    let Some((attempt, cancel, abort, running, sender, alive)) = started else {
         return;
     };
     let window = hwnd.0 as isize;
@@ -366,11 +435,16 @@ fn begin_install(hwnd: HWND) {
             let post = |event: Event| deliver(window, &alive, &sender, event);
             let limits = DownloadLimits::default();
             let stager = TempStager::new(limits);
-            let runner = ProcessRunner::default();
+            let downloader = WinHttpDownloader::with_abort(abort);
+            let runner = ProcessRunner {
+                running,
+                ..ProcessRunner::default()
+            };
             let bootstrap = Bootstrap {
-                downloader: &WinHttpDownloader,
+                downloader: &downloader,
                 stager: &stager,
                 verifier: &AuthenticodeVerifier,
+                identity: &FileVersionReader,
                 runner: &runner,
                 probe: &NativeBrowserVersionProbe,
                 limits,
@@ -419,10 +493,14 @@ fn request_cancel(hwnd: HWND) {
             return;
         };
         let ui = &mut state.runtime;
-        if ui.setup.request_cancel()
-            && let Some(cancel) = ui.cancel.as_ref()
-        {
-            cancel.store(true, Ordering::Release);
+        if ui.setup.request_cancel() {
+            if let Some(cancel) = ui.cancel.as_ref() {
+                cancel.store(true, Ordering::Release);
+            }
+            // A blocked receive returns at once.
+            if let Some(abort) = ui.abort.as_ref() {
+                abort.abort();
+            }
         }
     }
     sync(&state);
@@ -433,10 +511,11 @@ pub(super) fn poll(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    let events: Vec<Event> = match state.try_borrow() {
-        Ok(state) if !state.webview_checked_out => state.runtime.events.try_iter().collect(),
-        _ => return,
-    };
+    // Only when nothing holds the state and no COM call has the session.
+    if !reentry::is_free(&state) || state.borrow().webview_checked_out {
+        return;
+    }
+    let events: Vec<Event> = state.borrow().runtime.events.try_iter().collect();
     if events.is_empty() {
         return;
     }
