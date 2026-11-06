@@ -259,14 +259,32 @@ enum Fetched {
 /// proxy, manual redirects, per-phase timeouts, an overall deadline and a
 /// size bound. Cancellation is checked between calls, and
 /// [`DownloadAbort::abort`] interrupts a blocked call.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WinHttpDownloader {
     abort: DownloadAbort,
+    agent: &'static str,
+}
+
+impl Default for WinHttpDownloader {
+    fn default() -> Self {
+        Self::with_abort(DownloadAbort::default())
+    }
 }
 
 impl WinHttpDownloader {
     pub fn with_abort(abort: DownloadAbort) -> Self {
-        Self { abort }
+        Self {
+            abort,
+            agent: "Marknexia WebView2 setup",
+        }
+    }
+
+    /// The same downloader with another `User-Agent` (the portable
+    /// updater uses its own).
+    #[must_use]
+    pub fn with_agent(mut self, agent: &'static str) -> Self {
+        self.agent = agent;
+        self
     }
 }
 
@@ -297,10 +315,12 @@ impl WinHttpDownloader {
         cancel: &AtomicBool,
     ) -> Result<Vec<u8>, DownloadError> {
         let deadline = Instant::now() + limits.total_timeout;
-        // SAFETY: static agent string; no proxy override strings.
+        let agent = wide(self.agent);
+        // SAFETY: `agent` is NUL-terminated and outlives the call; no proxy
+        // override strings.
         let session = Internet::new(unsafe {
             WinHttpOpen(
-                w!("Marknexia WebView2 setup"),
+                PCWSTR::from_raw(agent.as_ptr()),
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 PCWSTR::null(),
                 PCWSTR::null(),
@@ -530,6 +550,30 @@ pub struct AuthenticodeVerifier;
 
 impl SignatureVerifier for AuthenticodeVerifier {
     fn verify(&self, file: &StagedFile) -> Result<(), SignatureError> {
+        // SAFETY: `check_signer` gets the live state of a successful verify.
+        verify_trust(file, |state| unsafe { check_signer(state) })
+    }
+}
+
+/// Authenticode for a named publisher: the same `WinVerifyTrust` call as
+/// [`AuthenticodeVerifier`], then, before the state is closed, an explicit
+/// code-signing usage on the leaf and a leaf simple display name equal to
+/// `publisher` (exact, case-sensitive). No Microsoft root policy: the
+/// publisher's chain only has to be trusted by Windows. Used by the
+/// portable updater for its staged executables.
+pub fn verify_publisher(file: &StagedFile, publisher: &str) -> Result<(), SignatureError> {
+    // SAFETY: `check_publisher` gets the live state of a successful verify.
+    verify_trust(file, |state| unsafe { check_publisher(state, publisher) })
+}
+
+/// `WinVerifyTrust` (generic verify v2, whole-chain revocation, no UI) on
+/// `file`, through its lock handle when it has one; `check` runs on the
+/// state data before the state is closed.
+fn verify_trust(
+    file: &StagedFile,
+    check: impl FnOnce(HANDLE) -> Result<(), SignatureError>,
+) -> Result<(), SignatureError> {
+    {
         let path = wide_path(file.path());
         let handle = file
             .lock()
@@ -566,8 +610,8 @@ impl SignatureVerifier for AuthenticodeVerifier {
             )
         };
         let result = if status == 0 {
-            // SAFETY: the state data is valid until the close call below.
-            unsafe { check_signer(data.hWVTStateData) }
+            // The state data is valid until the close call below.
+            check(data.hWVTStateData)
         } else {
             Err(SignatureError::Untrusted(status))
         };
@@ -581,6 +625,39 @@ impl SignatureVerifier for AuthenticodeVerifier {
             )
         };
         result
+    }
+}
+
+/// The publisher check of [`verify_publisher`].
+///
+/// # Safety
+/// `state` must be the live state data of a successful verify call.
+unsafe fn check_publisher(state: HANDLE, publisher: &str) -> Result<(), SignatureError> {
+    // SAFETY: per the contract, `state` is live; the helpers return
+    // pointers into it (or null), valid until the state is closed.
+    unsafe {
+        let provider = WTHelperProvDataFromStateData(state);
+        if provider.is_null() {
+            return Err(SignatureError::NoSigner);
+        }
+        let signer = WTHelperGetProvSignerFromChain(provider, 0, false, 0);
+        let Some(signer) = signer.as_ref() else {
+            return Err(SignatureError::NoSigner);
+        };
+        if signer.csCertChain == 0 || signer.pasCertChain.is_null() {
+            return Err(SignatureError::NoSigner);
+        }
+        let chain = std::slice::from_raw_parts(signer.pasCertChain, signer.csCertChain as usize);
+        let leaf_certificate = chain[0].pCert;
+        if !has_code_signing_usage(&enhanced_key_usages(leaf_certificate)) {
+            return Err(SignatureError::NoCodeSigningUsage);
+        }
+        let leaf = certificate_name(leaf_certificate).ok_or(SignatureError::NoSigner)?;
+        if crate::bootstrap::is_expected_publisher(&leaf, publisher) {
+            Ok(())
+        } else {
+            Err(SignatureError::UnexpectedPublisher { signer: leaf })
+        }
     }
 }
 

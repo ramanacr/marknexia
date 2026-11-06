@@ -104,6 +104,78 @@ fn urls_must_be_https_to_microsoft_on_the_default_port() {
 }
 
 #[test]
+fn an_exact_host_list_applies_to_the_url_and_every_redirect() {
+    let hosts = ["updates.example.test".to_owned()];
+    let start = DownloadUrl::parse_with_hosts("https://Updates.Example.TEST/m.json", &hosts)
+        .expect("listed host");
+    assert_eq!(start.host(), "updates.example.test");
+    assert_eq!(
+        start.resolve("/other.json").expect("same host").host(),
+        "updates.example.test"
+    );
+    for (url, expected) in [
+        ("https://go.microsoft.com/x", UrlError::UntrustedHost),
+        (
+            "https://cdn.updates.example.test/x",
+            UrlError::UntrustedHost,
+        ),
+        (
+            "https://updates.example.test.evil/x",
+            UrlError::UntrustedHost,
+        ),
+        ("http://updates.example.test/x", UrlError::NotHttps),
+        ("https://updates.example.test:8443/x", UrlError::Port),
+    ] {
+        assert_eq!(
+            DownloadUrl::parse_with_hosts(url, &hosts),
+            Err(expected),
+            "{url}"
+        );
+    }
+    // A redirect off the list fails, even to a bootstrapper host.
+    for location in [
+        "https://go.microsoft.com/x",
+        "//msedge.sf.dl.delivery.mp.microsoft.com/x",
+        "https://example.com/x",
+    ] {
+        assert_eq!(
+            start.resolve(location),
+            Err(UrlError::UntrustedHost),
+            "{location}"
+        );
+    }
+    // An empty list allows nothing.
+    assert_eq!(
+        DownloadUrl::parse_with_hosts("https://updates.example.test/x", &[]),
+        Err(UrlError::UntrustedHost)
+    );
+    // The bootstrapper policy is unchanged and does not accept listed hosts.
+    assert_eq!(
+        DownloadUrl::parse("https://updates.example.test/x"),
+        Err(UrlError::UntrustedHost)
+    );
+}
+
+#[test]
+fn the_publisher_check_is_exact_and_never_matches_an_empty_name() {
+    use marknexia_webview::bootstrap::is_expected_publisher;
+    assert!(is_expected_publisher(
+        "Example Publisher",
+        "Example Publisher"
+    ));
+    assert!(!is_expected_publisher(
+        "Example Publisher Ltd",
+        "Example Publisher"
+    ));
+    assert!(!is_expected_publisher(
+        "example publisher",
+        "Example Publisher"
+    ));
+    assert!(!is_expected_publisher("", ""));
+    assert!(!is_expected_publisher("Example Publisher", ""));
+}
+
+#[test]
 fn accepted_urls_are_normalized() {
     let url = DownloadUrl::parse("HTTPS://Go.Microsoft.COM:443?x=1#frag").expect("valid");
     assert_eq!(url.host(), "go.microsoft.com");

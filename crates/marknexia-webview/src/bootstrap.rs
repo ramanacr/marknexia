@@ -81,16 +81,50 @@ pub enum UrlError {
     UntrustedHost,
 }
 
+/// Which hosts a [`DownloadUrl`] and every redirect from it may name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostPolicy {
+    /// The WebView2 bootstrapper hosts ([`is_allowed_download_host`]).
+    Bootstrapper,
+    /// Exactly these lower-case DNS names (the portable updater's
+    /// configured allowlist). No suffix or wildcard matching.
+    Exact(std::sync::Arc<[String]>),
+}
+
+impl HostPolicy {
+    fn allows(&self, host: &str) -> bool {
+        match self {
+            Self::Bootstrapper => is_allowed_download_host(host),
+            Self::Exact(hosts) => hosts.iter().any(|allowed| allowed == host),
+        }
+    }
+}
+
 /// A validated download location: HTTPS on port 443 to an allowed host
-/// ([`is_allowed_download_host`]), without user information or fragment.
+/// ([`is_allowed_download_host`], or the exact list given to
+/// [`Self::parse_with_hosts`]), without user information or fragment.
+/// Redirects resolved from it keep the same host policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadUrl {
     host: String,
     path_and_query: String,
+    policy: HostPolicy,
 }
 
 impl DownloadUrl {
     pub fn parse(url: &str) -> Result<Self, UrlError> {
+        Self::parse_with(url, HostPolicy::Bootstrapper)
+    }
+
+    /// Like [`Self::parse`], but the host (and every redirect host) must be
+    /// exactly one of `hosts` (compared in ASCII lower case).
+    pub fn parse_with_hosts(url: &str, hosts: &[String]) -> Result<Self, UrlError> {
+        let hosts: std::sync::Arc<[String]> =
+            hosts.iter().map(|host| host.to_ascii_lowercase()).collect();
+        Self::parse_with(url, HostPolicy::Exact(hosts))
+    }
+
+    fn parse_with(url: &str, policy: HostPolicy) -> Result<Self, UrlError> {
         if url.len() > MAX_URL_LENGTH {
             return Err(UrlError::TooLong);
         }
@@ -110,10 +144,11 @@ impl DownloadUrl {
             Some(_) => return Err(UrlError::Port),
             None => authority,
         };
-        let host = trusted_host(host)?;
+        let host = trusted_host(host, &policy)?;
         Ok(Self {
             host,
             path_and_query: path_and_query(&rest[authority_end..]),
+            policy,
         })
     }
 
@@ -126,17 +161,18 @@ impl DownloadUrl {
             return Err(UrlError::TooLong);
         }
         if location.starts_with("//") {
-            return Self::parse(&format!("https:{location}"));
+            return Self::parse_with(&format!("https:{location}"), self.policy.clone());
         }
         if location.starts_with('/') {
             check_characters(location)?;
             return Ok(Self {
                 host: self.host.clone(),
                 path_and_query: path_and_query(location),
+                policy: self.policy.clone(),
             });
         }
         if location.contains("://") {
-            return Self::parse(location);
+            return Self::parse_with(location, self.policy.clone());
         }
         Err(UrlError::Malformed)
     }
@@ -167,7 +203,7 @@ fn check_characters(text: &str) -> Result<(), UrlError> {
     Ok(())
 }
 
-fn trusted_host(host: &str) -> Result<String, UrlError> {
+fn trusted_host(host: &str, policy: &HostPolicy) -> Result<String, UrlError> {
     let host = host.to_ascii_lowercase();
     let valid = !host.is_empty()
         && host
@@ -179,7 +215,7 @@ fn trusted_host(host: &str) -> Result<String, UrlError> {
     if !valid {
         return Err(UrlError::Malformed);
     }
-    if is_allowed_download_host(&host) {
+    if policy.allows(&host) {
         Ok(host)
     } else {
         Err(UrlError::UntrustedHost)
@@ -373,6 +409,16 @@ impl StagedFile {
         }
     }
 
+    /// A staged file held open by `lock` (see [`open_locked`]), so it
+    /// cannot be replaced while it is checked.
+    pub fn locked(path: PathBuf, folder: PathBuf, lock: File) -> Self {
+        Self {
+            path,
+            folder,
+            lock: Some(lock),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -521,6 +567,11 @@ pub enum SignatureError {
     NotMicrosoftRoot(u32),
     /// The leaf certificate has no explicit code-signing usage.
     NoCodeSigningUsage,
+    /// Trusted, but the leaf does not name the expected publisher
+    /// (`bootstrap_native::verify_publisher`).
+    UnexpectedPublisher {
+        signer: String,
+    },
 }
 
 pub trait SignatureVerifier {
@@ -532,6 +583,13 @@ pub trait SignatureVerifier {
 /// requires the Microsoft root chain policy and the code-signing usage.
 pub fn is_microsoft_signer(leaf: &str, root: &str) -> bool {
     leaf == "Microsoft Corporation" && root.starts_with("Microsoft Root Certificate Authority")
+}
+
+/// The portable updater's publisher check: the leaf's simple display name
+/// equals the configured publisher exactly. An empty publisher matches
+/// nothing.
+pub fn is_expected_publisher(leaf: &str, publisher: &str) -> bool {
+    !publisher.is_empty() && leaf == publisher
 }
 
 /// `szOID_PKIX_KP_CODE_SIGNING`.
