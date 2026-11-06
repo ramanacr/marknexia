@@ -1041,32 +1041,30 @@ pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
     let Some(hit) = hit_test_tab(width, height, minimum, tabs.len(), x) else {
         return;
     };
-    let press = match hit {
-        TabHit::Close(index) => {
-            let portable = Rc::clone(&state.borrow().portable);
-            portable.borrow_mut().note_pointer_input();
-            TabPress {
-                tab: tabs[index],
-                close: true,
-                x,
-                dragging: false,
-            }
-        }
-        TabHit::Body(index) => {
-            select_tab_at(parent, x);
-            // SAFETY: this thread's tab strip; no borrow is held.
-            let _ = unsafe { SetFocus(Some(strip)) };
-            TabPress {
-                tab: tabs[index],
-                close: false,
-                x,
-                dragging: false,
-            }
-        }
+    let (index, close) = match hit {
+        TabHit::Close(index) => (index, true),
+        TabHit::Body(index) => (index, false),
     };
-    state.borrow_mut().input.tab_press = Some(press);
+    // The press and the capture are recorded before the selection: the
+    // selection switches the WebView controller, and moves or the release
+    // that arrive meanwhile must find the press (CI run 42208676767 lost a
+    // drag on x64).
+    state.borrow_mut().input.tab_press = Some(TabPress {
+        tab: tabs[index],
+        close,
+        x,
+        dragging: false,
+    });
     // SAFETY: this thread's window; capture ends in WM_LBUTTONUP.
     let _ = unsafe { SetCapture(strip) };
+    if close {
+        let portable = Rc::clone(&state.borrow().portable);
+        portable.borrow_mut().note_pointer_input();
+    } else {
+        select_tab_at(parent, x);
+        // SAFETY: this thread's tab strip; no borrow is held.
+        let _ = unsafe { SetFocus(Some(strip)) };
+    }
 }
 
 /// `WM_MOUSEMOVE`: past the system drag distance, the pressed tab follows

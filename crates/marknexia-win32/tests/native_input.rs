@@ -566,25 +566,42 @@ fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
     let start = first.left + (first.right - first.left) / 4;
     let end = second.left + (second.right - second.left) / 2;
 
+    // The second placeholder starts selected; the press selects the first.
+    assert_eq!(shell.selected_name().as_deref(), Some(names[1].as_str()));
     shell.activate();
     let id = shell.shell.id();
     guarded_move(id, start, y);
     guarded_send(id, MOUSEEVENTF_LEFTDOWN);
     let button = LeftButtonGuard(id);
-    for step in 1..=10 {
-        guarded_move(id, start + (end - start) * step / 10, y);
+    // The shell reports the press: it selects the pressed tab.
+    wait_for("the press to select the first tab", || {
+        (shell.selected_name().as_deref() == Some(names[0].as_str())).then_some(())
+    });
+    // Move in small steps, each delivered as input, until the shell has
+    // moved the tab live; past the end, keep nudging the pointer.
+    let swapped = || shell.tab_names() == [names[1].clone(), names[0].clone()];
+    let deadline = Instant::now() + TIMEOUT;
+    let mut step = 0;
+    while !swapped() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the swapped tab order (order {:?})",
+            shell.tab_names()
+        );
+        step += 1;
+        let x = if step <= 20 {
+            start + (end - start) * step / 20
+        } else {
+            end + (step - 20) % 3 - 1
+        };
+        guarded_move(id, x, y);
         // SetCursorPos moves the cursor; a zero move delivers WM_MOUSEMOVE.
         guarded_send(id, MOUSEEVENTF_MOVE);
-        thread::sleep(Duration::from_millis(30));
+        thread::sleep(Duration::from_millis(50));
     }
-    guarded_move(id, end, y);
     // Normal release behind the guard; the drop guard covers failures.
     guarded_send(id, MOUSEEVENTF_LEFTUP);
     std::mem::forget(button);
-
-    wait_for("the swapped tab order", || {
-        (shell.tab_names() == [names[1].clone(), names[0].clone()]).then_some(())
-    });
     wait_for("ChildrenReordered", || {
         events
             .lock()
