@@ -2,7 +2,7 @@
 
 Status: **evidence complete for owner review — decision: CONDITIONAL-GO**
 Branch: `ramana_rust_win32_feasibility` (pushed for CI only; not merged to `main`, no release).
-Evidence commit and CI run: see `artifacts/rust-feasibility/manifest.json`.
+Evidence commit `b7f0dce`, CI run [42146193618](https://github.com/ramanacr/marknexia/actions/runs/42146193618), all seven jobs green. Index: `artifacts/rust-feasibility/manifest.json`.
 
 This report closes Task 8 of `docs/superpowers/plans/2026-09-12-rust-win32-feasibility.md`. It answers one question: can Marknexia be rewritten as a Rust raw-Win32 shell with WebView2 used only for the document viewport, and keep its behaviour, security and size goals? Evidence classes are kept separate:
 
@@ -22,7 +22,7 @@ This report closes Task 8 of `docs/superpowers/plans/2026-09-12-rust-win32-feasi
 | Browser recovery duplicates or loses tab state | Not triggered | `native_browser_exit_recreates_environment_and_immutable_tabs` passes natively on x64 and ARM64 |
 | Sanitizer parity has an unresolved bypass | Not triggered | All review findings closed; fuzzing 300 s clean; differences recorded in `compat/decisions/sanitizer-ammonia-differences.md` |
 | Mandatory content behaviour would need silent removal | Not triggered | All differences are written decisions awaiting approval (§6) |
-| A size or performance target is structurally infeasible | Not triggered | All four quantitative targets met with large margins (§5) |
+| A size or performance target is structurally infeasible | Not triggered | All four targets met. Size and host memory have large margins; ARM64 cold start on a hosted runner is close to its limit, so condition C3 applies (§5) |
 
 The decision is conditional because the items in §7 must be closed or accepted by the owner before the production plan starts. None of them is a technical blocker.
 
@@ -69,16 +69,20 @@ The keyboard-driven UIA gates need the shell to own the foreground before any sy
 
 Empty-shell scenario, 30 cold + 30 warm runs per architecture, host and WebView2 memory measured separately (`scripts/Collect-RustDesktopPerf.ps1`):
 
+Values are from the evidence run in the manifest (run 42146193618, commit b7f0dce):
+
 | Metric (p95 unless noted) | x64 | ARM64 | Target |
 |---|---|---|---|
-| Cold shell visible | 199 ms (median 183) | 81 ms (median 71) | ≤ 500 ms |
-| Warm shell visible | 225 ms | 77 ms | — |
-| WebView2 ready, cold | 767 ms | 523 ms | reported |
-| First render, cold / warm | 1,852 / 991 ms | 1,512 / 513 ms | reported |
-| Host private bytes, idle | 3.7 MB | 3.9 MB | ≤ 35 MB |
-| WebView2 working set (separate processes) | 341 MB | 372 MB | reported separately, not part of the host gate |
+| Cold shell visible | 151 ms (median 139) | 498 ms (median 421) | ≤ 500 ms |
+| Warm shell visible | 152 ms | 434 ms (median 207) | — |
+| WebView2 ready, cold | 1,008 ms | 938 ms | reported |
+| First render, cold / warm | 3,253 / 677 ms | 4,085 / 1,125 ms | reported |
+| Host private bytes, idle | 3.7 MB | 4.2 MB | ≤ 35 MB |
+| WebView2 working set (separate processes) | 335 MB | 376 MB | reported separately, not part of the host gate |
 | Unpacked payload (exe + architecture-matched `WebView2Loader.dll`) | 3.18 MB | 2.92 MB | ≤ 35 MB |
 | Installer projection, excluding on-demand WebView2 | ≤ unpacked size (no installer built in feasibility) | same | ≤ 15 MB |
+
+**Hosted ARM64 timing is noisy.** The same ARM64 binary (SHA-256 prefix `bf699577`) measured a cold shell-visible median of 71 ms and p95 of 81 ms in run 42099293588, and a median of 192 ms and p95 of 498 ms in run 42113919802. The binary did not change between those runs, so the difference comes from the runner, for example the image's sign-in prompt and Search host competing for CPU. Every run met the 500 ms target, but the hosted-runner margin on ARM64 is too thin to rely on. Condition C3 requires the measurement to be repeated on a declared, quiet ARM64 reference host. x64 measured between 151 and 199 ms p95 across runs.
 
 Content scale (release, developer workstation; `compat/decisions/rendering-differences.md` REND-1 and `sanitizer-ammonia-differences.md` SAN-8): the Rust stack accepts the .NET limits (50 MiB source, 128 MiB page). At 16 MiB it renders 7–30× faster than .NET; .NET timed out at 50 MiB, the Rust stack renders typical 50 MiB documents in 3–8 s and fails closed (`TooComplex`, `InputTooLarge`) on pathological shapes. Peak heap figures are recorded per shape in REND-1.
 
@@ -113,7 +117,7 @@ Each condition names an owner, an estimated cost and the release gate it blocks.
 |---|---|---|---|---|
 | C1 | Approve or reject the proposed compatibility decisions: `markdown-resource-limits.md`, `markdown-source-diagnostics.md`, `navigation-probe-order.md`, `rendering-differences.md`, `sanitizer-ammonia-differences.md`, and the highlighting recommendation in the content dependency decision | Product owner | 0.5–1 day review | "Agreed compatibility suite 100%" |
 | C2 | Highlighting: the Marknexia-owned tokenizer covers C# only (what the fixtures need). Decide the language set and port the rest of ColorCode's languages or accept a reduced set | Product owner + engineering | 1–3 weeks | Compatibility suite |
-| C3 | Repeat the native gates on a clean interactive ARM64 and x64 evidence host (not only hosted runners), including a high-DPI monitor | Engineering / QA | 1–2 days | Accessibility-critical failures = 0 |
+| C3 | Repeat the native gates and the 30 cold + 30 warm startup measurement on declared, quiet ARM64 and x64 reference hosts (not only hosted runners), including a high-DPI monitor. The hosted ARM64 cold p95 ranged from 81 to 498 ms with one identical binary. | Engineering / QA | 1–2 days | Cold start ≤ 500 ms on reference hardware; accessibility-critical failures = 0 |
 | C4 | Runtime high-contrast toggle and multi-monitor `WM_DPICHANGED` verified on a manual evidence host | Engineering / QA | 1 day | Accessibility gate |
 | C5 | Update signing key creation and custody approval before any updater is implemented | Security owner | separate approval | Tampered updates accepted = 0 |
 | C6 | Port settings migration, repository browsing, search, activation, packaging (setup, portable ZIP, MSIX) and SBOM in the production plan | Engineering | production plan estimate | Release gates §13 of the design |
