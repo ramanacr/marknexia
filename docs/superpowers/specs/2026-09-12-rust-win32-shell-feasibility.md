@@ -442,7 +442,7 @@ from .NET: `compat/decisions/shell-input.md` (proposed).
   `AddScriptToExecuteOnDocumentCreated`; the page bytes and `bridge.js`
   are unchanged. *Unverified natively:* that the injected adapter runs
   under the page CSP and receives `PostWebMessageAsJson` messages.
-- **Drag and drop.** `WM_DROPFILES`; the first item passes the document path
+- **Drag and drop.** An OLE drop target (`IDropTarget`, `CF_HDROP` only); the first item passes the document path
   gate, then is classified off the UI thread (Markdown file, folder as
   repository root plus `README.md`, other file). Not covered natively: a
   real OLE drag needs a cross-process drag source.
