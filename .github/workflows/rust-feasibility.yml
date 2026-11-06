@@ -44,6 +44,18 @@ jobs:
         run: pwsh -NoProfile -NonInteractive -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
       - name: Dependency policy
         run: cargo deny check advisories bans licenses sources
+      - name: Install pinned SPDX validator
+        # spdx-tools is pinned by exact version in tools/rust-tools.lock, in an
+        # isolated virtual environment, from wheels only.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Get-Content tools/rust-tools.lock -Raw | ConvertFrom-Json
+          $venv = Join-Path $env:RUNNER_TEMP 'spdx-venv'
+          python -m venv $venv
+          & "$venv/Scripts/python.exe" -m pip install --disable-pip-version-check --no-input --only-binary ':all:' "spdx-tools==$($tools.tools.spdxTools)"
+          & "$venv/Scripts/python.exe" -m pip freeze --all
+          "PYSPDXTOOLS=$venv/Scripts/pyspdxtools.exe" >> $env:GITHUB_ENV
       - name: Headless release evidence contracts
         run: |
           $ErrorActionPreference = 'Stop'
@@ -54,7 +66,7 @@ jobs:
           pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_desktop_perf.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/compare_rust_builds.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
-          pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1 -PySpdxTools $env:PYSPDXTOOLS
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
@@ -114,26 +126,54 @@ jobs:
           if-no-files-found: error
       # Evidence only: the ZIP is unsigned, is never attached to a release and
       # is never published. Archives that contain an executable are built only
-      # here, on the hosted runner, never on a developer machine.
+      # here, on the hosted runner, never on a developer machine. Pull requests
+      # from forks skip packaging and upload.
       - name: Unsigned preview package, SBOM and notices
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $utf8 = [Text.UTF8Encoding]::new($false)
           $target = '${{ matrix.target }}'
           $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          # Runtime crates resolve for the target; build scripts and proc-macros
+          # resolve for the build host (differs in the ARM64 cross build).
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
           $metadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json"
+          $hostMetadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json"
+          $tree = Join-Path $env:RUNNER_TEMP "cargo-tree-$target.txt"
           $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $target
-          [IO.File]::WriteAllText($metadata, ($json -join "`n"), [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText($metadata, ($json -join "`n"), $utf8)
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $hostTriple
+          [IO.File]::WriteAllText($hostMetadata, ($json -join "`n"), $utf8)
+          $lines = cargo tree --manifest-path source-a/Cargo.toml --locked -e normal,build -p marknexia-win32 --target $target --prefix none --format '{p}'
+          [IO.File]::WriteAllText($tree, ($lines -join "`n"), $utf8)
           pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustPortablePackage.ps1 `
             -Target $target `
             -FirstRoot (Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release") `
             -SecondRoot (Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release") `
             -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
             -MetadataPath $metadata `
+            -HostMetadataPath $hostMetadata `
+            -CargoTreePath $tree `
             -OutputRoot (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview') `
             -SourceCommit $env:GITHUB_SHA
+      - name: Validate the SBOM with the pinned SPDX reference tool
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Get-Content source-a/tools/rust-tools.lock -Raw | ConvertFrom-Json
+          $venv = Join-Path $env:RUNNER_TEMP 'spdx-venv'
+          python -m venv $venv
+          & "$venv/Scripts/python.exe" -m pip install --disable-pip-version-check --no-input --only-binary ':all:' "spdx-tools==$($tools.tools.spdxTools)"
+          & "$venv/Scripts/python.exe" -m pip freeze --all
+          $sboms = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview/out') -Filter '*.spdx.json')
+          if ($sboms.Count -ne 1) { throw "Expected one SBOM, found $($sboms.Count)." }
+          & "$venv/Scripts/pyspdxtools.exe" -i $sboms[0].FullName
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         with:
           name: marknexia-rust-UNSIGNED-PREVIEW-${{ matrix.target }}
           path: ${{ runner.temp }}/rust-unsigned-preview/out/

@@ -6,6 +6,7 @@
   },
   "tools": {
     "cargoDeny": "0.20.2",
-    "cargoFuzz": "0.13.2"
+    "cargoFuzz": "0.13.2",
+    "spdxTools": "0.8.5"
   }
 }
