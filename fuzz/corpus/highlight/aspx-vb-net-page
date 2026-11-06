@@ -1,0 +1,7 @@
+<%@ Page Language="VB" %>
+<script runat="server">
+  Protected Sub Page_Load(s As Object, e As EventArgs)
+    Dim x As String = "y" ' c
+  End Sub
+</script>
+<div><% For i = 0 To 3 %><b><%= i %></b><% Next %></div>

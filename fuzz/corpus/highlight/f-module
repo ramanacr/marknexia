@@ -1,0 +1,14 @@
+// comment
+(* block
+   comment *)
+module Demo
+open System
+/// doc comment
+let add x y = x + y
+let rec fact n = if n <= 1 then 1 else n * fact (n - 1)
+type Shape = | Circle of float | Square of side: float
+let s = "str\"ing" + @"verbatim""x" + """triple"""
+let c = 'c'
+[<EntryPoint>]
+let main argv = printfn "%d" 42; 0
+match x with | Some v -> v | None -> 0

@@ -1,0 +1,21 @@
+! comment
+program hello
+  implicit none
+  integer :: i, n = 10
+  real(kind=8) :: x = 3.14d0, y = 1.0e-3
+  character(len=20) :: s = 'it''s', t = "dq"
+  logical :: flag = .true.
+  do i = 1, n
+    if (i .eq. 5 .and. .not. flag) then
+      print *, 'five', i
+    else if (i > 7) then
+      exit
+    end if
+  end do
+  call sub(x)
+contains
+  subroutine sub(a)
+    real(8), intent(in) :: a
+    write(*,*) sqrt(a), abs(-a)
+  end subroutine sub
+end program hello

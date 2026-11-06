@@ -547,3 +547,109 @@ fn math_expansion_floods_render_within_the_page_limit() {
         );
     }
 }
+
+/// A fence name for every ColorCode language (the Markdown info string
+/// allows only `[a-zA-Z0-9_+#-]`, so ids such as `vb.net` use an alias).
+const LANGUAGE_FENCES: &[(&str, &str)] = &[
+    ("javascript", "javascript"),
+    ("html", "html"),
+    ("c#", "cs"),
+    ("vb.net", "vb"),
+    ("ashx", "ashx"),
+    ("asax", "asax"),
+    ("aspx", "aspx"),
+    ("aspx(c#)", "aspx-cs"),
+    ("aspx(vb.net)", "aspx-vb"),
+    ("sql", "sql"),
+    ("xml", "xml"),
+    ("php", "php"),
+    ("css", "css"),
+    ("cpp", "cpp"),
+    ("java", "java"),
+    ("json", "json"),
+    ("powershell", "powershell"),
+    ("typescript", "typescript"),
+    ("f#", "fs"),
+    ("koka", "koka"),
+    ("haskell", "haskell"),
+    ("markdown", "markdown"),
+    ("fortran", "fortran"),
+    ("python", "python"),
+    ("matlab", "matlab"),
+];
+
+fn highlight_oracle_code(name: &str) -> String {
+    let oracle: serde_json::Value =
+        serde_json::from_str(include_str!("oracle/highlight.v1.json")).unwrap();
+    oracle["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == name)
+        .unwrap_or_else(|| panic!("{name}"))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn fenced(fence: &str, code: &str) -> String {
+    format!("~~~~~~~~ {fence}\n{code}\n~~~~~~~~\n\n")
+}
+
+/// Pathological shapes for every language: the oracle's token soups and
+/// unterminated quotes, scaled up. Each block highlights or falls back to
+/// plain text within the regex budget (HL-1); the render stays bounded.
+#[test]
+fn pathological_blocks_in_every_language_fail_closed() {
+    for &(id, fence) in LANGUAGE_FENCES {
+        let mut source = String::new();
+        for shape in ["soup-2", "soup-3", "soup-5", "long-unterminated-quotes"] {
+            let code = highlight_oracle_code(&format!("{id}/{shape}"));
+            source.push_str(&fenced(fence, &code.repeat(8)));
+        }
+        let started = Instant::now();
+        let document = render_bounded(&format!("pathological {id}"), &source).expect("renders");
+        let body = document.body().as_str();
+        assert_eq!(body.matches("class=\"code-container\"").count(), 4, "{id}");
+        // One document budget: about a second of matching plus the per-unit
+        // credit, whatever the number of hostile blocks.
+        let bound = Duration::from_secs(if cfg!(debug_assertions) { 120 } else { 10 });
+        assert!(started.elapsed() < bound, "{id}: {:?}", started.elapsed());
+    }
+}
+
+/// Many catastrophic blocks share one budget, so the document cannot take
+/// one budget per block (HL-1).
+#[test]
+fn catastrophic_blocks_share_one_document_budget() {
+    let code = highlight_oracle_code("json/soup-3");
+    let source = fenced("json", &code).repeat(300);
+    let started = Instant::now();
+    let document = render_bounded("json soups", &source).expect("renders");
+    let elapsed = started.elapsed();
+    let body = document.body().as_str();
+    assert_eq!(body.matches("class=\"code-container\"").count(), 300);
+    assert_eq!(body.matches("<div class=\"json\">").count(), 0);
+    assert_eq!(body.matches("<pre><code>").count(), 300);
+    let bound = Duration::from_secs(if cfg!(debug_assertions) { 120 } else { 10 });
+    assert!(elapsed < bound, "{elapsed:?}");
+}
+
+/// Large ordinary blocks highlight in every language and stay linear.
+#[test]
+fn large_ordinary_blocks_highlight_in_every_language() {
+    for &(id, fence) in LANGUAGE_FENCES {
+        let line = highlight_oracle_code(&format!("{id}/long-line"));
+        // About 1.3 MB of code per block.
+        let source = fenced(fence, &line.repeat(240));
+        let document = render_bounded(&format!("large {id}"), &source);
+        let Ok(document) = document else {
+            continue;
+        };
+        // Highlighted, not the plain `<pre><code>` fallback.
+        assert!(
+            !document.body().as_str().contains("<pre><code>"),
+            "{id}: not highlighted"
+        );
+    }
+}

@@ -1,0 +1,7 @@
+<p>before</p>
+<script type="text/javascript">
+var a = "s"; // c
+function f() { return 1; }
+</script>
+<p>after</p>
+<SCRIPT>if (x) { y(); }</SCRIPT>

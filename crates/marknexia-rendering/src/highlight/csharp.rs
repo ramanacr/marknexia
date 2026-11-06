@@ -1,63 +1,23 @@
-//! Code highlighting: a Marknexia-owned, linear-time reproduction of the
-//! ColorCode 2.0.15 `HtmlClassFormatter` output for C#, the only ColorCode
-//! language the frozen corpus exercises. See the Rendering/Highlighting
-//! section of `docs/superpowers/specs/2026-09-12-rust-content-dependency-decision.md`
-//! and REND-2 in `compat/decisions/rendering-differences.md`.
+//! The C# fast path: a Marknexia-owned, linear-time reproduction of the
+//! ColorCode 2.0.15 C# rules. The generic engine (`regex.rs`) runs the same
+//! rules, but the .NET regexes are quadratic on unterminated quotes, `/*`,
+//! `[type:"` and blank runs, so a large hostile C# block would exhaust the
+//! engine's budget. This tokenizer keeps C# highlighted at any size. Both
+//! paths are checked against the .NET oracle (`tests/highlight_oracle.rs`),
+//! and `csharp_fast_path_matches_the_engine` checks them against each other.
 //!
-//! ColorCode compiles a language's rules into one alternation, scans for the
-//! leftmost match (earlier rules win at the same position), and wraps each
-//! non-empty scoped capture in `<span class="{style}">`. Each C# rule below is
-//! hand-translated from its regex (read from the ColorCode.Core 2.0.15
-//! string heap) into a direct matcher with the same backtracking outcome.
-//! Memoized failure bounds keep the scan linear where the regex is quadratic.
+//! Each C# rule below is hand-translated from its regex into a direct matcher
+//! with the same backtracking outcome. Memoized failure bounds keep the scan
+//! linear where the regex is quadratic.
 
-use crate::text::{html_encode, html_encoded_len, is_space, is_word};
+use super::web_encode as html_encode;
+use crate::text::{is_space, is_word};
 
-/// `ColorCodeSyntaxHighlighter.HighlightCode`, or `None` as soon as the
-/// output would exceed `limit` bytes.
-pub(crate) fn highlight(code: &str, language: &str, limit: usize) -> Option<String> {
-    if code.is_empty() {
-        return Some(String::new());
-    }
-    let mut out = String::with_capacity((code.len() * 2 + 64).min(limit));
-    if is_csharp(language) {
-        out.push_str(CSHARP_OPEN);
-        if !CSharp::new(code).write(&mut out, limit) {
-            return None;
-        }
-        out.push_str(CSHARP_CLOSE);
-    } else {
-        out.push_str(PLAIN_OPEN);
-        html_encode(code, &mut out);
-        out.push_str(PLAIN_CLOSE);
-    }
-    (out.len() <= limit).then_some(out)
+/// Writes the highlighted body (without the wrapper). Returns `false` once
+/// `out` exceeds `limit` bytes.
+pub(super) fn write(code: &str, out: &mut String, limit: usize) -> bool {
+    CSharp::new(code).write(out, limit)
 }
-
-const CSHARP_OPEN: &str = "<div class=\"csharp\"><pre>\n";
-const CSHARP_CLOSE: &str = "\n</pre></div>";
-const PLAIN_OPEN: &str = "<pre><code>";
-const PLAIN_CLOSE: &str = "</code></pre>";
-
-/// Exact lower bound of `highlight(code, language, _)`'s length: exact for
-/// the plain fallback; highlighted C# adds spans around the encoded code.
-pub(crate) fn minimum_len(code: &str, language: &str) -> usize {
-    if code.is_empty() {
-        0
-    } else if is_csharp(language) {
-        CSHARP_OPEN.len() + html_encoded_len(code) + CSHARP_CLOSE.len()
-    } else {
-        PLAIN_OPEN.len() + html_encoded_len(code) + PLAIN_CLOSE.len()
-    }
-}
-
-/// `ResolveLanguage` for C#: `c#`/`cs` map to `csharp`, and ColorCode's C#
-/// language also answers to its id and the `cake` alias.
-fn is_csharp(language: &str) -> bool {
-    let normalized = language.trim().to_lowercase();
-    matches!(normalized.as_str(), "c#" | "cs" | "csharp" | "cake")
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Style {
     Comment,
@@ -594,7 +554,7 @@ const fn utf8_len(first: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::highlight_one as highlight;
 
     fn cs(code: &str) -> String {
         let html = highlight(code, "c#", usize::MAX).unwrap();
@@ -621,13 +581,9 @@ mod tests {
                     .starts_with("<div class=\"csharp\">")
             );
         }
-        let plain = Some("<pre><code>a&lt;b</code></pre>".to_owned());
-        assert_eq!(highlight("a<b", "python", usize::MAX), plain);
-        assert_eq!(highlight("a<b", "", usize::MAX), plain);
         assert_eq!(highlight("", "c#", usize::MAX), Some(String::new()));
         // The budget stops output growth early.
         assert_eq!(highlight(&"1 ".repeat(10_000), "cs", 1_000), None);
-        assert_eq!(highlight("a<b", "python", 10), None);
     }
 
     #[test]
@@ -640,7 +596,7 @@ mod tests {
             cs("ascending as"),
             "<span class=\"keyword\">ascending</span> <span class=\"keyword\">as</span>"
         );
-        assert_eq!(cs("Var éif"), "Var éif");
+        assert_eq!(cs("Var éif"), "Var &#233;if");
     }
 
     #[test]

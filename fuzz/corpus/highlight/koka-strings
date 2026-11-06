@@ -1,0 +1,5 @@
+val c = 'x'
+val e = '\n'
+val u = "\u0041\x41"
+val v = @"verbatim ""q"" text"
+val w = "unterminated

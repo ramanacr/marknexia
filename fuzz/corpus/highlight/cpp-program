@@ -1,0 +1,15 @@
+#include <iostream>
+#include "local.h"
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+// comment
+/* block */
+namespace ns {
+template <typename T> class Box { public: virtual ~Box() = default; T value; };
+}
+int main(int argc, char** argv) {
+    const char* s = "str\"ing"; char c = 'x';
+    unsigned long n = 42UL; double d = 3.14e-2;
+    for (auto& x : v) { if (x == nullptr) continue; }
+    std::cout << s << std::endl;
+    return 0;
+}

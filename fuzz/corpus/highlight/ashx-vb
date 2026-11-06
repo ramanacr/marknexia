@@ -1,0 +1,4 @@
+<%@ WebHandler language="vb" Class="H" %>
+Imports System
+Public Class H
+End Class

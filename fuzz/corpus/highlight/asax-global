@@ -1,0 +1,6 @@
+<%@ Application Language="C#" %>
+<script runat="server">
+    void Application_Start(object sender, EventArgs e) { int x = 1; // start
+    }
+</script>
+<%-- server comment --%>

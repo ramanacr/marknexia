@@ -1,0 +1,18 @@
+% comment
+%{
+block comment
+%}
+function [out, n] = demo(x, y)
+  A = [1 2 3; 4 5 6]';
+  s = 'it''s'; t = "str";
+  for k = 1:numel(x)
+    if x(k) > 0 && ~isempty(y)
+      out(k) = sqrt(x(k)) + 1e-3;
+    elseif x(k) == 0
+      continue
+    else
+      disp(A.');
+    end
+  end
+  n = zeros(2, 2); % trailing
+end

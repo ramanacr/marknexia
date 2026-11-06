@@ -1,0 +1,12 @@
+# comment
+<# block
+   comment #>
+[CmdletBinding()]
+param([Parameter(Mandatory=$true)][string]$Path, [int]$Count = 5)
+function Get-Thing {
+    $items = Get-ChildItem -Path $Path -Recurse | Where-Object { $_.Length -gt 1KB }
+    foreach ($i in $items) { Write-Host "Item: $($i.Name)" -ForegroundColor Green }
+    $h = @{ a = 1; b = 'two' }
+    if ($Count -eq 5 -and -not $false) { return $null }
+    [System.IO.File]::ReadAllText('x') ; `$escaped
+}

@@ -108,7 +108,7 @@ const COPY_MIDDLE: &str = "\" title=\"Copy code\">Copy</button>\n  ";
 const COPY_CLOSE: &str = "\n</div>";
 
 /// Exact lower bound of a code-block replacement's size (exact unless the
-/// block is highlighted C#).
+/// block is highlighted).
 fn code_block_minimum(code: &str, language: &str) -> usize {
     COPY_OPEN.len()
         + escaped_data_string_len(code)
@@ -128,6 +128,7 @@ fn highlight_code_blocks_in(html: &str, limit: usize) -> Result<Option<String>, 
     const OPEN: &str = "<pre><code";
     const CLOSE: &str = "</code></pre>";
     let mut splicer = Splicer::new(html, limit);
+    let mut budget = highlight::document_budget();
     let mut search = 0;
     while let Some(offset) = html[search..].find(OPEN) {
         let start = search + offset;
@@ -151,7 +152,8 @@ fn highlight_code_blocks_in(html: &str, limit: usize) -> Result<Option<String>, 
             if code_block_minimum(&code, language) > remaining {
                 return Err(Overflow);
             }
-            let highlighted = highlight::highlight(&code, language, remaining).ok_or(Overflow)?;
+            let highlighted =
+                highlight::highlight(&code, language, remaining, &mut budget).ok_or(Overflow)?;
             let mut replacement = String::with_capacity(
                 COPY_OPEN.len()
                     + escaped_data_string_len(&code)

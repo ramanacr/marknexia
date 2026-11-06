@@ -4,7 +4,8 @@
 //! pipeline (`src/Marknexia.Rendering`):
 //!
 //! 1. parse with a [`MarkdownEngine`] (raw, unsanitized body HTML);
-//! 2. wrap code blocks in the copy-button container and highlight C#;
+//! 2. wrap code blocks in the copy-button container and highlight them with
+//!    ColorCode parity (every ColorCode 2.0.15 language);
 //! 3. replace Mermaid blocks with the diagram shell or a limit fallback;
 //! 4. render math spans with the local TeX subset;
 //! 5. sanitize with [`HtmlPolicy::sanitize_fragment`]; with remote assets off
@@ -53,6 +54,54 @@ pub mod testing {
         context: &RenderContext,
     ) -> Result<String, RenderError> {
         renderer.body_before_sanitizing(source, context, &|| false)
+    }
+
+    /// `ColorCodeSyntaxHighlighter.HighlightCode(code, language)`, and the
+    /// regex steps it used.
+    pub fn highlight_code(code: &str, language: &str) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Default,
+            &mut crate::highlight::document_budget(),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code`] with C# through the regex engine instead of the
+    /// C# fast path.
+    pub fn highlight_code_with_engine(code: &str, language: &str) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Engine,
+            &mut crate::highlight::document_budget(),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code`] with an explicit regex step budget.
+    pub fn highlight_code_with_budget(code: &str, language: &str, budget: u64) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Default,
+            &mut crate::highlight::regex::Budget::new(budget),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// Every ColorCode language id, in `LanguageRepository` order.
+    pub fn highlight_language_ids() -> Vec<&'static str> {
+        crate::highlight::language_ids()
+    }
+
+    /// The regex step budget of a code block of `utf16_units` code units.
+    pub fn highlight_budget(utf16_units: u64) -> u64 {
+        crate::highlight::budget_for(utf16_units)
     }
 }
 

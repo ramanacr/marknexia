@@ -1,0 +1,3 @@
+var a = "tab\t"; var b = @"multi
+line"; var c = $"{x}"; var d = "unterminated;
+var e = @"a""b"; var f = '\u0041';

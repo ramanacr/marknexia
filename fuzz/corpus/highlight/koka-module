@@ -1,0 +1,16 @@
+// comment
+/* block /* nested */ comment */
+module std/demo
+import std/core = qualified std/core/types
+public fun main() : console ()
+{
+  val x = 42
+  var s := "str\n"
+  if (x > 10) then println(s) else return ()
+  match (list) { Cons(h, t) -> h; Nil -> 0 }
+}
+type maybe<a> { Nothing; Just(value : a) }
+alias pair<a,b> = (a, b)
+struct point(x : int, y : int)
+fun f( xs : list<int> ) : <exn,div> int { 0x1F + 3.14e2 }
+#pragma
