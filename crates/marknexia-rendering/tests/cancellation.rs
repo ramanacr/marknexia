@@ -89,3 +89,32 @@ fn a_large_render_stops_soon_after_cancellation() {
         Err(other) => panic!("{other:?}"),
     }
 }
+
+/// Highlighting polls the callback inside the regex engine, so a document
+/// of catastrophic blocks stops within a fraction of its step budget.
+#[test]
+fn cancelling_stops_highlighting_inside_a_block() {
+    let oracle: serde_json::Value =
+        serde_json::from_str(include_str!("oracle/highlight.v1.json")).unwrap();
+    let soup = oracle["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "json/soup-3")
+        .unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let source = format!("~~~~~~~~ json\n{soup}\n~~~~~~~~\n\n").repeat(50);
+    let renderer = Renderer::new();
+    let calls = AtomicUsize::new(0);
+    let started = Instant::now();
+    // The first two polls come from the stages before highlighting.
+    let result = renderer.render_cancellable(&source, &context(), &|| {
+        calls.fetch_add(1, Ordering::Relaxed) >= 4
+    });
+    assert_eq!(result, Err(RenderError::Cancelled));
+    // A few polls of 65,536 steps each, far below the 134 million step base.
+    let bound = Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 2 });
+    assert!(started.elapsed() < bound, "{:?}", started.elapsed());
+}

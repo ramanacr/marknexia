@@ -61,14 +61,29 @@ It rewrites `languages.rs`, `unicode.rs` and `highlight.v1.json`. The five timeo
 
 .NET runs ColorCode's regexes without a timeout. Several rules backtrack exponentially on some inputs (the JSON and Koka rules on the token soups above) or quadratically on unterminated constructs, so .NET can highlight one small block for minutes or hours.
 
-Rust counts every engine instruction, every backtrack and every character a loop scans. One budget serves a whole document: it starts at 2^27 steps (134,217,728; about 1 s of matching on the development machine, where the engine runs at about 130 million steps per second) and gains 512 steps for each UTF-16 code unit of each highlighted block. When a block exhausts the budget, that block falls back to the plain `<pre><code>` output, as if .NET had thrown. Later blocks then have only their own per-unit credit.
+Rust counts every engine instruction, every backtrack and every character a loop scans. One budget serves a whole document: it starts at 2^27 steps (134,217,728; about 1 s of matching on the development machine, where the engine runs at about 130 million steps per second) and gains 512 steps for each UTF-16 code unit of each highlighted block, up to 2^31 steps (2,147,483,648, about 16 s) in total for the document. When a block exhausts the budget, that block falls back to the plain `<pre><code>` output, as if .NET had thrown. Later blocks then have only their own per-unit credit.
 
 | Input | .NET | Rust |
 | --- | --- | --- |
 | A block that needs more steps than the budget left | highlighted, after as long as backtracking takes | plain `<pre><code>` fallback |
 | Many such blocks in one document | each one backtracks fully | the first one spends the shared base; the rest get only their per-unit credit (300 copies of `json/soup-3`: 1.8 s in total, all plain) |
+| A block whose match needs more than 8,388,608 (2^23) backtracking entries: for example a single comment of about 2.8 million code units or more (three entries per character) | highlighted (the .NET interpreter grows its stacks without a limit) | plain `<pre><code>` fallback (memory cap, below) |
 
-The budget is sized from the oracle. Ordinary long lines need at most 140 steps per unit (`sql/long-line`), which is under half of the 512 credit. The largest ordinary short case needs 60,590 steps (`koka/strings`), under 1/16 of the base. Both are checked by `ordinary_code_uses_a_small_part_of_the_budget`. Ordinary blocks of 1.3 MB in every language highlight without reaching the budget (`large_ordinary_blocks_highlight_in_every_language`). The slowest languages are Fortran (6.3 s), Haskell (4.6 s) and MATLAB, Koka and Python (2.5 to 2.6 s), each including the sanitizer and a page of up to 15 MB. A hostile document is bounded by about 1 s plus about 4 µs per code unit of matching. A highlighting pass cannot be cancelled in the middle of a block; `render_cancellable` stops it between stages only.
+The budget is sized from the oracle. Ordinary long lines need at most 140 steps per unit (`sql/long-line`), which is under half of the 512 credit. The largest ordinary short case needs 60,590 steps (`koka/strings`), under 1/16 of the base. Both are checked by `ordinary_code_uses_a_small_part_of_the_budget`. Ordinary blocks of 1.3 MB in every language highlight without reaching the budget (`large_ordinary_blocks_highlight_in_every_language`). The slowest languages are Fortran (6.3 s), Haskell (4.6 s) and MATLAB, Koka and Python (2.5 to 2.6 s), each including the sanitizer and a page of up to 15 MB. A hostile document is bounded by about 1 s plus about 4 µs per code unit of matching, and never more than about 16 s (the 2^31 cap).
+
+**Cancellation.** The budget polls the render's cancellation callback every 65,536 steps, so `Renderer::render_cancellable` also stops inside a highlighted block (`cancelling_stops_highlighting_inside_a_block`). The shell's render workers (`marknexia-win32` `build_document`) call `render_cancellable` with the job's cancel flag, which is set when the tab closes or a newer render for it starts. The C# fast path is linear and is not polled inside a block.
+
+**Memory cap.** Backtracking state grows with the input: one loop iteration per character of a comment keeps a backtrack entry and an undo entry. A match may hold at most 2^23 entries in total: backtrack entries (16 bytes), undo entries (12 bytes) and recorded captures (8 bytes). Past that, the match stops and the block falls back to plain text, so an allocation failure cannot abort the process. Only groups that have a scope, or that a conditional or balancing group reads, keep capture history. `tests/highlight_memory.rs` measures the peak heap with a counting allocator (release build):
+
+| Block | Peak heap above the baseline | Result |
+| --- | --- | --- |
+| JavaScript `/* … */`, 4 MiB | 194 MiB | state cap reached in 0.15 s, plain fallback |
+| HTML `<!-- … -->`, 4 MiB | 194 MiB | state cap reached, plain fallback |
+| C++ `/* … */`, 4 MiB | 194 MiB | state cap reached, plain fallback |
+| JavaScript `/*` unterminated, 4 MiB | 194 MiB | state cap reached, plain fallback |
+| JavaScript `/* … */`, 1 MiB | 92 MiB | highlighted |
+
+The peak includes the input as UTF-8 and UTF-16 and the output. Past the cap the engine state stops growing; only those input copies grow with the input. The test fails above 400 MiB.
 
 ## HL-2 — Highlighted text is encoded exactly like `WebUtility.HtmlEncode`
 

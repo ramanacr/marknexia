@@ -25,7 +25,7 @@
 
 use std::sync::OnceLock;
 
-use regex::{Budget, Exhausted, Match, Regex};
+use regex::{Budget, Match, Regex, Stop};
 
 mod csharp;
 #[rustfmt::skip]
@@ -67,26 +67,46 @@ const BUDGET_BASE: u64 = 1 << 27;
 /// Regex steps credited per UTF-16 code unit of each highlighted block. The
 /// oracle corpus needs at most 141 per unit for ordinary code (HL-1).
 const BUDGET_PER_UNIT: u64 = 512;
+/// The most steps one document can be granted, base and credits together:
+/// about 16 s of matching, whatever the document size (HL-1).
+const BUDGET_CAP: u64 = 1 << 31;
 
-/// The regex budget of one document: every block draws from it.
-pub(crate) const fn document_budget() -> Budget {
+/// The regex budget of one document: every block draws from it, and
+/// `cancel` is polled while it is spent.
+pub(crate) fn document_budget(cancel: &(dyn Fn() -> bool + Sync)) -> Budget<'_> {
     Budget::new(BUDGET_BASE)
+        .with_cap(BUDGET_CAP)
+        .with_cancel(cancel)
 }
 
 /// The budget of a document that has one block of `units` UTF-16 units.
 pub(crate) const fn budget_for(units: u64) -> u64 {
-    BUDGET_BASE.saturating_add(BUDGET_PER_UNIT.saturating_mul(units))
+    let steps = BUDGET_BASE.saturating_add(BUDGET_PER_UNIT.saturating_mul(units));
+    if steps > BUDGET_CAP {
+        BUDGET_CAP
+    } else {
+        steps
+    }
 }
 
-/// `ColorCodeSyntaxHighlighter.HighlightCode`, or `None` as soon as the
-/// output would exceed `limit` bytes. Regex work is drawn from the
-/// document's `budget`.
+/// Why [`highlight`] produced no block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HighlightError {
+    /// The output would exceed the byte limit.
+    Overflow,
+    /// The caller cancelled the render.
+    Cancelled,
+}
+
+/// `ColorCodeSyntaxHighlighter.HighlightCode`, or an error as soon as the
+/// output would exceed `limit` bytes or the render is cancelled. Regex work
+/// is drawn from the document's `budget`.
 pub(crate) fn highlight(
     code: &str,
     language: &str,
     limit: usize,
-    budget: &mut Budget,
-) -> Option<String> {
+    budget: &mut Budget<'_>,
+) -> Result<String, HighlightError> {
     highlight_with(code, language, limit, Path::Default, budget).0
 }
 
@@ -105,10 +125,10 @@ pub(crate) fn highlight_with(
     language: &str,
     limit: usize,
     path: Path,
-    budget: &mut Budget,
-) -> (Option<String>, u64) {
+    budget: &mut Budget<'_>,
+) -> (Result<String, HighlightError>, u64) {
     if code.is_empty() {
-        return (Some(String::new()), 0);
+        return (Ok(String::new()), 0);
     }
     let Some(index) = resolve_language(language) else {
         return (plain(code, limit), 0);
@@ -138,20 +158,29 @@ pub(crate) fn highlight_with(
     let html = match result {
         Ok(()) => {
             out.push_str(BLOCK_CLOSE);
-            (!out.over).then_some(out.text)
+            if out.over {
+                Err(HighlightError::Overflow)
+            } else {
+                Ok(out.text)
+            }
         }
-        Err(Failure) => plain(code, limit),
+        Err(Failure::Fallback) => plain(code, limit),
+        Err(Failure::Cancelled) => Err(HighlightError::Cancelled),
     };
     (html, steps)
 }
 
 /// `<pre><code>{WebUtility.HtmlEncode(code)}</code></pre>`.
-fn plain(code: &str, limit: usize) -> Option<String> {
+fn plain(code: &str, limit: usize) -> Result<String, HighlightError> {
     let mut out = String::with_capacity(PLAIN_OPEN.len() + code.len() + PLAIN_CLOSE.len());
     out.push_str(PLAIN_OPEN);
     web_encode(code, &mut out);
     out.push_str(PLAIN_CLOSE);
-    (out.len() <= limit).then_some(out)
+    if out.len() <= limit {
+        Ok(out)
+    } else {
+        Err(HighlightError::Overflow)
+    }
 }
 
 /// Exact lower bound of `highlight(code, language, _)`'s length: exact for
@@ -224,7 +253,14 @@ fn compiled(index: usize) -> Option<&'static Regex> {
     cells[index]
         .get_or_init(|| {
             let definition = &languages::LANGUAGES[index];
-            let regex = Regex::new(definition.pattern).ok()?;
+            // Only groups with a scope need capture history.
+            let observed = |group: usize| {
+                definition
+                    .captures
+                    .get(group)
+                    .is_some_and(|scope| scope.is_some_and(|name| !name.is_empty()))
+            };
+            let regex = Regex::with_observed(definition.pattern, &observed).ok()?;
             // The capture-to-scope list indexes .NET group numbers.
             debug_assert_eq!(regex.group_count(), definition.groups);
             Some(regex)
@@ -242,11 +278,19 @@ fn style_class(scope: &str) -> Option<&'static str> {
 /// Highlighting failed where .NET throws (or the budget ran out): the
 /// caller falls back to plain text.
 #[derive(Debug)]
-struct Failure;
+enum Failure {
+    /// Return the plain `<pre><code>` fallback.
+    Fallback,
+    /// Stop: the render was cancelled.
+    Cancelled,
+}
 
-impl From<Exhausted> for Failure {
-    fn from(_: Exhausted) -> Self {
-        Self
+impl From<Stop> for Failure {
+    fn from(stop: Stop) -> Self {
+        match stop {
+            Stop::Exhausted => Self::Fallback,
+            Stop::Cancelled => Self::Cancelled,
+        }
     }
 }
 
@@ -304,10 +348,10 @@ struct Scope {
 fn parse(
     language: usize,
     text: &[u16],
-    budget: &mut Budget,
+    budget: &mut Budget<'_>,
     out: &mut Sink,
 ) -> Result<(), Failure> {
-    let regex = compiled(language).ok_or(Failure)?;
+    let regex = compiled(language).ok_or(Failure::Fallback)?;
     let mut current = 0;
     let mut from = 0;
     while from <= text.len() {
@@ -344,7 +388,7 @@ fn captured_styles(
     current_index: usize,
     language: usize,
     text: &[u16],
-    budget: &mut Budget,
+    budget: &mut Budget<'_>,
     arena: &mut Vec<Scope>,
 ) -> Result<Vec<usize>, Failure> {
     let captures = languages::LANGUAGES[language].captures;
@@ -360,6 +404,11 @@ fn captured_styles(
             continue;
         };
         for &(start, end) in history {
+            if end < start {
+                // Captures are normalized, so this cannot happen; skip
+                // rather than slice out of order.
+                continue;
+            }
             let offset = start as i64 - current_index as i64;
             if let Some(nested) = name.strip_prefix('&') {
                 nested_styles(
@@ -391,12 +440,12 @@ fn nested_styles(
     value: &[u16],
     offset: i64,
     id: &str,
-    budget: &mut Budget,
+    budget: &mut Budget<'_>,
     arena: &mut Vec<Scope>,
     styles: &mut Vec<usize>,
 ) -> Result<(), Failure> {
-    let language = find_by_id(id).ok_or(Failure)?;
-    let regex = compiled(language).ok_or(Failure)?;
+    let language = find_by_id(id).ok_or(Failure::Fallback)?;
+    let regex = compiled(language).ok_or(Failure::Fallback)?;
     let mut from = 0;
     while from <= value.len() {
         let Some(found) = regex.find_at(value, from, budget)? else {
@@ -443,7 +492,7 @@ fn style_tree(mut styles: Vec<usize>, arena: &mut [Scope]) -> Result<Vec<usize>,
             if index >= parent.index && end <= parent.index + parent.length {
                 if arena[scope].parent.is_some() {
                     // "The child scope already has a parent."
-                    return Err(Failure);
+                    return Err(Failure::Fallback);
                 }
                 arena[scope].parent = Some(candidate);
                 arena[candidate].children.push(scope);
@@ -486,7 +535,7 @@ fn write(parsed: &[u16], tree: &[usize], arena: &[Scope], out: &mut Sink) -> Res
     for (index, insert) in inserts {
         // String.Substring(offset, index - offset) throws out of range.
         if index < offset || index > len {
-            return Err(Failure);
+            return Err(Failure::Fallback);
         }
         out.push_encoded(&parsed[offset as usize..index as usize]);
         match insert {
@@ -572,7 +621,7 @@ fn web_encode_units(units: &[u16], out: &mut String) {
 /// [`highlight`] for a document with one code block.
 #[cfg(test)]
 pub(crate) fn highlight_one(code: &str, language: &str, limit: usize) -> Option<String> {
-    highlight(code, language, limit, &mut document_budget())
+    highlight(code, language, limit, &mut document_budget(&|| false)).ok()
 }
 
 #[cfg(test)]

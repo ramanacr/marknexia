@@ -64,7 +64,7 @@ pub mod testing {
             language,
             usize::MAX,
             crate::highlight::Path::Default,
-            &mut crate::highlight::document_budget(),
+            &mut crate::highlight::document_budget(&|| false),
         );
         (html.unwrap_or_default(), steps)
     }
@@ -77,7 +77,7 @@ pub mod testing {
             language,
             usize::MAX,
             crate::highlight::Path::Engine,
-            &mut crate::highlight::document_budget(),
+            &mut crate::highlight::document_budget(&|| false),
         );
         (html.unwrap_or_default(), steps)
     }
@@ -89,6 +89,22 @@ pub mod testing {
             language,
             usize::MAX,
             crate::highlight::Path::Default,
+            &mut crate::highlight::regex::Budget::new(budget),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code_with_engine`] with an explicit regex step budget.
+    pub fn highlight_code_with_engine_and_budget(
+        code: &str,
+        language: &str,
+        budget: u64,
+    ) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Engine,
             &mut crate::highlight::regex::Budget::new(budget),
         );
         (html.unwrap_or_default(), steps)
@@ -486,7 +502,13 @@ impl<E: MarkdownEngine> Renderer<E> {
         if body.len() > budget {
             return Err(over_budget(passes::Overflow));
         }
-        let body = passes::highlight_code_blocks(body, budget).map_err(over_budget)?;
+        let body =
+            passes::highlight_code_blocks_cancellable(body, budget, cancel).map_err(|error| {
+                match error {
+                    highlight::HighlightError::Overflow => over_budget(passes::Overflow),
+                    highlight::HighlightError::Cancelled => RenderError::Cancelled,
+                }
+            })?;
         checkpoint()?;
         let (body, has_mermaid) = passes::transform_diagrams(
             body,

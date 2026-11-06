@@ -37,6 +37,8 @@ const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
 fn cases() -> Vec<Value> {
     let oracle: Value = serde_json::from_str(ORACLE).unwrap();
     assert_eq!(oracle["schemaVersion"], "marknexia-highlight-oracle-v1");
+    // The generator pins the culture; the IgnoreCase tables depend on it (HL-3).
+    assert_eq!(oracle["culture"], "en-IN");
     assert_eq!(
         oracle["sourceRevision"],
         "38b39f668ce52026261ac4802602c0cf7e0711a3"

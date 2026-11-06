@@ -28,33 +28,94 @@
 
 use super::unicode::{BOUNDARY_WORD, CASE_EQUIVALENTS, DIGIT, SPACE, WORD};
 
-/// The step budget ran out.
+/// Why a match stopped before it finished.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Exhausted;
-
-/// Steps left for one highlighting call (shared by every match it runs).
-#[derive(Debug)]
-pub(crate) struct Budget {
-    left: u64,
+pub(crate) enum Stop {
+    /// The step budget or the backtracking-state cap ([`MAX_ENTRIES`]) ran
+    /// out; the caller falls back to plain text.
+    Exhausted,
+    /// The caller's cancellation callback returned `true`.
+    Cancelled,
 }
 
-impl Budget {
+/// The most backtracking state one match may hold: backtrack entries, undo
+/// entries and recorded captures together (16, 12 and 8 bytes each), so a
+/// match holds at most about 128 MiB, plus up to the same again while a
+/// vector grows. More state stops the match with [`Stop::Exhausted`].
+pub(crate) const MAX_ENTRIES: usize = 1 << 23;
+
+/// The budget polls its cancellation callback once per this many steps.
+const POLL_INTERVAL: u64 = 1 << 16;
+
+/// Steps left for one document's highlighting (shared by every match it
+/// runs), with an optional cancellation callback.
+pub(crate) struct Budget<'c> {
+    left: u64,
+    /// Steps granted so far (start plus credits).
+    granted: u64,
+    /// Credits stop once `granted` reaches this.
+    cap: u64,
+    until_poll: u64,
+    cancel: Option<&'c (dyn Fn() -> bool + Sync)>,
+}
+
+impl std::fmt::Debug for Budget<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Budget")
+            .field("left", &self.left)
+            .field("granted", &self.granted)
+            .field("cap", &self.cap)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c> Budget<'c> {
     pub(crate) const fn new(steps: u64) -> Self {
-        Self { left: steps }
+        Self {
+            left: steps,
+            granted: steps,
+            cap: u64::MAX,
+            until_poll: POLL_INTERVAL,
+            cancel: None,
+        }
+    }
+
+    /// Limits the total that [`Self::credit`] can grant.
+    pub(crate) const fn with_cap(mut self, cap: u64) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    /// Polls `cancel` every [`POLL_INTERVAL`] steps.
+    pub(crate) fn with_cancel(mut self, cancel: &'c (dyn Fn() -> bool + Sync)) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     #[inline]
-    fn spend(&mut self, steps: u64) -> Result<(), Exhausted> {
+    fn spend(&mut self, steps: u64) -> Result<(), Stop> {
         if self.left < steps {
             self.left = 0;
-            return Err(Exhausted);
+            return Err(Stop::Exhausted);
         }
         self.left -= steps;
+        if let Some(cancel) = self.cancel {
+            if self.until_poll <= steps {
+                self.until_poll = POLL_INTERVAL;
+                if cancel() {
+                    return Err(Stop::Cancelled);
+                }
+            } else {
+                self.until_poll -= steps;
+            }
+        }
         Ok(())
     }
 
-    /// Adds `steps` (saturating).
-    pub(crate) const fn credit(&mut self, steps: u64) {
+    /// Adds `steps`, but never past the cap of granted steps.
+    pub(crate) fn credit(&mut self, steps: u64) {
+        let steps = steps.min(self.cap.saturating_sub(self.granted));
+        self.granted += steps;
         self.left = self.left.saturating_add(steps);
     }
 
@@ -62,7 +123,6 @@ impl Budget {
         self.left
     }
 }
-
 /// A pattern the parser does not accept.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PatternError(pub(crate) String);
@@ -924,6 +984,9 @@ struct Compiler<'a> {
     marks: usize,
     loops: usize,
     numbers: &'a dyn Fn(&GroupRef) -> Result<usize, PatternError>,
+    /// Groups whose captures are recorded (observed by the caller, or used
+    /// by a conditional or a balancing group).
+    record: &'a [bool],
     /// Sub-programs (lookarounds and atomic groups) still to emit.
     pending: Vec<(usize, Node, bool)>,
 }
@@ -1022,8 +1085,13 @@ impl Compiler<'_> {
                 uncapture,
                 node,
             } => {
-                let group = group.as_ref().map(self.numbers).transpose()?;
+                let group = group
+                    .as_ref()
+                    .map(self.numbers)
+                    .transpose()?
+                    .filter(|&group| self.record[group]);
                 let uncapture = uncapture.as_ref().map(self.numbers).transpose()?;
+                // A group nobody observes needs no capture history.
                 if group.is_none() && uncapture.is_none() {
                     return self.node(node, rtl);
                 }
@@ -1128,9 +1196,55 @@ fn first_of(node: &Node, classes: &[Class]) -> First {
     }
 }
 
+/// Marks the groups that conditionals and balancing groups read.
+fn referenced(
+    node: &Node,
+    numbers: &dyn Fn(&GroupRef) -> Result<usize, PatternError>,
+    record: &mut [bool],
+) -> Result<(), PatternError> {
+    match node {
+        Node::Empty | Node::Char(_) | Node::Assert(_) => {}
+        Node::Concat(items) | Node::Alt(items) => {
+            for item in items {
+                referenced(item, numbers, record)?;
+            }
+        }
+        Node::Repeat { node, .. } | Node::Atomic(node) | Node::Look { node, .. } => {
+            referenced(node, numbers, record)?;
+        }
+        Node::Capture {
+            uncapture, node, ..
+        } => {
+            if let Some(other) = uncapture {
+                record[numbers(other)?] = true;
+            }
+            referenced(node, numbers, record)?;
+        }
+        Node::Conditional { group, yes, no } => {
+            record[numbers(group)?] = true;
+            referenced(yes, numbers, record)?;
+            referenced(no, numbers, record)?;
+        }
+    }
+    Ok(())
+}
+
 impl Regex {
-    /// Parses and compiles a .NET pattern (`RegexOptions.None`).
+    /// Parses and compiles a .NET pattern (`RegexOptions.None`), recording
+    /// the captures of every group.
+    #[cfg(test)]
     pub(crate) fn new(pattern: &str) -> Result<Self, PatternError> {
+        Self::with_observed(pattern, &|_| true)
+    }
+
+    /// Parses and compiles a .NET pattern (`RegexOptions.None`). Only the
+    /// groups for which `observed` returns `true` (plus those that
+    /// conditionals and balancing groups read) keep capture history;
+    /// [`Match::groups`] is empty for the others.
+    pub(crate) fn with_observed(
+        pattern: &str,
+        observed: &dyn Fn(usize) -> bool,
+    ) -> Result<Self, PatternError> {
         let units: Vec<u16> = pattern.encode_utf16().collect();
         let mut parser = Parser {
             pattern: &units,
@@ -1156,6 +1270,8 @@ impl Regex {
             }
         };
         let groups = unnamed + 1 + parser.names.len();
+        let mut record: Vec<bool> = (0..groups).map(observed).collect();
+        referenced(&root, &numbers, &mut record)?;
         let classes = parser.classes;
         let branches = match root {
             Node::Alt(branches) => branches,
@@ -1166,6 +1282,7 @@ impl Regex {
             marks: 0,
             loops: 0,
             numbers: &numbers,
+            record: &record,
             pending: Vec::new(),
         };
         let mut alternatives = Vec::new();
@@ -1200,14 +1317,20 @@ impl Regex {
         &self,
         text: &[u16],
         from: usize,
-        budget: &mut Budget,
-    ) -> Result<Option<Match>, Exhausted> {
+        budget: &mut Budget<'_>,
+    ) -> Result<Option<Match>, Stop> {
+        // Positions are stored as u32; NONE marks an unset register.
+        if text.len() >= NONE as usize {
+            return Err(Stop::Exhausted);
+        }
         let mut runner = Runner {
             regex: self,
             text,
-            registers: vec![-1; self.marks + 2 * self.loops],
+            registers: vec![NONE; self.marks + 2 * self.loops],
             captures: vec![Vec::new(); self.groups],
+            captured: 0,
             log: Vec::new(),
+            tracked: 0,
             budget,
             match_start: from,
         };
@@ -1220,7 +1343,16 @@ impl Regex {
                 }
                 runner.match_start = start;
                 if let Some(end) = runner.run(alternative.start, start)? {
-                    let mut groups = std::mem::take(&mut runner.captures);
+                    let mut groups: Vec<Vec<(usize, usize)>> = runner
+                        .captures
+                        .iter()
+                        .map(|history| {
+                            history
+                                .iter()
+                                .map(|&(s, e)| (s as usize, e as usize))
+                                .collect()
+                        })
+                        .collect();
                     groups[0] = vec![(start, end)];
                     return Ok(Some(Match { start, end, groups }));
                 }
@@ -1233,61 +1365,101 @@ impl Regex {
 // ---------------------------------------------------------------------------
 // Matcher
 
-enum Undo {
-    Register(usize, i64),
-    Pushed(usize),
-    Popped(usize, (usize, usize)),
+/// An unset register (no group start yet, or no loop iteration yet).
+const NONE: u32 = u32::MAX;
+
+/// One undo entry (12 bytes): `kind` in the top two bits of `head`, an
+/// index in the rest.
+#[derive(Clone, Copy)]
+struct Undo {
+    head: u32,
+    a: u32,
+    b: u32,
 }
 
-enum Track {
-    /// Resume at `pc` and `pos`.
-    Branch { pc: usize, pos: usize, log: usize },
-    /// A greedy single-class loop can give back `left` more units.
-    GiveBack {
-        pc: usize,
-        pos: usize,
-        left: usize,
-        rtl: bool,
-        log: usize,
-    },
-    /// A lazy single-class loop can take `left` more units.
-    TakeMore {
-        pc: usize,
-        pos: usize,
-        left: u32,
-        class: usize,
-        rtl: bool,
-        log: usize,
-    },
+const UNDO_REGISTER: u32 = 0;
+const UNDO_PUSHED: u32 = 1 << 30;
+const UNDO_POPPED: u32 = 2 << 30;
+/// A loop's two registers (count, mark) in one entry; `head` holds the
+/// count register.
+const UNDO_LOOP: u32 = 3 << 30;
+const KIND_MASK: u32 = 3 << 30;
+
+/// One backtrack entry (16 bytes): `kind` in the top two bits of `head`,
+/// the resume instruction in the rest. A single-class loop's class and
+/// direction are read from its instruction, just before the resume point.
+#[derive(Clone, Copy)]
+struct Track {
+    head: u32,
+    pos: u32,
+    log: u32,
+    /// Units a loop can still give back or take.
+    left: u32,
 }
 
-struct Runner<'r, 't, 'b> {
+/// Resume at `pc` and `pos`.
+const TRACK_BRANCH: u32 = 0;
+/// A greedy single-class loop can give back `left` more units.
+const TRACK_GIVE_BACK: u32 = 1 << 30;
+/// A lazy single-class loop can take `left` more units.
+const TRACK_TAKE_MORE: u32 = 2 << 30;
+
+struct Runner<'r, 't, 'b, 'c> {
     regex: &'r Regex,
     text: &'t [u16],
     /// Group marks, then two registers per loop (count, mark).
-    registers: Vec<i64>,
-    captures: Vec<Vec<(usize, usize)>>,
+    registers: Vec<u32>,
+    captures: Vec<Vec<(u32, u32)>>,
+    /// Total entries in `captures`.
+    captured: usize,
     log: Vec<Undo>,
-    budget: &'b mut Budget,
+    /// Backtrack entries held by every active `run` frame.
+    tracked: usize,
+    budget: &'b mut Budget<'c>,
     match_start: usize,
 }
 
-impl Runner<'_, '_, '_> {
-    fn set(&mut self, register: usize, value: i64) {
+impl Runner<'_, '_, '_, '_> {
+    fn set(&mut self, register: usize, value: u32) {
         let old = self.registers[register];
-        self.log.push(Undo::Register(register, old));
+        self.log.push(Undo {
+            head: UNDO_REGISTER | register as u32,
+            a: old,
+            b: 0,
+        });
         self.registers[register] = value;
+    }
+
+    /// Sets a loop's count and mark with one undo entry.
+    fn set_loop(&mut self, id: usize, count: u32, mark: u32) {
+        let (count_register, mark_register) = self.loop_registers(id);
+        self.log.push(Undo {
+            head: UNDO_LOOP | count_register as u32,
+            a: self.registers[count_register],
+            b: self.registers[mark_register],
+        });
+        self.registers[count_register] = count;
+        self.registers[mark_register] = mark;
     }
 
     fn undo_to(&mut self, length: usize) {
         while self.log.len() > length {
-            match self.log.pop() {
-                Some(Undo::Register(register, old)) => self.registers[register] = old,
-                Some(Undo::Pushed(group)) => {
-                    self.captures[group].pop();
+            let Some(undo) = self.log.pop() else { break };
+            let index = (undo.head & !KIND_MASK) as usize;
+            match undo.head & KIND_MASK {
+                UNDO_REGISTER => self.registers[index] = undo.a,
+                UNDO_LOOP => {
+                    self.registers[index] = undo.a;
+                    self.registers[index + 1] = undo.b;
                 }
-                Some(Undo::Popped(group, capture)) => self.captures[group].push(capture),
-                None => break,
+                UNDO_PUSHED => {
+                    self.captures[index].pop();
+                    self.captured -= 1;
+                }
+                _ => {
+                    self.captures[index].push((undo.a, undo.b));
+                    self.captured += 1;
+                }
             }
         }
     }
@@ -1331,15 +1503,48 @@ impl Runner<'_, '_, '_> {
         }
     }
 
+    /// The class and direction of the single-class loop just before `pc`.
+    fn char_loop_before(&self, pc: usize) -> (usize, bool) {
+        match self.regex.program[pc - 1] {
+            Inst::CharLoop { class, rtl, .. } => (class, rtl),
+            _ => unreachable!("a loop track resumes after its CharLoop"),
+        }
+    }
+
+    fn push_track(&mut self, track: &mut Vec<Track>, kind: u32, pc: usize, pos: usize, left: u32) {
+        track.push(Track {
+            head: kind | pc as u32,
+            pos: pos as u32,
+            log: self.log.len() as u32,
+            left,
+        });
+        self.tracked += 1;
+    }
+
     /// Runs the program from `pc` at `pos`. On success the captures and
     /// registers it set stay (logged); on failure everything is undone.
-    fn run(&mut self, pc: usize, pos: usize) -> Result<Option<usize>, Exhausted> {
+    fn run(&mut self, pc: usize, pos: usize) -> Result<Option<usize>, Stop> {
         let base_log = self.log.len();
         let mut track: Vec<Track> = Vec::new();
+        let result = self.run_frame(pc, pos, base_log, &mut track);
+        self.tracked -= track.len();
+        result
+    }
+
+    fn run_frame(
+        &mut self,
+        pc: usize,
+        pos: usize,
+        base_log: usize,
+        track: &mut Vec<Track>,
+    ) -> Result<Option<usize>, Stop> {
         let mut pc = pc;
         let mut pos = pos;
         loop {
             self.budget.spend(1)?;
+            if self.log.len() + self.tracked + self.captured > MAX_ENTRIES {
+                return Err(Stop::Exhausted);
+            }
             let ok = match self.regex.program[pc] {
                 Inst::Match => return Ok(Some(pos)),
                 Inst::Char { class, rtl } => match self.step(class, pos, rtl) {
@@ -1374,23 +1579,10 @@ impl Runner<'_, '_, '_> {
                     } else {
                         if lazy {
                             if max > min {
-                                track.push(Track::TakeMore {
-                                    pc: pc + 1,
-                                    pos,
-                                    left: max - min,
-                                    class,
-                                    rtl,
-                                    log: self.log.len(),
-                                });
+                                self.push_track(track, TRACK_TAKE_MORE, pc + 1, pos, max - min);
                             }
                         } else if taken > min {
-                            track.push(Track::GiveBack {
-                                pc: pc + 1,
-                                pos,
-                                left: (taken - min) as usize,
-                                rtl,
-                                log: self.log.len(),
-                            });
+                            self.push_track(track, TRACK_GIVE_BACK, pc + 1, pos, taken - min);
                         }
                         pc += 1;
                         true
@@ -1401,11 +1593,7 @@ impl Runner<'_, '_, '_> {
                     self.assert(assertion, pos)
                 }
                 Inst::Split { first, second } => {
-                    track.push(Track::Branch {
-                        pc: second,
-                        pos,
-                        log: self.log.len(),
-                    });
+                    self.push_track(track, TRACK_BRANCH, second, pos, 0);
                     pc = first;
                     true
                 }
@@ -1414,7 +1602,7 @@ impl Runner<'_, '_, '_> {
                     true
                 }
                 Inst::Mark(mark) => {
-                    self.set(mark, pos as i64);
+                    self.set(mark, pos as u32);
                     pc += 1;
                     true
                 }
@@ -1424,19 +1612,17 @@ impl Runner<'_, '_, '_> {
                     uncapture,
                 } => self
                     .capture(mark, group, uncapture, pos)
-                    .inspect(|_| pc += 1)
+                    .inspect(|()| pc += 1)
                     .is_some(),
                 Inst::LoopInit(id) => {
-                    let (count, mark) = self.loop_registers(id);
-                    self.set(count, 0);
-                    self.set(mark, -1);
+                    self.set_loop(id, 0, NONE);
                     pc += 1;
                     true
                 }
                 Inst::LoopEnter(id) => {
-                    let (count, mark) = self.loop_registers(id);
-                    self.set(count, self.registers[count] + 1);
-                    self.set(mark, pos as i64);
+                    let (count, _) = self.loop_registers(id);
+                    let next = self.registers[count].saturating_add(1);
+                    self.set_loop(id, next, pos as u32);
                     pc += 1;
                     true
                 }
@@ -1449,19 +1635,14 @@ impl Runner<'_, '_, '_> {
                     lazy,
                 } => {
                     let (count, mark) = self.loop_registers(id);
-                    let done = self.registers[count] as u64;
-                    let empty = self.registers[mark] == pos as i64;
-                    let (min, max) = (u64::from(min), u64::from(max));
+                    let done = self.registers[count];
+                    let empty = self.registers[mark] == pos as u32;
                     if lazy {
                         if done < min {
                             pc = enter;
                         } else {
                             if done < max && !empty {
-                                track.push(Track::Branch {
-                                    pc: enter,
-                                    pos,
-                                    log: self.log.len(),
-                                });
+                                self.push_track(track, TRACK_BRANCH, enter, pos, 0);
                             }
                             pc = exit;
                         }
@@ -1469,11 +1650,7 @@ impl Runner<'_, '_, '_> {
                         pc = exit;
                     } else {
                         if done >= min {
-                            track.push(Track::Branch {
-                                pc: exit,
-                                pos,
-                                log: self.log.len(),
-                            });
+                            self.push_track(track, TRACK_BRANCH, exit, pos, 0);
                         }
                         pc = enter;
                     }
@@ -1516,60 +1693,43 @@ impl Runner<'_, '_, '_> {
                     self.undo_to(base_log);
                     return Ok(None);
                 };
-                match entry {
-                    Track::Branch {
-                        pc: target,
-                        pos: at,
-                        log,
-                    } => {
-                        self.undo_to(log);
+                self.tracked -= 1;
+                self.undo_to(entry.log as usize);
+                let target = (entry.head & !KIND_MASK) as usize;
+                let at = entry.pos as usize;
+                match entry.head & KIND_MASK {
+                    TRACK_BRANCH => {
                         pc = target;
                         pos = at;
                         break;
                     }
-                    Track::GiveBack {
-                        pc: target,
-                        pos: at,
-                        left,
-                        rtl,
-                        log,
-                    } => {
-                        self.undo_to(log);
+                    TRACK_GIVE_BACK => {
+                        let (_, rtl) = self.char_loop_before(target);
                         let at = if rtl { at + 1 } else { at - 1 };
-                        if left > 1 {
-                            track.push(Track::GiveBack {
-                                pc: target,
-                                pos: at,
-                                left: left - 1,
-                                rtl,
-                                log,
+                        if entry.left > 1 {
+                            track.push(Track {
+                                pos: at as u32,
+                                left: entry.left - 1,
+                                ..entry
                             });
+                            self.tracked += 1;
                         }
                         pc = target;
                         pos = at;
                         break;
                     }
-                    Track::TakeMore {
-                        pc: target,
-                        pos: at,
-                        left,
-                        class,
-                        rtl,
-                        log,
-                    } => {
-                        self.undo_to(log);
+                    _ => {
+                        let (class, rtl) = self.char_loop_before(target);
                         let Some(next) = self.step(class, at, rtl) else {
                             continue;
                         };
-                        if left > 1 {
-                            track.push(Track::TakeMore {
-                                pc: target,
-                                pos: next,
-                                left: left - 1,
-                                class,
-                                rtl,
-                                log,
+                        if entry.left > 1 {
+                            track.push(Track {
+                                pos: next as u32,
+                                left: entry.left - 1,
+                                ..entry
                             });
+                            self.tracked += 1;
                         }
                         pc = target;
                         pos = next;
@@ -1588,7 +1748,11 @@ impl Runner<'_, '_, '_> {
         uncapture: Option<usize>,
         pos: usize,
     ) -> Option<()> {
-        let marked = usize::try_from(self.registers[mark]).ok()?;
+        let marked = self.registers[mark];
+        if marked == NONE {
+            return None;
+        }
+        let pos = pos as u32;
         let (mut start, mut end) = if marked <= pos {
             (marked, pos)
         } else {
@@ -1606,17 +1770,26 @@ impl Runner<'_, '_, '_> {
                 end = end.min(end2);
                 start = start.max(start2);
             }
-            let popped = self.captures[other].pop()?;
-            self.log.push(Undo::Popped(other, popped));
+            let (a, b) = self.captures[other].pop()?;
+            self.captured -= 1;
+            self.log.push(Undo {
+                head: UNDO_POPPED | other as u32,
+                a,
+                b,
+            });
         }
         if let Some(group) = group {
             self.captures[group].push((start, end));
-            self.log.push(Undo::Pushed(group));
+            self.captured += 1;
+            self.log.push(Undo {
+                head: UNDO_PUSHED | group as u32,
+                a: 0,
+                b: 0,
+            });
         }
         Some(())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,7 +1880,10 @@ mod tests {
         let regex = Regex::new("(a*)*b").unwrap();
         let text: Vec<u16> = "a".repeat(5_000).encode_utf16().collect();
         let mut budget = Budget::new(1_000_000);
-        assert_eq!(regex.find_at(&text, 0, &mut budget).err(), Some(Exhausted));
+        assert_eq!(
+            regex.find_at(&text, 0, &mut budget).err(),
+            Some(Stop::Exhausted)
+        );
         assert_eq!(budget.left(), 0);
         let regex = Regex::new("(x+x+)+y").unwrap();
         let text: Vec<u16> = "x".repeat(64).encode_utf16().collect();
@@ -1716,6 +1892,43 @@ mod tests {
                 .find_at(&text, 0, &mut Budget::new(1_000_000))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn budget_polls_cancellation_and_caps_credit() {
+        let regex = Regex::new("(a*)*b").unwrap();
+        let text: Vec<u16> = "a".repeat(5_000).encode_utf16().collect();
+        let cancel = || true;
+        let mut budget = Budget::new(u64::MAX).with_cancel(&cancel);
+        assert_eq!(
+            regex.find_at(&text, 0, &mut budget).err(),
+            Some(Stop::Cancelled)
+        );
+        let mut capped = Budget::new(10).with_cap(25);
+        capped.credit(10);
+        capped.credit(10);
+        assert_eq!(capped.left(), 25);
+    }
+
+    #[test]
+    fn state_cap_stops_the_match() {
+        // One loop iteration per unit keeps backtracking state per unit.
+        let regex = Regex::new("(?:x|y)*z").unwrap();
+        let text: Vec<u16> = "x".repeat(MAX_ENTRIES).encode_utf16().collect();
+        let mut budget = Budget::new(u64::MAX);
+        assert_eq!(
+            regex.find_at(&text, 0, &mut budget).err(),
+            Some(Stop::Exhausted)
+        );
+        // Unobserved groups keep no history.
+        let regex = Regex::with_observed("(a)(b)", &|group| group == 2).unwrap();
+        let units: Vec<u16> = "ab".encode_utf16().collect();
+        let found = regex
+            .find_at(&units, 0, &mut Budget::new(1_000))
+            .unwrap()
+            .unwrap();
+        assert!(found.groups[1].is_empty());
+        assert_eq!(found.groups[2], vec![(1, 2)]);
     }
 
     #[test]

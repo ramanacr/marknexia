@@ -15,7 +15,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use marknexia_rendering::testing::{
-    highlight_code_with_budget, highlight_code_with_engine, highlight_language_ids,
+    highlight_code_with_budget, highlight_code_with_engine_and_budget, highlight_language_ids,
 };
 
 fn decode(html: &str) -> String {
@@ -86,7 +86,7 @@ fuzz_target!(|bytes: &[u8]| {
         assert_eq!(decode(&strip_spans(body)), code);
     }
     if language == "c#" {
-        let (engine, _) = highlight_code_with_engine(code, language);
+        let (engine, _) = highlight_code_with_engine_and_budget(code, language, 1 << 22);
         if !engine.starts_with("<pre><code>") {
             assert_eq!(engine, html, "C# fast path and engine differ");
         }

@@ -11,7 +11,8 @@
 //! from the replacement's fixed template text, against the budget left.
 
 use crate::{
-    highlight, math,
+    highlight::{self, HighlightError},
+    math,
     text::{
         escape_data_string, escaped_data_string_len, find_ci, html_decode, html_encode,
         html_encoded_len, skip_space, starts_with_ci,
@@ -119,16 +120,37 @@ fn code_block_minimum(code: &str, language: &str) -> usize {
 
 /// Step 2, `HighlightCodeBlocks`:
 /// `<pre><code(?:\s+class="language-([a-zA-Z0-9_\+#\-]+)")?>([\s\S]*?)</code></pre>`.
-pub(crate) fn highlight_code_blocks(html: String, limit: usize) -> Result<String, Overflow> {
-    let spliced = highlight_code_blocks_in(&html, limit)?;
+/// Highlighting regex work polls `cancel` (about every 65,536 steps).
+pub(crate) fn highlight_code_blocks_cancellable(
+    html: String,
+    limit: usize,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<String, HighlightError> {
+    let spliced = highlight_code_blocks_in(&html, limit, cancel)?;
     Ok(spliced.unwrap_or(html))
 }
 
-fn highlight_code_blocks_in(html: &str, limit: usize) -> Result<Option<String>, Overflow> {
+/// [`highlight_code_blocks_cancellable`] without cancellation.
+#[cfg(test)]
+pub(crate) fn highlight_code_blocks(html: String, limit: usize) -> Result<String, Overflow> {
+    highlight_code_blocks_cancellable(html, limit, &|| false).map_err(|_| Overflow)
+}
+
+impl From<Overflow> for HighlightError {
+    fn from(_: Overflow) -> Self {
+        Self::Overflow
+    }
+}
+
+fn highlight_code_blocks_in(
+    html: &str,
+    limit: usize,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<String>, HighlightError> {
     const OPEN: &str = "<pre><code";
     const CLOSE: &str = "</code></pre>";
     let mut splicer = Splicer::new(html, limit);
-    let mut budget = highlight::document_budget();
+    let mut budget = highlight::document_budget(cancel);
     let mut search = 0;
     while let Some(offset) = html[search..].find(OPEN) {
         let start = search + offset;
@@ -150,10 +172,9 @@ fn highlight_code_blocks_in(html: &str, limit: usize) -> Result<Option<String>, 
             let code = html_decode(&html[content_start..content_end]);
             let remaining = splicer.remaining(start)?;
             if code_block_minimum(&code, language) > remaining {
-                return Err(Overflow);
+                return Err(HighlightError::Overflow);
             }
-            let highlighted =
-                highlight::highlight(&code, language, remaining, &mut budget).ok_or(Overflow)?;
+            let highlighted = highlight::highlight(&code, language, remaining, &mut budget)?;
             let mut replacement = String::with_capacity(
                 COPY_OPEN.len()
                     + escaped_data_string_len(&code)
@@ -170,7 +191,7 @@ fn highlight_code_blocks_in(html: &str, limit: usize) -> Result<Option<String>, 
         }
         search = end;
     }
-    splicer.finish()
+    Ok(splicer.finish()?)
 }
 
 /// Diagram limits and switches for step 3.

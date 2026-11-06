@@ -36,6 +36,13 @@ using Marknexia.Syntax;
 // instead of an output (ColorCode builds its Regex objects without a
 // timeout, so this default applies to them).
 AppContext.SetData("REGEX_DEFAULT_MATCH_TIMEOUT", TimeSpan.FromSeconds(20));
+// The IgnoreCase tables and the corpus are measured under one fixed culture
+// (HL-3), whatever the machine's settings.
+var oracleCulture = CultureInfo.GetCultureInfo("en-IN");
+CultureInfo.CurrentCulture = oracleCulture;
+CultureInfo.CurrentUICulture = oracleCulture;
+CultureInfo.DefaultThreadCurrentCulture = oracleCulture;
+CultureInfo.DefaultThreadCurrentUICulture = oracleCulture;
 if (args.Length != 2) throw new ArgumentException("usage: <repository-root> <source-revision>");
 string root = Path.GetFullPath(args[0]);
 if (!File.Exists(Path.Combine(root, "Cargo.toml"))) throw new InvalidOperationException($"not the repository root: {root}");
