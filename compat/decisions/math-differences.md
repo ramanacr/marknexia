@@ -9,7 +9,7 @@ Scope: math in `crates/marknexia-markdown` (which `$` text becomes a math span) 
 `crates/marknexia-rendering/tests/oracle/math.v1.json` holds 43 cases rendered by the unmodified .NET `MarkdownRenderer` (Markdig 0.40.0 `UseMathematics`, `SimpleMathRenderer`, the HtmlSanitizer pass and the template). The generator is `crates/marknexia-rendering/tests/oracle/MathOracle`. It references `src/` and changes no .NET source. It ran against the `src/` tree `c91f107e…`, which is the tree of the frozen fixture revision `38b39f6`. `tests/math_oracle.rs` renders every case with Rust:
 
 * 34 cases match byte for byte. One of them is also compared as a complete page. They cover inline math, `$$…$$` within a line, every symbol in the .NET table (including the `\ell` → `…` quirk), `\frac`, `\dfrac`, `\tfrac`, `\sqrt` with and without an index, `\text`, `\operatorname`, `\left`/`\right`, single-character commands, unknown commands, the `x^{2}` → `x<sup></sup>` quirk, white space before arguments, a script at the end, HTML-special and Latin-1 characters, empty groups, code spans and code blocks, escaped dollars, math in raw HTML blocks (including `<img onerror>` inside a math block and upper-case tags), unterminated raw spans, nesting within the budget, lists, headings and tables.
-* 9 cases differ. Each one is listed in `KNOWN_DIFFERENCES` with its record, and the test fails if one of them starts to match:
+* 9 cases differ. Each one is listed in `KNOWN_DIFFERENCES` with its record. The exact Rust body of each is pinned in `tests/oracle/math.known-differences.v1.json`. The test fails if a listed case starts to match .NET or if its Rust body changes:
 
 | Case | Record |
 | --- | --- |
@@ -18,6 +18,18 @@ Scope: math in `crates/marknexia-markdown` (which `$` text becomes a math span) 
 | `display-block`, `multi-line-display`, `math-disabled` | MATH-1 |
 | `unbalanced`, `leading-space` | MATH-2 |
 | `astral` | MATH-3 |
+
+### Regenerating the oracle
+
+Run this from the repository root. It needs the .NET 10 SDK, and the `src/` tree must still be the one in the file (`git rev-parse HEAD:src` prints `c91f107edd5baa3bcba27723f19330cb35837273`):
+
+```powershell
+dotnet run --project crates/marknexia-rendering/tests/oracle/MathOracle -- `
+  "$PWD\crates\marknexia-rendering\tests\oracle\math.v1.json" `
+  38b39f668ce52026261ac4802602c0cf7e0711a3 (git rev-parse HEAD:src)
+```
+
+The three arguments are the output file, the fixture revision recorded as `sourceRevision`, and the `src/` tree recorded as `srcTree`. Then delete `MathOracle/bin` and `MathOracle/obj`. Review the diff of `math.v1.json` as a baseline change. If `src/` has changed, regenerate only with owner approval, because the oracle would then describe different .NET behavior. When a known difference changes on purpose, update its pinned body in `math.known-differences.v1.json` and its record here.
 
 ## MATH-1 — `$$` math blocks
 

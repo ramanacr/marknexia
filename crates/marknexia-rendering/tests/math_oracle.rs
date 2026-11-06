@@ -141,25 +141,39 @@ fn math_matches_the_dotnet_oracle() {
     }
 }
 
-/// The documented differences, pinned to the Rust output so a change is
-/// noticed.
+/// The documented differences, pinned byte for byte to the Rust body in
+/// `oracle/math.known-differences.v1.json`, so any change to them fails.
+/// The checks after the loop explain what the pinned bodies show.
 #[test]
 fn known_math_differences_render_as_recorded() {
+    let pinned: Value =
+        serde_json::from_str(include_str!("oracle/math.known-differences.v1.json")).unwrap();
+    let pinned = pinned.as_object().unwrap();
+    assert_eq!(pinned.len(), KNOWN_DIFFERENCES.len());
     let cases = oracle();
-    let case = |name: &str| {
+    let body = |name: &str| {
         let case = cases.iter().find(|case| case["name"] == name).unwrap();
         render(case).1.unwrap()
     };
+    for (name, decision) in KNOWN_DIFFERENCES {
+        let entry = &pinned[*name];
+        assert_eq!(entry["decision"], *decision, "{name}");
+        assert_eq!(
+            body(name),
+            entry["rustBody"].as_str().unwrap(),
+            "{name}: the Rust output for a recorded difference changed"
+        );
+    }
     assert_eq!(
-        case("caret-backslash-at-end"),
+        body("caret-backslash-at-end"),
         "<span class=\"marknexia-math\" role=\"math\" aria-label=\"x^\\\">x<sup>\\</sup></span>\n"
     );
     assert_eq!(
-        case("underscore-backslash-at-end"),
+        body("underscore-backslash-at-end"),
         "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"y_\\\">y<sub>\\</sub></div>\n"
     );
-    assert!(case("astral").contains("\u{1d465}<sup>2</sup> + \\\u{1d465}"));
-    let deep = case("deep-nesting");
+    assert!(body("astral").contains("\u{1d465}<sup>2</sup> + \\\u{1d465}"));
+    let deep = body("deep-nesting");
     assert_eq!(deep.matches("class=\"marknexia-sqrt\"").count(), 17);
     assert!(
         deep.contains("\\sqrt{"),
