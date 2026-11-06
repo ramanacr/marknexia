@@ -1,6 +1,6 @@
 # Marknexia Rust/Win32 Production Rewrite Plan
 
-Status: **draft — execution blocked on owner gate G0** (see below).
+Status: **draft.** Phase 1 runs in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
 Inputs: `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md` (architecture), `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md` (decision CONDITIONAL-GO, conditions C1–C6), `artifacts/rust-feasibility/manifest.json` (evidence index).
 Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
@@ -17,7 +17,7 @@ Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
 | Gate | Needed before | Decision |
 |---|---|---|
-| G0 | Any phase starts | Accept CONDITIONAL-GO; approve or reject the five proposed `compat/decisions/*.md` files and the highlighting recommendation (C1) |
+| G0 | Phase 2 starts | Accept CONDITIONAL-GO; approve or reject the five proposed `compat/decisions/*.md` files and the highlighting recommendation (C1) |
 | G1 | Phase 3 | Highlighting language set (C2): port ColorCode's languages, or approve a reduced set with a decision record |
 | G2 | Phase 6 | Update signing key creation and custody approved by the security owner (C5) |
 | G3 | Phase 7 | Declared reference hardware for x64 and ARM64 (C3) |
