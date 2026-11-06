@@ -30,4 +30,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "settings_parse"
+path = "fuzz_targets/settings_parse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

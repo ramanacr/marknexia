@@ -201,12 +201,19 @@ jobs:
         run: |
           cd fuzz
           cargo +nightly fuzz run markdown_and_html corpus/markdown_and_html -- -max_total_time=300 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz.log"
+      - name: Fuzz settings_parse (60 s)
+        env:
+          RUSTFLAGS: --cfg ammonia_unstable
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run settings_parse corpus/settings_parse -- -max_total_time=60 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz-settings.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: rust-fuzz-markdown-and-html
           path: |
             ${{ runner.temp }}/fuzz.log
+            ${{ runner.temp }}/fuzz-settings.log
             fuzz/artifacts/**
           if-no-files-found: warn
 
