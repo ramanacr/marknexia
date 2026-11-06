@@ -406,9 +406,16 @@ pub fn build_document_with_outline(
             level: heading.level,
         })
         .collect();
-    HostDocument::from_rendered(job.tab_id, 1, &job.title, rendered, &identity)
-        .map(|document| (document, outline))
-        .map_err(|error| OpenError::Display(format!("{error:?}")))
+    HostDocument::from_rendered(
+        job.tab_id,
+        1,
+        &job.title,
+        rendered,
+        &identity,
+        job.allow_remote_assets,
+    )
+    .map(|document| (document, outline))
+    .map_err(|error| OpenError::Display(format!("{error:?}")))
 }
 
 /// A startup readiness signal for a measurement harness.

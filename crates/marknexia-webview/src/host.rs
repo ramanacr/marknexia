@@ -434,7 +434,9 @@ impl WebViewHost {
     /// [`scroll_script`]). Fire and forget: no completion handler is kept.
     pub fn scroll_to_anchor(&self, anchor: Option<&str>) -> Result<(), HostError> {
         let core = self.core.as_ref().ok_or(HostError::Closed)?;
-        if self.document.is_none() {
+        // Only the pinned document, after its navigation succeeded, may be
+        // scripted: never a page still loading or a failed navigation.
+        if self.document.is_none() || !self.document_loaded() {
             return Err(HostError::InvalidDocument);
         }
         let script: Vec<u16> = scroll_script(anchor)

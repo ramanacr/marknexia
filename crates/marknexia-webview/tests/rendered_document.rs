@@ -27,7 +27,8 @@ fn rendered_page_is_served_from_its_identity_origin_with_matching_policy() {
     let identity = identity(0xA5);
     let rendered = render("# Heading\n\nBody <script>alert(1)</script>", identity);
     let expected_page = rendered.page_html();
-    let document = HostDocument::from_rendered(4, 1, "notes.md", rendered, &identity).unwrap();
+    let document =
+        HostDocument::from_rendered(4, 1, "notes.md", rendered, &identity, false).unwrap();
     let origin = identity.origin();
     assert_eq!(document.document_uri(), format!("{origin}/document"));
     assert!(document.permits_navigation(&document.document_uri()));
@@ -106,9 +107,15 @@ fn rendered_page_is_served_from_its_identity_origin_with_matching_policy() {
 fn title_is_plain_text() {
     let identity = identity(3);
     let rendered = render("x", identity);
-    let document =
-        HostDocument::from_rendered(1, 1, "</title><script>x</script>", rendered, &identity)
-            .unwrap();
+    let document = HostDocument::from_rendered(
+        1,
+        1,
+        "</title><script>x</script>",
+        rendered,
+        &identity,
+        false,
+    )
+    .unwrap();
     let page = html(&document);
     assert!(page.contains("<title>&lt;/title&gt;&lt;script&gt;x&lt;/script&gt;</title>"));
 }
@@ -117,7 +124,7 @@ fn title_is_plain_text() {
 fn a_page_rendered_for_another_identity_is_rejected() {
     let rendered = render("# x", identity(1));
     assert_eq!(
-        HostDocument::from_rendered(1, 1, "x.md", rendered, &identity(2)),
+        HostDocument::from_rendered(1, 1, "x.md", rendered, &identity(2), false),
         Err(DocumentError::IdentityMismatch)
     );
 }
@@ -126,7 +133,7 @@ fn a_page_rendered_for_another_identity_is_rejected() {
 fn bridge_messages_the_page_sends_are_rejected_by_the_strict_protocol() {
     let identity = identity(9);
     let rendered = render("[link](https://example.com)", identity);
-    let document = HostDocument::from_rendered(2, 1, "x.md", rendered, &identity).unwrap();
+    let document = HostDocument::from_rendered(2, 1, "x.md", rendered, &identity, false).unwrap();
     let source = document.document_uri();
     // bridge.js posts untagged objects without protocol, tab or epoch.
     for json in [
@@ -155,25 +162,42 @@ fn rendered_documents_are_send() {
 }
 
 #[test]
-fn a_page_rendered_with_remote_images_keeps_its_policy_in_the_header() {
+fn a_page_rendered_with_remote_images_must_match_the_setting_and_allows_https_only() {
     let identity = identity(0x3C);
     let mut context = RenderContext::new(AppTheme::System, identity);
     context.allow_remote_assets = true;
-    let rendered = Renderer::new()
-        .render("![remote](https://example.com/a.png)", &context)
-        .unwrap();
-    let document = HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity).unwrap();
+    let renderer = Renderer::new();
+    let source = "![remote](https://example.com/a.png)";
     let origin = identity.origin();
+
+    let rendered = renderer.render(source, &context).unwrap();
+    let document =
+        HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity, true).unwrap();
+    // The frozen .NET page keeps `http: https:`; the header narrows it.
+    assert!(html(&document).contains(&format!("img-src {origin} data: http: https:;")));
     assert!(
         document
             .document_csp()
-            .contains(&format!("img-src {origin} data: http: https:;"))
+            .contains(&format!("img-src {origin} data: https:;"))
     );
+    assert!(!document.document_csp().contains("http:"));
     assert!(html(&document).contains("https://example.com/a.png"));
 
-    // Without the setting the header keeps the blocked policy.
-    let rendered = render("![remote](https://example.com/a.png)", identity);
-    let document = HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity).unwrap();
+    // A page whose policy does not match the caller's setting is refused,
+    // in both directions.
+    let rendered = renderer.render(source, &context).unwrap();
+    assert_eq!(
+        HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity, false).err(),
+        Some(DocumentError::IdentityMismatch)
+    );
+    let rendered = render(source, identity);
+    assert_eq!(
+        HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity, true).err(),
+        Some(DocumentError::IdentityMismatch)
+    );
+    let rendered = render(source, identity);
+    let document =
+        HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity, false).unwrap();
     assert!(
         document
             .document_csp()

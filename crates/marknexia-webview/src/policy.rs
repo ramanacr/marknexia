@@ -156,6 +156,7 @@ impl HostDocument {
         title: &str,
         rendered: RenderedDocument,
         identity: &PageIdentity,
+        remote_images: bool,
     ) -> Result<Self, DocumentError> {
         const PREFIX: &str = "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"";
         const HEAD: &str = "\">\n<head>\n  <meta charset=\"utf-8\" />\n";
@@ -182,23 +183,22 @@ impl HostDocument {
         // bundled stylesheet precedes it and contains no such text.
         let head_end = page.find(HEAD_END).ok_or(DocumentError::IdentityMismatch)?;
         let head = &page[..head_end];
-        // The template emits one of two policies: remote images blocked, or
-        // allowed (`RenderContext::allow_remote_assets`, the .NET
-        // `AllowRemoteAssets` setting). Both are bound to the identity.
-        let csp = [false, true]
-            .into_iter()
-            .map(|remote| rendered_page_csp(identity, remote))
-            .find(|csp| {
-                head.contains(&format!(
-                    "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
-                    html_encode(csp)
-                ))
-            })
-            .ok_or(DocumentError::IdentityMismatch)?;
+        // The page must carry exactly the template policy for the caller's
+        // remote-image setting (`RenderContext::allow_remote_assets`, the
+        // .NET `AllowRemoteAssets`), bound to the identity.
+        let page_csp = rendered_page_csp(identity, remote_images, true);
+        let expected_meta = format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
+            html_encode(&page_csp)
+        );
         let expected_base = format!("<base href=\"{}/", html_encode(&origin));
-        if !head.contains(&expected_base) {
+        if !head.contains(&expected_meta) || !head.contains(&expected_base) {
             return Err(DocumentError::IdentityMismatch);
         }
+        // The frozen .NET template allows `http:` and `https:` images. The
+        // response header allows `https:` only; browsers enforce both
+        // policies, so plain-HTTP images stay blocked.
+        let csp = rendered_page_csp(identity, remote_images, false);
         let title = HtmlPolicy::new(ContentPolicy::default())
             .encode_text(title)
             .map_err(|_| DocumentError::TooLarge)?;
@@ -510,10 +510,16 @@ impl<'a> ResponseSpec<'a> {
 /// `identity` with remote assets off (.NET `TemplateEngine`). It names the
 /// identity origin and nonce; `from_rendered` checks the page against it, so
 /// any template change fails closed instead of drifting.
-fn rendered_page_csp(identity: &PageIdentity, remote_images: bool) -> String {
+/// The rendered page policy. `template_http` adds `http:` to remote image
+/// sources, as the .NET template does; the response header omits it.
+fn rendered_page_csp(identity: &PageIdentity, remote_images: bool, template_http: bool) -> String {
     let origin = identity.origin();
     let nonce = identity.nonce();
-    let remote = if remote_images { " http: https:" } else { "" };
+    let remote = match (remote_images, template_http) {
+        (false, _) => "",
+        (true, true) => " http: https:",
+        (true, false) => " https:",
+    };
     format!(
         "default-src 'none'; base-uri {origin}; script-src 'nonce-{nonce}' https://marknexia.assets; style-src 'unsafe-inline'; img-src {origin} data:{remote}; font-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'"
     )
