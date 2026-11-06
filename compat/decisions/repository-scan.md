@@ -1,6 +1,6 @@
 # Repository scan and tree differences
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-files/src/repository.rs` and `GatedPath` in `crates/marknexia-files/src/path.rs`. The .NET baseline is `src/Marknexia.Files/RepositoryService.cs` and `src/Marknexia.Files/RepositoryTreeBuilder.cs`.
 

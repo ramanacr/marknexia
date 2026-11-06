@@ -1,6 +1,6 @@
 # Markdown parser source-position diagnostics
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-markdown` (pulldown-cmark; owner decision (2026-09-28): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed.)
 

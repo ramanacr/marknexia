@@ -1,6 +1,6 @@
 # WebView2 missing runtime: detection, missing-runtime state and user-initiated install
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-webview` (`bootstrap.rs`, `bootstrap_native.rs`, `environment.rs` detection) and `crates/marknexia-win32` (`window/runtime.rs` and its `runtime:` hooks in `window.rs`). The distribution contract is `packaging/webview/README.md`. The .NET source is `src/Marknexia.App/MainWindow.xaml.cs` (`GetOrCreateWebViewEnvironmentAsync`, `PrepareWebViewAsync`, and the `catch` blocks that call `ShowDiagnostic`).
 

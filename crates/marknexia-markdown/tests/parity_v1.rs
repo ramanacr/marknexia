@@ -1,15 +1,21 @@
 //! Mandatory Markdown parity gate. The pulldown-cmark parser runs the frozen
 //! .NET oracle cases (`compat/fixtures/v1/{markdown,headings}`); there are no
 //! parser-specific expected files. A difference fails the gate unless a
-//! `compat/decisions/*.md` file with status "proposed — requires Task 8
-//! approval" records that exact candidate, case, field, expected value, and
-//! actual value. Stale allowances fail too, so decisions cannot drift.
+//! `compat/decisions/*.md` file with status "approved — owner decision
+//! 2026-11-06 (G0)" (or "proposed — requires Task 8 approval", for a record
+//! added later) records that exact candidate, case, field, expected value,
+//! and actual value. Stale allowances fail too, so decisions cannot drift.
 
 use marknexia_markdown::{MarkdownEngine, MarkdownOptions};
 use serde_json::Value;
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
+/// Status of a record added after gate G0 and not yet approved.
 const PROPOSED_STATUS: &str = "proposed — requires Task 8 approval";
+/// Status of a record the owner approved at gate G0 (2026-11-06).
+const APPROVED_STATUS: &str = "approved — owner decision 2026-11-06 (G0)";
+/// The only statuses under which a parity allowance is accepted.
+const ALLOWANCE_STATUSES: [&str; 2] = [APPROVED_STATUS, PROPOSED_STATUS];
 const ALLOWANCE_OPEN: &str = "<!-- parity-allowance";
 
 fn repository_root() -> PathBuf {
@@ -169,9 +175,11 @@ fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String
             actual: value("actual")?,
         });
     }
-    if !allowances.is_empty() && status_line(text) != Some(PROPOSED_STATUS) {
+    if !allowances.is_empty()
+        && !status_line(text).is_some_and(|status| ALLOWANCE_STATUSES.contains(&status))
+    {
         return Err(format!(
-            "{decision}: parity allowances require the line `Status: **{PROPOSED_STATUS}**`"
+            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
         ));
     }
     Ok(allowances)
@@ -441,6 +449,17 @@ fn allowances_require_proposed_status_and_complete_fields() {
     assert!(parse_allowances("d.md", &prose).is_err());
     let doubled = format!("Status: **approved**\n{}", sample_decision("\"x\""));
     assert!(parse_allowances("d.md", &doubled).is_err());
+    // The G0 approved line is accepted; a near miss of it is not.
+    let approved = sample_decision("\"x\"").replace(PROPOSED_STATUS, APPROVED_STATUS);
+    assert_eq!(parse_allowances("d.md", &approved).unwrap().len(), 1);
+    let near_miss = sample_decision("\"x\"").replace(PROPOSED_STATUS, "approved — owner decision");
+    assert!(
+        parse_allowances("d.md", &near_miss)
+            .unwrap_err()
+            .contains("require the line")
+    );
+    let approved_twice = format!("Status: **{APPROVED_STATUS}**\n{approved}");
+    assert!(parse_allowances("d.md", &approved_twice).is_err());
     let incomplete = sample_decision("\"x\"").replace("path: expected.renderedBodyHtml\n", "");
     assert!(
         parse_allowances("d.md", &incomplete)

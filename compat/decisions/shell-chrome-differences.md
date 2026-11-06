@@ -1,6 +1,6 @@
 # Shell chrome: toolbar, menu, sidebar, diagnostics bar
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-win32/src/chrome_model.rs` and `crates/marknexia-win32/src/window/{chrome,sidebar,toolbar,diagnostics,dialogs,settings_bridge}.rs` (Phase 2 tasks 1, 2 and 6). The .NET sources are `src/Marknexia.App/MainWindow.xaml`, `MainWindow.xaml.cs` and `MainWindow.Support.cs`.
 

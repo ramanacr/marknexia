@@ -1,6 +1,6 @@
 # Math parity (MATH-1 to MATH-3)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: math in `crates/marknexia-markdown` (which `$` text becomes a math span) and `crates/marknexia-rendering` (`math.rs`, the `SimpleMathRenderer` port). REND-5 in `rendering-differences.md` keeps the math bounds; this file adds the oracle evidence and three more differences.
 

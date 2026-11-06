@@ -34,10 +34,10 @@ comrak's advantage is breadth: native bare-URL autolinks, `++ins++`, and Markdig
 * **One mandatory suite, no candidate goldens.** `tests/parity_v1.rs` loads all 19 frozen `compat/fixtures/v1/{markdown,headings}` cases.
   * Before running anything, it checks that the manifest and the directory list the same cases.
   * It compares every `marknexia-parity-v1` field of each candidate's `ParsedDocument` with the .NET expected value.
-* **How a difference can pass.** A difference passes only if a `compat/decisions/*.md` file with status "proposed — requires Task 8 approval" has a `parity-allowance` entry that records the exact candidate, case, field path, expected value, and actual value.
+* **How a difference can pass.** A difference passes only if a `compat/decisions/*.md` file with status "approved — owner decision 2026-11-06 (G0)" (or "proposed — requires Task 8 approval", for a record added later) has a `parity-allowance` entry that records the exact candidate, case, field path, expected value, and actual value.
   * A changed difference fails.
   * An allowance with no matching difference (stale) fails.
-  * An allowance in a file without proposed status fails.
+  * An allowance in a file with any other status fails.
 * **Architecture.** Adapters (`comrak_adapter.rs`, `pulldown_adapter.rs`) only translate the library's syntax tree into a Marknexia-owned model (`src/extensions/model.rs`). Everything Markdig-specific lives in `src/extensions/`, outside the third-party adapters:
   * a Markdig 0.40-shaped HTML writer
   * heading IDs through `marknexia_core::slug`
@@ -69,7 +69,7 @@ Two decision files cover target-only behavior. Neither carries a parity allowanc
 * `compat/decisions/markdown-source-diagnostics.md`: an additive diagnostics field. It is not part of the parity schema, and the suite asserts it is empty for all 19 cases.
 * `compat/decisions/markdown-resource-limits.md`: nesting-depth flattening at 32 levels and the rendered-body size limit.
 
-The suite parses decision files strictly. It requires the exact line `Status: **proposed — requires Task 8 approval**`, and exactly one `Status:` line per file. Without a candidate feature, `cargo test -p marknexia-markdown` fails on purpose (`parity_gate_requires_a_candidate_feature`) rather than passing with no gate. CI must run `--all-features` so both candidates and their allowances are checked.
+The suite parses decision files strictly. It requires the exact line `Status: **approved — owner decision 2026-11-06 (G0)**` or `Status: **proposed — requires Task 8 approval**`, and exactly one `Status:` line per file. Without a candidate feature, `cargo test -p marknexia-markdown` fails on purpose (`parity_gate_requires_a_candidate_feature`) rather than passing with no gate. CI must run `--all-features` so both candidates and their allowances are checked.
 
 ### Extension contract and divergence probe (no oracle)
 
@@ -224,7 +224,7 @@ cargo deny check licenses advisories
 
 ## Rendering/Highlighting (Task 4, Steps 3–6)
 
-Status: **RECOMMENDATION pending review. Not approved.** Scope: `crates/marknexia-rendering` and `fuzz/fuzz_targets/markdown_and_html.rs`. Behavior differences are listed in `compat/decisions/rendering-differences.md` (REND-1 to REND-7, proposed).
+Status: **RECOMMENDATION approved — owner decision 2026-11-06 (G0).** The language set is all ColorCode languages (owner decision 2026-11-06, G1). Scope: `crates/marknexia-rendering` and `fuzz/fuzz_targets/markdown_and_html.rs`. Behavior differences are listed in `compat/decisions/rendering-differences.md` (REND-1 to REND-7, approved at G0).
 
 ### What .NET does
 

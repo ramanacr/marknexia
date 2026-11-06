@@ -1,6 +1,6 @@
 # Settings, recent items, startup resolution and search state
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-core` (`settings`, `recent`, `startup`, `search_state`, `text`) and `crates/marknexia-files` (`settings_store`, `atomic_write`, `startup_probe`). The .NET sources are `src/Marknexia.Infrastructure/SettingsService.cs`, `src/Marknexia.Core/StartupFileResolver.cs`, `src/Marknexia.Core/DocumentSearchState.cs` and `MainWindow.RefreshRecentFiles`.
 

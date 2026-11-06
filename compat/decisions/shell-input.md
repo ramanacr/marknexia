@@ -1,6 +1,6 @@
 # Shell input: find in page, drag and drop, single instance, tab close and reorder
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-win32` (`find.rs`, `dragdrop.rs`, `single_instance.rs`, `window/input.rs`, the tab-strip parts of `accessibility.rs`) and `crates/marknexia-webview` (`protocol.rs` find messages, `find_adapter.js`, `ShellAccelerator`). The .NET sources are `src/Marknexia.App/MainWindow.Search.cs`, `MainWindow.xaml.cs` (`Root_DragOver`, `Root_Drop`, `OpenRepositoryFolderAsync`, tab close and reorder, `SelectAdjacentTab`, keyboard accelerators), `App.xaml.cs` (single instance and activation) and `src/Marknexia.Core/StartupFileResolver.cs`.
 

@@ -1,10 +1,11 @@
 //! Mandatory rendering parity gate. Every `compat/fixtures/v1/rendering`
 //! case (frozen .NET oracle output) is rendered and every expected field is
 //! compared exactly, including the complete templated page. A difference
-//! fails unless a `compat/decisions/*.md` file with status "proposed —
-//! requires Task 8 approval" records that exact candidate, case, field,
-//! expected value and actual value in a `parity-allowance` block. Stale
-//! allowances fail too.
+//! fails unless a `compat/decisions/*.md` file with status "approved —
+//! owner decision 2026-11-06 (G0)" (or "proposed — requires Task 8
+//! approval", for a record added later) records that exact candidate, case,
+//! field, expected value and actual value in a `parity-allowance` block.
+//! Stale allowances fail too.
 
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
@@ -15,7 +16,12 @@ use marknexia_rendering::{
 };
 use serde_json::{Value, json};
 
+/// Status of a record added after gate G0 and not yet approved.
 const PROPOSED_STATUS: &str = "proposed — requires Task 8 approval";
+/// Status of a record the owner approved at gate G0 (2026-11-06).
+const APPROVED_STATUS: &str = "approved — owner decision 2026-11-06 (G0)";
+/// The only statuses under which a parity allowance is accepted.
+const ALLOWANCE_STATUSES: [&str; 2] = [APPROVED_STATUS, PROPOSED_STATUS];
 const ALLOWANCE_OPEN: &str = "<!-- parity-allowance";
 const CASE_COUNT: usize = 7;
 
@@ -241,9 +247,11 @@ fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String
             actual: value("actual")?,
         });
     }
-    if !allowances.is_empty() && status_line(text) != Some(PROPOSED_STATUS) {
+    if !allowances.is_empty()
+        && !status_line(text).is_some_and(|status| ALLOWANCE_STATUSES.contains(&status))
+    {
         return Err(format!(
-            "{decision}: parity allowances require the line `Status: **{PROPOSED_STATUS}**`"
+            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
         ));
     }
     Ok(allowances)
@@ -424,9 +432,33 @@ fn gate_rejects_unlisted_and_stale_differences() {
     );
     let stale = gate("c", &[], std::slice::from_ref(&allowance)).unwrap_err();
     assert!(stale.contains("stale allowance"), "{stale}");
-    let text = "Status: **proposed — requires Task 8 approval**\n<!-- parity-allowance\ncandidate: c\ncase: k\npath: p\nexpected: \"a\"\nactual: absent\n-->";
-    assert_eq!(parse_allowances("d.md", text).unwrap().len(), 1);
-    assert!(parse_allowances("d.md", &text.replace("proposed", "approved")).is_err());
+    let block = "<!-- parity-allowance\ncandidate: c\ncase: k\npath: p\nexpected: \"a\"\nactual: absent\n-->";
+    let proposed = format!("Status: **{PROPOSED_STATUS}**\n{block}");
+    assert_eq!(parse_allowances("d.md", &proposed).unwrap().len(), 1);
+    // Any other status is rejected, including a near miss of either form.
+    assert!(parse_allowances("d.md", &proposed.replace("proposed", "approved")).is_err());
+    assert!(parse_allowances("d.md", &format!("Status: **approved**\n{block}")).is_err());
+    assert!(parse_allowances("d.md", block).is_err());
+    // Exactly one status line is required.
+    let doubled = format!("Status: **{PROPOSED_STATUS}**\n{proposed}");
+    assert!(parse_allowances("d.md", &doubled).is_err());
+}
+
+#[test]
+fn allowances_accept_the_g0_approved_status() {
+    let block = "<!-- parity-allowance\ncandidate: c\ncase: k\npath: p\nexpected: \"a\"\nactual: absent\n-->";
+    let approved = format!("Status: **{APPROVED_STATUS}**\n{block}");
+    assert_eq!(parse_allowances("d.md", &approved).unwrap().len(), 1);
+    let near_miss = approved.replace("(G0)", "(G1)");
+    assert!(
+        parse_allowances("d.md", &near_miss)
+            .unwrap_err()
+            .contains("require the line")
+    );
+    let doubled = format!("Status: **{APPROVED_STATUS}**\n{approved}");
+    assert!(parse_allowances("d.md", &doubled).is_err());
+    let mixed = format!("Status: **{PROPOSED_STATUS}**\n{approved}");
+    assert!(parse_allowances("d.md", &mixed).is_err());
 }
 
 #[test]

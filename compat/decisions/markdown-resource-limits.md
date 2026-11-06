@@ -1,6 +1,6 @@
 # Markdown parser nesting and output limits
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-markdown`, both parser candidates. These limits come from the review of `d8f0767`. Unbounded nesting overflowed a 1 MiB stack (`STATUS_STACK_OVERFLOW`, which cannot be caught). Unbounded output let alerts amplify input about 50×.
 

@@ -1,6 +1,6 @@
 # Navigation probe order, drive-root traversal and case folding
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-navigation` and `marknexia-files` path containment, for local destinations resolved against an absolute (canonical) repository root.
 

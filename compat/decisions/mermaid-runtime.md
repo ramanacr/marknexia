@@ -1,6 +1,6 @@
 # Mermaid runtime in the viewport (MER-1 to MER-5)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-webview` (`runtime`, `broker`, `policy::HostDocument`, `build.rs`) and `packaging/webview/mermaid.lock.json`. The page bytes come from `crates/marknexia-rendering` and are unchanged.
 

@@ -1,6 +1,6 @@
 # Marknexia Rust/Win32 Production Rewrite Plan
 
-Status: **draft.** Phase 1 is complete (integrated at 816d931; CI run 42154523108 green after one rerun). Phase 2 parity leftovers (CHROME-2/3: brand, tooltips, compact layout, Troubleshooting/SBOM dialogs, dark menu bar, copy anchor, reveal) are complete (e3617ce; CI run 42264732170 green, all native gates on x64 and ARM64). Everything that remains needs an owner gate (G0–G4) or a manual/clean-VM evidence host. Phase 7 tasks 2–3 (SPDX 2.3 SBOM, notices, unsigned portable preview ZIP built and verified in CI only) are complete (55b7c02; CI run 42234511054 green); signing, setup executable, MSIX and reference-hardware measurement wait for G3/G4 and the release policy. Phase 3 tasks 2–3 (Mermaid runtime, math parity) and Phase 5 (WebView2 missing runtime and user-initiated bootstrapper) are complete (integrated at 71442a7; CI run 42228154562 green, 9 native gates on x64 and ARM64); Phase 3 task 1 waits for G1, and the real bootstrapper install needs a clean-VM run. Phase 2 is complete (integrated at a7233de; CI run 42215611534 green, all native gates on x64 and ARM64; decision records CHROME-1–15 and shell-input proposed). Phase 1 ran in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
+Status: **draft.** Phase 1 is complete (integrated at 816d931; CI run 42154523108 green after one rerun). Phase 2 parity leftovers (CHROME-2/3: brand, tooltips, compact layout, Troubleshooting/SBOM dialogs, dark menu bar, copy anchor, reveal) are complete (e3617ce; CI run 42264732170 green, all native gates on x64 and ARM64). Everything that remains needs an owner gate (G0–G4) or a manual/clean-VM evidence host. The owner decided G0–G4 on 2026-11-06 (see Owner gates). Phase 7 tasks 2–3 (SPDX 2.3 SBOM, notices, unsigned portable preview ZIP built and verified in CI only) are complete (55b7c02; CI run 42234511054 green); signing, setup executable, MSIX and reference-hardware measurement wait for G3/G4 and the release policy. Phase 3 tasks 2–3 (Mermaid runtime, math parity) and Phase 5 (WebView2 missing runtime and user-initiated bootstrapper) are complete (integrated at 71442a7; CI run 42228154562 green, 9 native gates on x64 and ARM64); Phase 3 task 1 waits for G1, and the real bootstrapper install needs a clean-VM run. Phase 2 is complete (integrated at a7233de; CI run 42215611534 green, all native gates on x64 and ARM64; decision records CHROME-1–15 and shell-input proposed). Phase 1 ran in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
 Inputs: `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md` (architecture), `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md` (decision CONDITIONAL-GO, conditions C1–C6), `artifacts/rust-feasibility/manifest.json` (evidence index).
 Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
@@ -17,11 +17,11 @@ Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
 | Gate | Needed before | Decision |
 |---|---|---|
-| G0 | Any proposed decision record becomes approved; preview (Phase 8) | Accept CONDITIONAL-GO; approve or reject the five proposed `compat/decisions/*.md` files and the highlighting recommendation (C1) |
-| G1 | Phase 3 | Highlighting language set (C2): port ColorCode's languages, or approve a reduced set with a decision record |
-| G2 | Phase 6 | Update signing key creation and custody approved by the security owner (C5) |
-| G3 | Phase 7 | Declared reference hardware for x64 and ARM64 (C3) |
-| G4 | Phase 8 | Preview channel and side-by-side install policy |
+| G0 | Any proposed decision record becomes approved; preview (Phase 8) | Accept CONDITIONAL-GO; approve or reject the five proposed `compat/decisions/*.md` files and the highlighting recommendation (C1). **Approved — owner decision 2026-11-06:** CONDITIONAL-GO is accepted, and every existing `compat/decisions/*.md` record and the highlighting recommendation are approved as proposed (C1 satisfied). A record added later starts as proposed. |
+| G1 | Phase 3 | Highlighting language set (C2): port ColorCode's languages, or approve a reduced set with a decision record. **Owner decision 2026-11-06:** all ColorCode languages. |
+| G2 | Phase 6 | Update signing key creation and custody approved by the security owner (C5). **Owner decision 2026-11-06:** test keys only. |
+| G3 | Phase 7 | Declared reference hardware for x64 and ARM64 (C3). **Owner decision 2026-11-06:** the hosted GitHub runners (x64 and ARM64) are the reference hardware. |
+| G4 | Phase 8 | Preview channel and side-by-side install policy. **Owner decision 2026-11-06:** no merge and no release until the owner tests the preview ZIP. |
 | G5 | Phase 9 | Promotion: every design §13 release gate passes |
 | G6 | Phase 10 | Retire the .NET edition after the overlap period |
 

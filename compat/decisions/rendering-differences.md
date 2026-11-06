@@ -1,6 +1,6 @@
 # Rendering pipeline differences (REND-1 to REND-7)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-06 (G0)**
 
 Scope: `crates/marknexia-rendering` (`Renderer` over the pulldown-cmark parser). It reproduces the .NET `MarkdownRenderer`, `TemplateEngine`, `ColorCodeSyntaxHighlighter`, `MermaidDiagramRenderer` and `SimpleMathRenderer` at fixture revision `38b39f6`.
 

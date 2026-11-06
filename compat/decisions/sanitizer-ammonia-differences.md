@@ -1,6 +1,6 @@
 # Sanitizer differences: ammonia-based Rust policy vs .NET Ganss oracle
 
-Status: **proposed — requires Task 8 approval.** Nothing here changes a v1 expected result. The frozen fixtures under `compat/fixtures/v1/sanitizer/` stay as they are. Each difference below is asserted by name in `crates/marknexia-security/tests/parity_v1.rs` or `crates/marknexia-security/tests/hostile_properties.rs`, so none of them passes silently.
+Status: **approved — owner decision 2026-11-06 (G0)** Nothing here changes a v1 expected result. The frozen fixtures under `compat/fixtures/v1/sanitizer/` stay as they are. Each difference below is asserted by name in `crates/marknexia-security/tests/parity_v1.rs` or `crates/marknexia-security/tests/hostile_properties.rs`, so none of them passes silently.
 
 Oracle: `src/Marknexia.Security/HtmlSanitizerService.cs` (Ganss HtmlSanitizer 9.2.1039 on AngleSharp, with a regex pre-filter). Target: `crates/marknexia-security` (ammonia 4.2.4 / html5ever 0.40, with CSS decided on `cssparser` 0.38 tokens). ammonia was raised from 4.2.0 for RUSTSEC-2021-0157, RUSTSEC-2021-0158 and RUSTSEC-2026-0373. The policy never used ammonia's `filter_style_properties`, and it removes every SVG animation element, now including `animateColor`, with its content.
 
