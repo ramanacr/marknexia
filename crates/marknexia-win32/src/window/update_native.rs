@@ -48,7 +48,8 @@ use windows::{
             DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
             GetSecurityDescriptorDacl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
             PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-            TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+            TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenOwner,
+            TokenUser,
         },
         Storage::{
             FileSystem::{
@@ -158,18 +159,20 @@ pub(super) fn is_elevated() -> bool {
     queried.is_err() || elevation.TokenIsElevated != 0
 }
 
-/// The current user's SID bytes.
-fn current_user_sid() -> Option<Vec<u8>> {
+/// A SID from this process token: `TokenUser` (the user) or `TokenOwner`
+/// (the default owner of new objects: the user, or BUILTIN\Administrators
+/// in an elevated token). Both structures start with the SID pointer.
+fn token_sid(class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u8>> {
     let mut token = HANDLE::default();
     // SAFETY: as in `is_elevated`.
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
     let mut buffer = vec![0_u64; 64];
     let mut size = 0_u32;
-    // SAFETY: `buffer` holds 512 bytes, aligned for TOKEN_USER.
+    // SAFETY: `buffer` holds 512 bytes, aligned for TOKEN_USER/TOKEN_OWNER.
     let queried = unsafe {
         GetTokenInformation(
             token,
-            TokenUser,
+            class,
             Some(buffer.as_mut_ptr().cast()),
             (buffer.len() * 8) as u32,
             &mut size,
@@ -178,9 +181,59 @@ fn current_user_sid() -> Option<Vec<u8>> {
     // SAFETY: closes the token opened above exactly once.
     let _ = unsafe { CloseHandle(token) };
     queried.ok()?;
-    // SAFETY: filled by the call above; the SID points into `buffer`.
-    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: filled by the call above; TOKEN_USER.User.Sid and
+    // TOKEN_OWNER.Owner are the first field and point into `buffer`.
+    let sid = unsafe { *buffer.as_ptr().cast::<PSID>() };
     sid_bytes(sid)
+}
+
+/// The current user's SID bytes.
+fn current_user_sid() -> Option<Vec<u8>> {
+    token_sid(TokenUser)
+}
+
+/// The token's default owner for new objects.
+fn default_owner_sid() -> Option<Vec<u8>> {
+    token_sid(TokenOwner)
+}
+
+/// An acceptable folder owner: the user, or the token's default owner (an
+/// elevated token creates objects owned by BUILTIN\Administrators).
+fn is_own_owner(owner: &[u8]) -> bool {
+    current_user_sid().is_some_and(|user| user == owner)
+        || default_owner_sid().is_some_and(|default| default == owner)
+}
+
+/// Sets the folder's owner to the current user (permitted for the token's
+/// own user SID), so the owner-only DACL (`OW`) means the user even when
+/// an elevated token created the folder.
+fn set_owner_to_user(path: &Path) -> std::io::Result<()> {
+    let mut user = current_user_sid().ok_or(std::io::ErrorKind::PermissionDenied)?;
+    let wide = wide_path(path);
+    // SAFETY: NUL-terminated path; `user` is a valid SID buffer that
+    // outlives the call.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR::from_raw(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(PSID(user.as_mut_ptr().cast())),
+            None,
+            None,
+            None,
+        )
+    };
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+}
+
+/// Creates `path` with the protected owner-only DACL, owned by the user.
+pub(super) fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    create_owner_only_dir(path)?;
+    set_owner_to_user(path)
 }
 
 fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
@@ -291,7 +344,8 @@ fn owner_rights_sid() -> Option<Vec<u8>> {
     bytes
 }
 
-/// Not a reparse point, owned by the current user, with a protected DACL
+/// Not a reparse point, owned by the current user (or the token's default
+/// owner, when an elevated token created it), with a protected DACL
 /// whose every ACE allows only the current user or OWNER RIGHTS.
 pub(super) fn folder_is_private(path: &Path) -> bool {
     if is_reparse_point(path).unwrap_or(true) {
@@ -304,7 +358,7 @@ pub(super) fn folder_is_private(path: &Path) -> bool {
     ) else {
         return false;
     };
-    security.owner == user
+    is_own_owner(&security.owner)
         && security.protected
         && !security.aces.is_empty()
         && security.aces.iter().all(|ace| {
@@ -320,11 +374,11 @@ pub(super) fn secure_existing_dir(path: &Path) -> std::io::Result<()> {
     if is_reparse_point(path)? {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
-    let user = current_user_sid().ok_or(std::io::ErrorKind::PermissionDenied)?;
     let security = folder_security(path).ok_or(std::io::ErrorKind::PermissionDenied)?;
-    if security.owner != user {
+    if !is_own_owner(&security.owner) {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
+    set_owner_to_user(path)?;
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: static SDDL string; the descriptor is freed with LocalFree.
     unsafe {
@@ -455,7 +509,7 @@ pub(super) struct NativeStagePlatform;
 
 impl StagePlatform for NativeStagePlatform {
     fn create_private_dir(&self, path: &Path) -> std::io::Result<()> {
-        create_owner_only_dir(path)
+        create_private_dir(path)
     }
 
     fn secure_existing_dir(&self, path: &Path) -> std::io::Result<()> {
@@ -588,8 +642,13 @@ mod tests {
     #[test]
     fn owner_only_folders_are_private_and_inherited_ones_are_not() {
         let private = temp_folder("private");
-        create_owner_only_dir(&private).expect("owner-only folder");
+        // Works elevated too (GitHub runners): the owner is set to the user.
+        create_private_dir(&private).expect("owner-only folder");
         assert!(folder_is_private(&private));
+        assert_eq!(
+            folder_security(&private).unwrap().owner,
+            current_user_sid().unwrap()
+        );
         let plain = temp_folder("plain");
         std::fs::create_dir(&plain).unwrap();
         // An inherited %TEMP% DACL (SYSTEM, Administrators) is not private:
@@ -599,6 +658,12 @@ mod tests {
         std::fs::create_dir(plain.join("pending-old")).unwrap();
         secure_existing_dir(&plain).expect("re-secured");
         assert!(folder_is_private(&plain));
+        assert_eq!(
+            folder_security(&plain).unwrap().owner,
+            current_user_sid().unwrap()
+        );
+        // Elevated or not, the test process never forwards (UPD-12).
+        let _ = is_elevated();
         assert!(!folder_is_private(&plain.join("missing")));
         assert!(secure_existing_dir(&plain.join("missing")).is_err());
         let _ = std::fs::remove_dir_all(&private);
