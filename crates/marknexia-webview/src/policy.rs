@@ -119,6 +119,8 @@ pub struct HostDocument {
     /// `Content-Security-Policy` response header for the document itself.
     document_csp: String,
     assets: BTreeMap<String, Asset>,
+    /// The page loads the pinned Mermaid runtime, so the broker serves it.
+    mermaid_runtime: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,6 +166,7 @@ impl HostDocument {
         if rendered.page_bytes() > MAX_DOCUMENT_BYTES - MAX_TITLE_MARKUP_BYTES {
             return Err(DocumentError::TooLarge);
         }
+        let mermaid_runtime = rendered.has_mermaid();
         let mut page = rendered.page_html();
         drop(rendered);
         let origin = identity.origin();
@@ -195,6 +198,12 @@ impl HostDocument {
         if !head.contains(&expected_meta) || !head.contains(&expected_base) {
             return Err(DocumentError::IdentityMismatch);
         }
+        // The runtime is served only to a page whose template loads it with
+        // this identity's nonce (.NET maps `marknexia.assets` only then).
+        // The tag follows the body, which is sanitized and cannot hold one.
+        if mermaid_runtime != page[head_end..].contains(&mermaid_script_tag(identity)) {
+            return Err(DocumentError::IdentityMismatch);
+        }
         // The frozen .NET template allows `http:` and `https:` images. The
         // response header allows `https:` only; browsers enforce both
         // policies, so plain-HTTP images stay blocked.
@@ -222,6 +231,7 @@ impl HostDocument {
             html: Arc::new(page.into_bytes()),
             document_csp: format!("{csp}; frame-ancestors 'none'"),
             assets: BTreeMap::new(),
+            mermaid_runtime,
         };
         document.validate()?;
         Ok(document)
@@ -333,6 +343,7 @@ impl HostDocument {
             html: Arc::new(html),
             document_csp: DEFAULT_RESPONSE_CSP.to_owned(),
             assets,
+            mermaid_runtime: false,
         };
         document.validate()?;
         Ok(document)
@@ -340,6 +351,14 @@ impl HostDocument {
 
     fn broker(&self) -> TabResourceBroker {
         TabResourceBroker::with_origin(self.tab_id, self.origin.clone())
+            .with_mermaid_runtime(self.mermaid_runtime)
+    }
+
+    /// The page loads the pinned Mermaid runtime, which the broker then
+    /// serves to it at [`crate::runtime::MERMAID_RUNTIME_URI`].
+    #[must_use]
+    pub const fn loads_mermaid_runtime(&self) -> bool {
+        self.mermaid_runtime
     }
 
     #[must_use]
@@ -428,6 +447,10 @@ impl HostDocument {
                 .get(&relative_path)
                 .map(|asset| ResponseSpec::ok(asset.kind.content_type(), asset.as_bytes()))
                 .unwrap_or_else(ResponseSpec::forbidden),
+            BrokerDecision::BundledRuntime(runtime) => ResponseSpec {
+                shared_body: Some(runtime.shared()),
+                ..ResponseSpec::ok(runtime.content_type(), runtime.bytes())
+            },
             BrokerDecision::Deny { status: 405 } => ResponseSpec::method_not_allowed(),
             BrokerDecision::Deny { .. } => ResponseSpec::forbidden(),
         }
@@ -522,6 +545,15 @@ fn rendered_page_csp(identity: &PageIdentity, remote_images: bool, template_http
     };
     format!(
         "default-src 'none'; base-uri {origin}; script-src 'nonce-{nonce}' https://marknexia.assets; style-src 'unsafe-inline'; img-src {origin} data:{remote}; font-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'"
+    )
+}
+
+/// The template's runtime tag for `identity` (.NET `TemplateEngine`).
+fn mermaid_script_tag(identity: &PageIdentity) -> String {
+    format!(
+        "<script src=\"{}\" nonce=\"{}\"></script>",
+        crate::runtime::MERMAID_RUNTIME_URI,
+        identity.nonce()
     )
 }
 

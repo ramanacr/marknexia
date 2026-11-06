@@ -2,6 +2,8 @@
 
 use percent_encoding::percent_decode_str;
 
+pub use crate::runtime::{BundledRuntime, MERMAID_RUNTIME_URI};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Document,
@@ -23,8 +25,14 @@ pub struct BrokerRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerDecision {
     Document,
-    LocalAsset { relative_path: String },
-    Deny { status: u16 },
+    LocalAsset {
+        relative_path: String,
+    },
+    /// A pinned runtime bundled with the application (see [`crate::runtime`]).
+    BundledRuntime(BundledRuntime),
+    Deny {
+        status: u16,
+    },
 }
 
 pub trait ResourceBroker {
@@ -35,6 +43,9 @@ pub trait ResourceBroker {
 pub struct TabResourceBroker {
     tab_id: u64,
     origin: String,
+    /// The document's page loads the Mermaid runtime (.NET maps
+    /// `marknexia.assets` only for such a page).
+    mermaid_runtime: bool,
 }
 
 impl TabResourceBroker {
@@ -43,13 +54,26 @@ impl TabResourceBroker {
         Self {
             tab_id,
             origin: format!("https://tab-{tab_id}.marknexia.invalid"),
+            mermaid_runtime: false,
         }
     }
 
     /// A broker for a document served from its own virtual origin (a rendered
     /// page's identity origin). `origin` is trusted host-generated text.
     pub(crate) fn with_origin(tab_id: u64, origin: String) -> Self {
-        Self { tab_id, origin }
+        Self {
+            tab_id,
+            origin,
+            mermaid_runtime: false,
+        }
+    }
+
+    /// Also serves the pinned Mermaid runtime at
+    /// [`MERMAID_RUNTIME_URI`] to this tab's page, as a script only.
+    #[must_use]
+    pub fn with_mermaid_runtime(mut self, enabled: bool) -> Self {
+        self.mermaid_runtime = enabled;
+        self
     }
 
     #[must_use]
@@ -73,6 +97,17 @@ impl ResourceBroker for TabResourceBroker {
         }
         if request.kind == ResourceKind::Document && request.uri == self.document_uri() {
             return BrokerDecision::Document;
+        }
+        // .NET `IsBundledRuntimeRequest`: a script request for exactly this
+        // URI. WebView2 reports the URI normalized (lower-case scheme and
+        // host), so an exact comparison suffices; a query or another path on
+        // the runtime host is denied.
+        if request.uri == MERMAID_RUNTIME_URI {
+            return if self.mermaid_runtime && request.kind == ResourceKind::Script {
+                BrokerDecision::BundledRuntime(BundledRuntime::Mermaid)
+            } else {
+                BrokerDecision::Deny { status: 403 }
+            };
         }
         let Some(raw_path) = request
             .uri

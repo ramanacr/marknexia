@@ -204,3 +204,235 @@ fn a_page_rendered_with_remote_images_must_match_the_setting_and_allows_https_on
             .contains(&format!("img-src {origin} data:;"))
     );
 }
+
+#[test]
+fn a_page_with_a_diagram_gets_the_pinned_mermaid_runtime_and_nothing_else() {
+    use marknexia_webview::runtime::{BundledRuntime, MERMAID_RUNTIME_URI, MERMAID_VERSION};
+    let identity = identity(0x6D);
+    let rendered = render("```mermaid\ngraph TD\nA-->B\n```\n", identity);
+    assert!(rendered.has_mermaid());
+    let document = HostDocument::from_rendered(9, 1, "d.md", rendered, &identity, false).unwrap();
+    assert!(document.loads_mermaid_runtime());
+    let page = html(&document);
+    // The runtime tag carries the page nonce and follows the body; the page
+    // policy allows exactly that origin for scripts.
+    assert!(page.contains(&format!(
+        "  </div>\n  <script src=\"{MERMAID_RUNTIME_URI}\" nonce=\"{}\"></script>\n",
+        identity.nonce()
+    )));
+    assert!(document.document_csp().contains(&format!(
+        "script-src 'nonce-{}' https://marknexia.assets;",
+        identity.nonce()
+    )));
+
+    let script = |uri: &str, tab: u64, kind: ResourceKind, method: &str| {
+        let response = document.resolve(&BrokerRequest {
+            method,
+            uri,
+            controller_tab_id: tab,
+            kind,
+        });
+        (
+            response.status,
+            response.content_type,
+            response.body.len(),
+            response.shared_body.is_some(),
+        )
+    };
+    let served = script(MERMAID_RUNTIME_URI, 9, ResourceKind::Script, "GET");
+    assert_eq!(
+        served,
+        (
+            200,
+            "text/javascript; charset=utf-8",
+            BundledRuntime::Mermaid.bytes().len(),
+            true
+        )
+    );
+    let response = document.resolve(&BrokerRequest {
+        method: "GET",
+        uri: MERMAID_RUNTIME_URI,
+        controller_tab_id: 9,
+        kind: ResourceKind::Script,
+    });
+    assert_eq!(response.content_security_policy, DEFAULT_RESPONSE_CSP);
+    assert_eq!(response.body, BundledRuntime::Mermaid.bytes());
+    // Two responses stream from one shared buffer.
+    let again = document.resolve(&BrokerRequest {
+        method: "GET",
+        uri: MERMAID_RUNTIME_URI,
+        controller_tab_id: 9,
+        kind: ResourceKind::Script,
+    });
+    assert!(std::ptr::eq(
+        response.shared_body.unwrap().as_ptr(),
+        again.shared_body.unwrap().as_ptr()
+    ));
+    assert!(String::from_utf8_lossy(&BundledRuntime::Mermaid.bytes()[..4096]).contains("mermaid"));
+    let text = String::from_utf8_lossy(BundledRuntime::Mermaid.bytes());
+    assert!(text.contains(&format!("\"{MERMAID_VERSION}\"")));
+    assert!(
+        text.contains("\r\n"),
+        "served in the CRLF form .NET extracts"
+    );
+
+    // Only a GET script request from this tab, at exactly this URI.
+    for (uri, tab, kind, method, status) in [
+        (MERMAID_RUNTIME_URI, 9, ResourceKind::Image, "GET", 403),
+        (MERMAID_RUNTIME_URI, 9, ResourceKind::Document, "GET", 403),
+        (MERMAID_RUNTIME_URI, 9, ResourceKind::Other, "GET", 403),
+        (MERMAID_RUNTIME_URI, 9, ResourceKind::Stylesheet, "GET", 403),
+        (MERMAID_RUNTIME_URI, 10, ResourceKind::Script, "GET", 403),
+        (MERMAID_RUNTIME_URI, 9, ResourceKind::Script, "POST", 405),
+        (
+            "https://marknexia.assets/mermaid.min.js?v=1",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/mermaid.min.js#x",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/mermaid.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/bridge.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "http://marknexia.assets/mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets.evil/mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets:444/mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://user@marknexia.assets/mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/MERMAID.MIN.JS",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets/%6dermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://marknexia.assets//mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+        (
+            "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js",
+            9,
+            ResourceKind::Script,
+            "GET",
+            403,
+        ),
+    ] {
+        assert_eq!(
+            script(uri, tab, kind, method).0,
+            status,
+            "{uri} {kind:?} {method} tab {tab}"
+        );
+    }
+}
+
+#[test]
+fn a_page_without_a_diagram_never_gets_the_runtime() {
+    use marknexia_webview::runtime::MERMAID_RUNTIME_URI;
+    for source in [
+        "# No diagrams\n",
+        // Diagrams over the limits render as source fallbacks without the
+        // runtime (.NET `hasMermaid` stays false).
+        &format!("```mermaid\n{}\n```\n", "a".repeat(1024 * 1024 + 1)),
+        // Raw HTML cannot add the runtime tag: the sanitizer removes it.
+        "<script src=\"https://marknexia.assets/mermaid.min.js\"></script>\n",
+    ] {
+        let identity = identity(0x41);
+        let rendered = render(source, identity);
+        assert!(!rendered.has_mermaid());
+        let document =
+            HostDocument::from_rendered(3, 1, "x.md", rendered, &identity, false).unwrap();
+        assert!(!document.loads_mermaid_runtime());
+        assert!(!html(&document).contains(MERMAID_RUNTIME_URI));
+        let response = document.resolve(&BrokerRequest {
+            method: "GET",
+            uri: MERMAID_RUNTIME_URI,
+            controller_tab_id: 3,
+            kind: ResourceKind::Script,
+        });
+        assert_eq!(response.status, 403);
+    }
+    // Diagrams turned off: fallbacks, no runtime.
+    let identity = identity(0x42);
+    let mut context = RenderContext::new(AppTheme::System, identity);
+    context.enable_diagrams = false;
+    let rendered = Renderer::new()
+        .render("```mermaid\ngraph TD\nA-->B\n```\n", &context)
+        .unwrap();
+    assert!(!rendered.has_mermaid());
+    let document = HostDocument::from_rendered(3, 1, "x.md", rendered, &identity, false).unwrap();
+    assert!(!document.loads_mermaid_runtime());
+    assert!(html(&document).contains("diagram rendering is disabled for this document"));
+}
+
+#[test]
+fn trusted_and_generated_documents_never_get_the_runtime() {
+    use marknexia_webview::runtime::MERMAID_RUNTIME_URI;
+    let document = marknexia_webview::probe::document(7, 1);
+    assert!(!document.loads_mermaid_runtime());
+    let response = document.resolve(&BrokerRequest {
+        method: "GET",
+        uri: MERMAID_RUNTIME_URI,
+        controller_tab_id: 7,
+        kind: ResourceKind::Script,
+    });
+    assert_eq!(response.status, 403);
+}

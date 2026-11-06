@@ -207,3 +207,57 @@ fn rejects_document_owned_script_subresources() {
         BrokerDecision::Deny { status: 403 }
     );
 }
+
+#[test]
+fn the_mermaid_runtime_is_served_only_when_enabled_and_only_as_a_script() {
+    use marknexia_webview::broker::{BundledRuntime, MERMAID_RUNTIME_URI};
+    let mut script = request("GET", MERMAID_RUNTIME_URI, 7);
+    script.kind = ResourceKind::Script;
+    assert_eq!(
+        broker().resolve(&script),
+        BrokerDecision::Deny { status: 403 }
+    );
+    let enabled = broker().with_mermaid_runtime(true);
+    assert_eq!(
+        enabled.resolve(&script),
+        BrokerDecision::BundledRuntime(BundledRuntime::Mermaid)
+    );
+    for kind in [
+        ResourceKind::Document,
+        ResourceKind::Image,
+        ResourceKind::Stylesheet,
+        ResourceKind::Other,
+    ] {
+        let mut other = script;
+        other.kind = kind;
+        assert_eq!(
+            enabled.resolve(&other),
+            BrokerDecision::Deny { status: 403 },
+            "{kind:?}"
+        );
+    }
+    let mut cross_tab = script;
+    cross_tab.controller_tab_id = 8;
+    assert_eq!(
+        enabled.resolve(&cross_tab),
+        BrokerDecision::Deny { status: 403 }
+    );
+    let mut post = script;
+    post.method = "POST";
+    assert_eq!(enabled.resolve(&post), BrokerDecision::Deny { status: 405 });
+    // The runtime host serves nothing else, and the tab origin cannot alias it.
+    for uri in [
+        "https://marknexia.assets/mermaid.min.js?x",
+        "https://marknexia.assets/probe.js",
+        "https://tab-7.marknexia.invalid/assets/mermaid.min.js",
+        "https://tab-7.marknexia.invalid/mermaid.min.js",
+    ] {
+        let mut other = script;
+        other.uri = uri;
+        assert_eq!(
+            enabled.resolve(&other),
+            BrokerDecision::Deny { status: 403 },
+            "{uri}"
+        );
+    }
+}

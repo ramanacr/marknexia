@@ -23,6 +23,7 @@ pub mod policy;
 pub mod probe;
 pub mod protocol;
 pub mod recovery;
+pub mod runtime;
 #[cfg(windows)]
 pub mod session;
 #[cfg(windows)]

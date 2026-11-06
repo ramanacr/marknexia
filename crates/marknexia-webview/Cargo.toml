@@ -15,3 +15,7 @@ windows-sys = { version = "=0.61.2", features = ["Win32_System_Com"] }
 webview2-com = "=0.39.1"
 windows-core = "=0.62.2"
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+# Already in the workspace; reads packaging/webview/mermaid.lock.json.
+serde_json.workspace = true
