@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Oracle generator for crates/marknexia-rendering/tests/oracle/math.v1.json.
+    It runs the unmodified .NET MarkdownRenderer (SimpleMathRenderer) and is
+    not part of any .NET solution or release. See tests/math_oracle.rs.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\..\src\Marknexia.Core\Marknexia.Core.csproj" />
+    <ProjectReference Include="..\..\..\..\..\src\Marknexia.Rendering\Marknexia.Rendering.csproj" />
+  </ItemGroup>
+</Project>
