@@ -1929,9 +1929,9 @@ type TreeSnapshot = (TreeNode, Vec<(usize, TreeNode)>);
 /// set to static text. Runs after the STA is entered; without COM the
 /// controls keep the platform defaults.
 fn annotate_controls(state: &Rc<RefCell<AppState>>) {
-    let (controls, selector) = {
+    let (controls, shell) = {
         let state = state.borrow();
-        (state.chrome.controls, state.controls.map(|c| c.sidebar))
+        (state.chrome.controls, state.controls)
     };
     let Some(controls) = controls else {
         return;
@@ -1949,8 +1949,11 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
         (controls.sidebar.splitter, "Resize sidebar"),
         (controls.toolbar.theme, "Theme"),
     ];
-    if let Some(selector) = selector {
-        named.push((selector, "Sidebar view"));
+    if let Some(shell) = shell {
+        named.push((shell.sidebar, "Sidebar view"));
+        // An edit control is named by a preceding label, which the find bar
+        // has none of (.NET `SearchInputBox` name).
+        named.push((shell.find, "Find in document"));
     }
     for (window, name) in named {
         set_accessible_name(&names, window, name);
