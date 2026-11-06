@@ -8,6 +8,8 @@
 //!   WebView2 processes have exited.
 //! - Keys are sent only after re-checking, immediately before `SendInput`,
 //!   that the launched shell owns the foreground.
+//! - The settings file (`MARKNEXIA_SETTINGS_PATH`) lives in the same
+//!   temporary folder, so a test never reads or writes the user's settings.
 
 #![allow(dead_code)] // Each test file uses a different subset.
 
@@ -54,6 +56,16 @@ pub struct ShellProcess {
 
 impl ShellProcess {
     pub fn launch(executable: &OsStr, args: &[&OsStr]) -> Self {
+        Self::launch_with_settings(executable, args, None)
+    }
+
+    /// Like [`Self::launch`], with `settings` written to the isolated
+    /// settings file before the shell starts.
+    pub fn launch_with_settings(
+        executable: &OsStr,
+        args: &[&OsStr],
+        settings: Option<&[u8]>,
+    ) -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -67,9 +79,14 @@ impl ShellProcess {
         // create_dir, not create_dir_all: the name is unique, so this fails
         // rather than adopt an existing folder that Drop would then delete.
         std::fs::create_dir(&profile).expect("create test WebView2 profile");
+        let settings_path = profile.join("settings.json");
+        if let Some(settings) = settings {
+            std::fs::write(&settings_path, settings).expect("write test settings");
+        }
         let child = Command::new(executable)
             .args(args)
             .env("MARKNEXIA_WEBVIEW2_USER_DATA", &profile)
+            .env("MARKNEXIA_SETTINGS_PATH", &settings_path)
             .spawn()
             .expect("launch shell");
         Self { child, profile }
@@ -77,6 +94,11 @@ impl ShellProcess {
 
     pub fn id(&self) -> u32 {
         self.child.id()
+    }
+
+    /// The isolated settings file the shell reads and writes.
+    pub fn settings_path(&self) -> PathBuf {
+        self.profile.join("settings.json")
     }
 }
 

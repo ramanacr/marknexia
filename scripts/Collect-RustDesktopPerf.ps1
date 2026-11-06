@@ -146,6 +146,8 @@ function Test-EventSignaled([string]$Name) {
 
 function Invoke-Run([string]$UserData) {
     $env:MARKNEXIA_WEBVIEW2_USER_DATA = $UserData
+    # Default settings for every run: never the user's settings file.
+    $env:MARKNEXIA_SETTINGS_PATH = Join-Path $UserData 'settings.json'
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $process = if ($documentPath) {
         Start-Process -FilePath $exe -ArgumentList "`"$documentPath`"" -PassThru
@@ -198,6 +200,7 @@ function Invoke-Run([string]$UserData) {
         }
         $process.Dispose()
         Remove-Item Env:\MARKNEXIA_WEBVIEW2_USER_DATA -ErrorAction SilentlyContinue
+        Remove-Item Env:\MARKNEXIA_SETTINGS_PATH -ErrorAction SilentlyContinue
     }
 }
 
