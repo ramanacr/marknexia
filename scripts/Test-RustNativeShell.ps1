@@ -73,6 +73,16 @@ public static class RustShellWindowProbe {
     }
 }
 '@
+# A local run never touches the user's settings or WebView2 profile.
+$isolated = Join-Path ([IO.Path]::GetTempPath()) ("marknexia-shell-contract-$PID-" + [Guid]::NewGuid().ToString('N'))
+$profileDir = Join-Path $isolated 'WebView2'
+[void](New-Item -ItemType Directory -Path $profileDir)
+$previousSettings = $env:MARKNEXIA_SETTINGS_PATH
+$previousProfile = $env:MARKNEXIA_WEBVIEW2_USER_DATA
+$env:MARKNEXIA_SETTINGS_PATH = Join-Path $isolated 'settings.json'
+$env:MARKNEXIA_WEBVIEW2_USER_DATA = $profileDir
+$process = $null
+try {
 $process = Start-Process -FilePath $resolved -PassThru
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -121,4 +131,14 @@ finally {
         }
     }
     $process.Dispose()
+}
+}
+finally {
+    $env:MARKNEXIA_SETTINGS_PATH = $previousSettings
+    $env:MARKNEXIA_WEBVIEW2_USER_DATA = $previousProfile
+    # WebView2 processes release the profile shortly after the shell exits.
+    for ($i = 0; $i -lt 60 -and (Test-Path $isolated); $i++) {
+        Remove-Item -LiteralPath $isolated -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $isolated) { Start-Sleep -Milliseconds 500 }
+    }
 }

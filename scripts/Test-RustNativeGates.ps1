@@ -108,6 +108,12 @@ Invoke-Gate 'uia-native-accessibility' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_accessibility -- --ignored --test-threads=1 --nocapture
 } -Attempts 3
+# Toolbar, menu, sidebar, repository tree, settings and diagnostics bar
+# through the native controls' UIA proxies (isolated settings and profile).
+Invoke-Gate 'uia-native-chrome' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_chrome -- --ignored --test-threads=1 --nocapture
+} -Attempts 3
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
 }
