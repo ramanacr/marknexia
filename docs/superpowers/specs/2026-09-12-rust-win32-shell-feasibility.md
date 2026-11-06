@@ -536,3 +536,16 @@ proposed).
   window is still the shell's; scrolling needs a loaded document; high
   contrast uses ButtonText on ButtonFace; new diagnostics raise a UIA
   notification. Still compiled only: the workstation stayed locked.
+- **First native run (CI 42199272748): all five chrome tests failed** on x64
+  and ARM64, waiting for the outline list, the repository tree and the
+  settings warning by name. List boxes, tree views, combo boxes and tab
+  controls do not take their accessible name from the window text, and an
+  owner-drawn static is reported as a graphic. Fix: the chrome sets names
+  (and the message's static-text role) as `IAccPropServices` annotations
+  after the STA is entered. The tests now find controls by AutomationId
+  (the control ID), assert the names, and dump the shell's UIA subtree
+  (depth 4) on every timeout. The ARM64 `uia-smoke` Ctrl+Tab failure is
+  attributed, unconfirmed, to the CI-only synthetic Alt unlock reaching the
+  shell, whose new menu bar then entered keyboard menu mode and took the
+  keys; `activate_attempt` now leaves menu mode with Escape (foreground
+  guarded). Awaiting the next CI run.
