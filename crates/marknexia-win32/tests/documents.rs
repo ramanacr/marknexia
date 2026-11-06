@@ -13,8 +13,8 @@ use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{PageIdentity, RenderError};
 use marknexia_win32::documents::{
     OpenError, RenderJob, RenderOutcome, RenderPool, RenderTickets, SourceEncoding, StartupSignal,
-    StartupTracker, build_document, check_document_path, decode_source, read_source, startup_paths,
-    tab_title,
+    StartupTracker, build_document, build_document_with_outline, check_document_path,
+    decode_source, read_source, startup_paths, tab_title,
 };
 
 fn os(values: &[&str]) -> Vec<OsString> {
@@ -286,6 +286,7 @@ fn job(tab_id: u64, path: PathBuf) -> (RenderJob, Arc<AtomicBool>) {
             path,
             title: format!("doc-{tab_id}.md"),
             theme: AppTheme::System,
+            allow_remote_assets: false,
             cancelled: Arc::clone(&cancelled),
         },
         cancelled,
@@ -308,6 +309,40 @@ fn build_document_produces_the_hosted_page_off_the_ui_thread() {
         build_document(&job, || Err("no entropy".to_owned()))
             .is_err_and(|error| matches!(error, OpenError::Identity(_)))
     );
+}
+
+#[test]
+fn render_jobs_return_the_outline_and_apply_the_remote_image_setting() {
+    let path = std::env::temp_dir().join(format!(
+        "marknexia-outline-{}-{:?}.md",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(
+        &path,
+        "# Title
+
+## Usage *now*
+
+![remote](https://example.com/a.png)
+",
+    )
+    .unwrap();
+    let (mut job, _) = job(4, path.clone());
+    let (blocked, outline) = build_document_with_outline(&job, fixed_identity).unwrap();
+    let entries: Vec<(&str, &str, u8)> = outline
+        .iter()
+        .map(|entry| (entry.text.as_str(), entry.slug.as_str(), entry.level))
+        .collect();
+    assert_eq!(
+        entries,
+        [("Title", "title", 1), ("Usage now", "usage-now", 2)]
+    );
+    assert!(!String::from_utf8_lossy(blocked.html()).contains("https://example.com/a.png"));
+    job.allow_remote_assets = true;
+    let (allowed, _) = build_document_with_outline(&job, fixed_identity).unwrap();
+    assert!(String::from_utf8_lossy(allowed.html()).contains("https://example.com/a.png"));
+    let _ = std::fs::remove_file(path);
 }
 
 fn panicking_identity() -> Result<PageIdentity, String> {

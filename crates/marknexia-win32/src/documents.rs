@@ -23,6 +23,8 @@ use marknexia_files::{
 use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, RenderError, Renderer};
 use marknexia_webview::policy::HostDocument;
 
+use crate::chrome_model::OutlineEntry;
+
 /// Paths to open from the command line (arguments after the program name).
 /// Every non-empty argument is a path; one leading `--` separator is dropped.
 /// `file:///` and `file://` arguments are converted like the .NET
@@ -371,6 +373,15 @@ pub fn build_document(
     job: &RenderJob,
     identity: impl FnOnce() -> Result<PageIdentity, String>,
 ) -> Result<HostDocument, OpenError> {
+    build_document_with_outline(job, identity).map(|(document, _)| document)
+}
+
+/// [`build_document`] plus the document's headings for the sidebar outline
+/// (.NET `RenderedDocument.Headings`).
+pub fn build_document_with_outline(
+    job: &RenderJob,
+    identity: impl FnOnce() -> Result<PageIdentity, String>,
+) -> Result<(HostDocument, Vec<OutlineEntry>), OpenError> {
     let identity = identity().map_err(OpenError::Identity)?;
     let renderer = Renderer::new();
     let source = read_source(
@@ -378,11 +389,25 @@ pub fn build_document(
         |size| renderer.check_source_size(size),
         renderer.limits().max_source_bytes,
     )?;
+    let mut context = RenderContext::new(job.theme, identity);
+    // The .NET `AllowRemoteAssets` setting selects the sanitizer's
+    // `RemoteImagePolicy` (`AllowHttps` or `Blank`).
+    context.allow_remote_assets = job.allow_remote_assets;
     let rendered = renderer
-        .render(&source, &RenderContext::new(job.theme, identity))
+        .render(&source, &context)
         .map_err(OpenError::Render)?;
     drop(source);
+    let outline = rendered
+        .headings()
+        .iter()
+        .map(|heading| OutlineEntry {
+            text: heading.text.as_str().to_owned(),
+            slug: heading.slug_id.as_str().to_owned(),
+            level: heading.level,
+        })
+        .collect();
     HostDocument::from_rendered(job.tab_id, 1, &job.title, rendered, &identity)
+        .map(|document| (document, outline))
         .map_err(|error| OpenError::Display(format!("{error:?}")))
 }
 
@@ -535,6 +560,8 @@ pub struct RenderJob {
     pub path: PathBuf,
     pub title: String,
     pub theme: AppTheme,
+    /// .NET `RenderContext.AllowRemoteAssets` (the persisted setting).
+    pub allow_remote_assets: bool,
     pub cancelled: Arc<AtomicBool>,
 }
 
@@ -543,6 +570,8 @@ pub struct RenderOutcome {
     pub tab_id: u64,
     pub ticket: u64,
     pub result: Result<HostDocument, OpenError>,
+    /// The document's headings; empty when the render failed.
+    pub outline: Vec<OutlineEntry>,
 }
 
 const _: () = {
@@ -643,8 +672,10 @@ impl RenderPool {
                         notify: &notify,
                         done: false,
                     };
-                    let result = catch_unwind(AssertUnwindSafe(|| build_document(&job, identity)))
-                        .unwrap_or(Err(OpenError::Panicked));
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        build_document_with_outline(&job, identity)
+                    }))
+                    .unwrap_or(Err(OpenError::Panicked));
                     if job.cancelled.load(Ordering::Acquire) {
                         reply.done = true;
                     } else {
@@ -668,12 +699,17 @@ struct Reply<'a> {
 }
 
 impl Reply<'_> {
-    fn send(&mut self, result: Result<HostDocument, OpenError>) {
+    fn send(&mut self, result: Result<(HostDocument, Vec<OutlineEntry>), OpenError>) {
         self.done = true;
+        let (result, outline) = match result {
+            Ok((document, outline)) => (Ok(document), outline),
+            Err(error) => (Err(error), Vec::new()),
+        };
         let outcome = RenderOutcome {
             tab_id: self.tab_id,
             ticket: self.ticket,
             result,
+            outline,
         };
         if self.results.send(outcome).is_ok() {
             (self.notify)();

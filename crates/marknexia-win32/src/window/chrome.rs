@@ -1,0 +1,1783 @@
+//! Shell chrome ported from the .NET `MainWindow`: toolbar and menu bar,
+//! sidebar (outline, repository tree, recent files, splitter), diagnostics
+//! bar and the settings that persist them.
+//!
+//! `window.rs` calls into this module through a few hooks (`install`,
+//! `after_startup`, `handle_message`, `translate_message`, `note_render`,
+//! `filter_render_outcome`, `layout_inputs`, `layout_children`,
+//! `tabs_changed`, `theme_changed`, `after_poll`, `route_accelerator`).
+//!
+//! Invariants kept from `window.rs`:
+//! - `AppState` stays the one `Rc<RefCell<_>>` in `GWLP_USERDATA`;
+//! - no `RefCell` borrow is held while a control is sent a message, a dialog
+//!   runs, or WebView2 is called: data is copied out first;
+//! - control notifications (`WM_COMMAND`, `WM_NOTIFY`) only queue an action
+//!   and post `WM_CHROME_ACTION`; the action runs from the message loop, as
+//!   the Open dialog does (`WM_OPEN_DIALOG`).
+
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    ffi::c_void,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+};
+
+use marknexia_core::{contracts::DiagnosticSeverity, settings::ThemePreference as StoredTheme};
+use marknexia_files::{
+    repository::{ScanError, ScanLimits, build_repository_tree, detect_repository_root},
+    settings_store::SettingsStore,
+};
+use marknexia_webview::host::ShellAccelerator;
+use windows::{
+    Win32::{
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+        Graphics::Gdi::{DeleteObject, HFONT, HGDIOBJ, InvalidateRect},
+        UI::{
+            Controls::{DRAWITEMSTRUCT, HTREEITEM, NMHDR, NMTREEVIEWW, SetWindowTheme},
+            Input::KeyboardAndMouse::{
+                EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN,
+                VK_SHIFT, VK_SPACE, VK_TAB,
+            },
+            WindowsAndMessaging::{
+                CheckMenuItem, GetNextDlgTabItem, HMENU, HWND_TOP, IsChild, MF_BYCOMMAND,
+                MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
+                WM_APP, WM_COMMAND, WM_DRAWITEM, WM_KEYDOWN, WM_NOTIFY, WM_SYSKEYDOWN,
+            },
+        },
+    },
+    core::{PCWSTR, w},
+};
+
+use super::{
+    AppState, ShellControls, WM_OPEN_DIALOG, WindowError, app_state_handle,
+    diagnostics::{self, DiagnosticsControls},
+    dialogs, execute_command, move_child, open_document, palette, reflow, refresh_status,
+    restore_session, select_tab_id, settings_bridge, sidebar, start_render, take_session,
+    toolbar::{self, Toolbar},
+    update_theme,
+};
+use crate::{
+    chrome_model::{
+        ChromeCommand, DiagnosticsBar, OutlineEntry, REPOSITORY_INCOMPLETE_NOTICE, SidebarMode,
+        SidebarResize, TabLocation, TreeArena, TreeNode, clamp_sidebar_width, remote_assets_notice,
+        repository_header, resize_sidebar, route_chrome_key, same_document_path, sidebar_width_dip,
+    },
+    documents::OpenError,
+    keyboard::ShellCommand,
+    layout::{Dip, PixelRect, ShellLayout},
+    theme::{EffectiveTheme, ThemePreference},
+};
+
+/// Runs queued chrome actions outside the control notification.
+const WM_CHROME_ACTION: u32 = WM_APP + 0x40;
+/// A repository worker queued a result.
+const WM_CHROME_WORKER: u32 = WM_APP + 0x41;
+
+pub(super) const ID_TOGGLE_SIDEBAR: usize = 2001;
+pub(super) const ID_BACK: usize = 2002;
+pub(super) const ID_FORWARD: usize = 2003;
+pub(super) const ID_RELOAD: usize = 2004;
+pub(super) const ID_OPEN_FOLDER: usize = 2005;
+pub(super) const ID_THEME_LABEL: usize = 2006;
+pub(super) const ID_THEME: usize = 2007;
+pub(super) const ID_SIDEBAR_HEADER: usize = 2010;
+pub(super) const ID_OUTLINE: usize = 2011;
+pub(super) const ID_TREE: usize = 2012;
+pub(super) const ID_RECENT: usize = 2013;
+pub(super) const ID_SPLITTER: usize = 2014;
+pub(super) const ID_DIAGNOSTIC_TEXT: usize = 2020;
+pub(super) const ID_DIAGNOSTIC_CLOSE: usize = 2021;
+pub(super) const MENU_OPEN_FILE: usize = 2101;
+pub(super) const MENU_OPEN_FOLDER: usize = 2102;
+pub(super) const MENU_CLOSE_TAB: usize = 2103;
+pub(super) const MENU_TOGGLE_SIDEBAR: usize = 2111;
+pub(super) const MENU_RELOAD: usize = 2112;
+pub(super) const MENU_REMOTE_ASSETS: usize = 2121;
+pub(super) const MENU_HELP: usize = 2131;
+pub(super) const MENU_ABOUT: usize = 2132;
+/// `ShellControls::sidebar`, the view selector.
+const ID_SELECTOR: usize = 1003;
+
+const CBN_SELCHANGE: usize = 1;
+const LBN_SELCHANGE: usize = 1;
+const LBN_DBLCLK: usize = 2;
+const CB_GETCURSEL: u32 = 0x0147;
+const CB_SETCURSEL: u32 = 0x014E;
+const TCM_GETCURSEL: u32 = 0x130B;
+const TCN_SELCHANGE: u32 = 0xFFFF_FDD9;
+const TVN_ITEMEXPANDINGW: u32 = 0xFFFF_FE3A;
+const NM_CLICK: u32 = 0xFFFF_FFFE;
+const NM_RETURN: u32 = 0xFFFF_FFFC;
+const TVE_EXPAND: u32 = 0x2;
+const TVM_SETBKCOLOR: u32 = 0x111D;
+const TVM_SETTEXTCOLOR: u32 = 0x111E;
+const WM_SETFONT: u32 = 0x0030;
+const REPOSITORY_LOAD_FAILED: &str = "The repository tree could not be loaded.";
+
+#[derive(Clone, Copy)]
+pub(super) struct SidebarControls {
+    pub header: HWND,
+    pub outline: HWND,
+    pub tree: HWND,
+    pub recent: HWND,
+    pub splitter: HWND,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ChromeControls {
+    pub toolbar: Toolbar,
+    pub sidebar: SidebarControls,
+    pub diagnostics: DiagnosticsControls,
+    pub menu: Option<HMENU>,
+}
+
+/// DPI-scaled fonts for chrome controls, deleted on drop.
+struct Fonts {
+    dpi: u32,
+    text: HFONT,
+    glyph: HFONT,
+}
+
+impl Drop for Fonts {
+    fn drop(&mut self) {
+        for font in [self.text, self.glyph] {
+            if !font.is_invalid() {
+                // SAFETY: each font was created by this struct and is no
+                // longer selected: controls get the replacement first.
+                let _ = unsafe { DeleteObject(HGDIOBJ(font.0)) };
+            }
+        }
+    }
+}
+
+enum ChromeAction {
+    Command(ChromeCommand),
+    SetMode(SidebarMode),
+    OutlineJump(usize),
+    OpenRecent(usize),
+    Open(PathBuf),
+    DismissDiagnostic,
+    Sync,
+}
+
+enum WorkerResult {
+    Tree {
+        generation: u64,
+        result: Result<TreeArena, ScanError>,
+    },
+    DetectedRoot(Option<PathBuf>),
+}
+
+/// Chrome state inside the shell's `AppState`.
+pub(super) struct ChromeState {
+    window: isize,
+    controls: Option<ChromeControls>,
+    store: Option<SettingsStore>,
+    allow_remote_assets: bool,
+    mode: SidebarMode,
+    sidebar_width: f64,
+    dragging: bool,
+    diagnostics: DiagnosticsBar,
+    /// Whether the last layout had the diagnostics bar open.
+    diagnostics_laid_out: bool,
+    outlines: BTreeMap<u64, (u64, Vec<OutlineEntry>)>,
+    outline_generation: u64,
+    shown_outline: Option<(u64, u64)>,
+    locations: BTreeMap<u64, TabLocation>,
+    reloading: BTreeSet<u64>,
+    pending_scroll: BTreeSet<u64>,
+    repository_root: Option<PathBuf>,
+    /// The saved root, restored after startup when no document was given.
+    saved_root: Option<PathBuf>,
+    detecting_root: bool,
+    tree: TreeArena,
+    tree_populated: BTreeSet<usize>,
+    tree_dirty: bool,
+    tree_generation: u64,
+    tree_cancel: Option<Arc<AtomicBool>>,
+    worker_sender: mpsc::Sender<WorkerResult>,
+    worker_results: mpsc::Receiver<WorkerResult>,
+    actions: VecDeque<ChromeAction>,
+    action_posted: bool,
+    recent_dirty: bool,
+    shown_recent: Vec<String>,
+    fonts: Option<Fonts>,
+}
+
+impl ChromeState {
+    pub(super) fn new() -> Self {
+        let (worker_sender, worker_results) = mpsc::channel();
+        Self {
+            window: 0,
+            controls: None,
+            store: None,
+            allow_remote_assets: false,
+            mode: SidebarMode::Outline,
+            sidebar_width: clamp_sidebar_width(f64::NAN),
+            dragging: false,
+            diagnostics: DiagnosticsBar::default(),
+            diagnostics_laid_out: false,
+            outlines: BTreeMap::new(),
+            outline_generation: 0,
+            shown_outline: None,
+            locations: BTreeMap::new(),
+            reloading: BTreeSet::new(),
+            pending_scroll: BTreeSet::new(),
+            repository_root: None,
+            saved_root: None,
+            detecting_root: false,
+            tree: TreeArena::default(),
+            tree_populated: BTreeSet::new(),
+            tree_dirty: false,
+            tree_generation: 0,
+            tree_cancel: None,
+            worker_sender,
+            worker_results,
+            actions: VecDeque::new(),
+            action_posted: false,
+            recent_dirty: true,
+            shown_recent: Vec::new(),
+            fonts: None,
+        }
+    }
+
+    /// .NET `RenderContext.AllowRemoteAssets` for new renders.
+    pub(super) fn allow_remote_assets(&self) -> bool {
+        self.allow_remote_assets
+    }
+
+    /// Sidebar width and diagnostics state for `ShellLayout`.
+    pub(super) fn layout_inputs(&self) -> (Dip, bool) {
+        (
+            Dip(sidebar_width_dip(self.sidebar_width)),
+            self.diagnostics.is_open(),
+        )
+    }
+
+    /// Records the document a render is for. The first render of a path in
+    /// a tab is an open: .NET adds it to the recent files and, without a
+    /// repository, looks for the document's repository root. Data only; no
+    /// control is touched, because `start_render` holds the state borrow.
+    pub(super) fn note_render(&mut self, tab_id: u64, path: &Path) {
+        if self
+            .locations
+            .get(&tab_id)
+            .is_some_and(|location| same_document_path(location.path(), path))
+        {
+            return;
+        }
+        self.locations
+            .insert(tab_id, TabLocation::new(path.to_path_buf()));
+        let text = path.to_string_lossy().into_owned();
+        if let Some(error) = settings_bridge::add_recent_file(self.store.as_mut(), &text) {
+            self.diagnostics.show(error, DiagnosticSeverity::Warning);
+        }
+        self.recent_dirty = true;
+        if self.repository_root.is_none() && !self.detecting_root {
+            self.detecting_root = true;
+            self.spawn_root_detection(text);
+        }
+        self.post(ChromeAction::Sync);
+    }
+
+    /// Stops repository work when the window closes.
+    pub(super) fn shutdown(&mut self) {
+        if let Some(cancel) = self.tree_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.window = 0;
+    }
+
+    fn post(&mut self, action: ChromeAction) {
+        self.actions.push_back(action);
+        if !self.action_posted && self.window != 0 {
+            self.action_posted = true;
+            // SAFETY: posts to this thread's own window; no pointers.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(self.window as *mut c_void)),
+                    WM_CHROME_ACTION,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
+        }
+    }
+
+    fn diagnostic(&mut self, message: impl Into<String>, severity: DiagnosticSeverity) {
+        self.diagnostics.show(message, severity);
+        self.post(ChromeAction::Sync);
+    }
+
+    fn save(&mut self, change: impl FnOnce(&mut marknexia_core::settings::AppSettings)) {
+        if let Some(error) = settings_bridge::update(self.store.as_mut(), change) {
+            self.diagnostic(error, DiagnosticSeverity::Warning);
+        }
+    }
+
+    fn spawn_root_detection(&self, document: String) {
+        let sender = self.worker_sender.clone();
+        let window = self.window;
+        let spawned = std::thread::Builder::new()
+            .name("marknexia-repository-root".to_owned())
+            .spawn(move || {
+                // Errors (other than access denied) mean no root, as the
+                // .NET catch in `ResolveRepositoryRootForDocument` callers.
+                let root = detect_repository_root(&document).ok().flatten();
+                if sender.send(WorkerResult::DetectedRoot(root)).is_ok() {
+                    notify_worker(window);
+                }
+            });
+        drop(spawned);
+    }
+
+    /// Starts a repository scan (.NET `RefreshRepositoryFilesAsync`): any
+    /// earlier scan is cancelled and its result discarded.
+    fn start_tree(&mut self, root: &Path) {
+        if let Some(cancel) = self.tree_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.tree_generation = self.tree_generation.wrapping_add(1);
+        let generation = self.tree_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.tree_cancel = Some(Arc::clone(&cancel));
+        let sender = self.worker_sender.clone();
+        let window = self.window;
+        let root = root.to_string_lossy().into_owned();
+        let spawned = std::thread::Builder::new()
+            .name("marknexia-repository".to_owned())
+            .spawn(move || {
+                let result = build_repository_tree(&root, &ScanLimits::default(), &|| {
+                    cancel.load(Ordering::Acquire)
+                })
+                .map(TreeArena::from_tree);
+                if sender
+                    .send(WorkerResult::Tree { generation, result })
+                    .is_ok()
+                {
+                    notify_worker(window);
+                }
+            });
+        if spawned.is_err() {
+            self.diagnostic(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning);
+        }
+    }
+
+    fn active_location(&self, active: Option<u64>) -> Option<&TabLocation> {
+        active.and_then(|tab| self.locations.get(&tab))
+    }
+}
+
+fn notify_worker(window: isize) {
+    // SAFETY: PostMessageW may target a window owned by another thread;
+    // after the window is destroyed the post just fails.
+    let _ = unsafe {
+        PostMessageW(
+            Some(HWND(window as *mut c_void)),
+            WM_CHROME_WORKER,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Small Win32 helpers shared by the chrome modules.
+// ---------------------------------------------------------------------------
+
+pub(super) fn send(window: HWND, message: u32, wparam: usize, lparam: isize) -> LRESULT {
+    // SAFETY: synchronous message to a control on this thread. Callers hold
+    // no AppState borrow; pointer arguments point to live locals.
+    unsafe { SendMessageW(window, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) }
+}
+
+pub(super) fn dip(value: u32, dpi: u32) -> u32 {
+    Dip(value).to_pixels(dpi)
+}
+
+pub(super) fn set_bounds(window: HWND, rect: PixelRect) {
+    move_child(window, rect);
+}
+
+pub(super) fn show(window: HWND, visible: bool) {
+    // SAFETY: shows or hides a child window of this thread.
+    let _ = unsafe { ShowWindow(window, if visible { SW_SHOWNA } else { SW_HIDE }) };
+}
+
+pub(super) fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn set_text(window: HWND, text: &str) {
+    let text = wide(text);
+    // SAFETY: NUL-terminated buffer that outlives the call; no borrow held.
+    let _ = unsafe { SetWindowTextW(window, PCWSTR::from_raw(text.as_ptr())) };
+}
+
+fn key_down(key: u16) -> bool {
+    // SAFETY: reads this thread's keyboard state.
+    let state = unsafe { GetKeyState(i32::from(key)) };
+    state < 0
+}
+
+/// Whether a non-modifier key is down: a list selection that changed
+/// meanwhile came from the keyboard (arrows, paging, type-ahead), not from
+/// a click. Mouse buttons and Shift, Ctrl and Alt are ignored.
+fn keyboard_input_active() -> bool {
+    (0x08_u16..=0xFE).any(|key| !matches!(key, 0x10..=0x12 | 0xA0..=0xA5) && key_down(key))
+}
+
+fn state_of(hwnd: HWND) -> Option<Rc<RefCell<AppState>>> {
+    // SAFETY: `hwnd` is this thread's shell window; the helper returns a
+    // scoped strong reference and no borrow.
+    unsafe { app_state_handle(hwnd) }
+}
+
+fn to_stored(theme: ThemePreference) -> StoredTheme {
+    match theme {
+        ThemePreference::System => StoredTheme::System,
+        ThemePreference::Light => StoredTheme::Light,
+        ThemePreference::Dark => StoredTheme::Dark,
+    }
+}
+
+fn from_stored(theme: StoredTheme) -> ThemePreference {
+    match theme {
+        StoredTheme::System => ThemePreference::System,
+        StoredTheme::Light => ThemePreference::Light,
+        StoredTheme::Dark => ThemePreference::Dark,
+    }
+}
+
+fn theme_index(theme: ThemePreference) -> usize {
+    match theme {
+        ThemePreference::System => 0,
+        ThemePreference::Light => 1,
+        ThemePreference::Dark => 2,
+    }
+}
+
+fn post_action(hwnd: HWND, action: ChromeAction) {
+    if let Some(state) = state_of(hwnd)
+        && let Ok(mut state) = state.try_borrow_mut()
+    {
+        state.chrome.post(action);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hooks called from window.rs.
+// ---------------------------------------------------------------------------
+
+/// Creates the chrome controls and the menu bar and applies the saved
+/// settings (.NET `MainWindow` constructor: `ApplySavedTheme`, pane state,
+/// sidebar mode, remote assets). Runs before startup documents render, so
+/// they use the saved theme and remote-image policy.
+pub(super) fn install(
+    hwnd: HWND,
+    instance: HINSTANCE,
+    state: &Rc<RefCell<AppState>>,
+) -> Result<(), WindowError> {
+    sidebar::register_splitter(instance)?;
+    let toolbar = toolbar::create(hwnd, instance)?;
+    let sidebar_controls = sidebar::create(hwnd, instance)?;
+    let diagnostics_controls = diagnostics::create(hwnd, instance)?;
+    let menu = toolbar::create_menu(hwnd);
+    let (store, notice) = match settings_bridge::open() {
+        Some((store, notice)) => (Some(store), notice),
+        None => (None, None),
+    };
+    let settings = settings_bridge::current(store.as_ref());
+    let (portable, shell, dpi) = {
+        let state = state.borrow();
+        (Rc::clone(&state.portable), state.controls, state.dpi)
+    };
+    {
+        let mut app = portable.borrow_mut();
+        app.set_theme(from_stored(settings.theme));
+        app.set_sidebar_visible(settings.is_sidebar_open);
+    }
+    let mode = SidebarMode::from_setting(settings.sidebar_mode);
+    let fonts = Fonts {
+        dpi,
+        text: toolbar::text_font(dpi),
+        glyph: toolbar::glyph_font(dpi),
+    };
+    let controls = ChromeControls {
+        toolbar,
+        sidebar: sidebar_controls,
+        diagnostics: diagnostics_controls,
+        menu,
+    };
+    if let Some(shell) = shell {
+        apply_fonts(&controls, shell, fonts.text);
+        order_controls(&controls, shell);
+        sidebar::select_mode(shell.sidebar, mode);
+    }
+    {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        chrome.window = hwnd.0 as isize;
+        chrome.allow_remote_assets = settings.allow_remote_assets;
+        chrome.mode = mode;
+        chrome.sidebar_width = clamp_sidebar_width(settings.sidebar_width);
+        // Restored in `after_startup`; until then a startup document may
+        // set the root from its own repository, as in .NET.
+        chrome.saved_root = settings.repository_root.as_ref().map(PathBuf::from);
+        chrome.store = store;
+        chrome.fonts = Some(fonts);
+        chrome.controls = Some(controls);
+        if let Some(notice) = notice {
+            chrome
+                .diagnostics
+                .show(notice.to_string(), DiagnosticSeverity::Warning);
+        }
+    }
+    Ok(())
+}
+
+/// After startup documents were queued: without them, restore the saved
+/// repository (.NET `RestoreSavedRepositoryRootAsync`); then show state.
+pub(super) fn after_startup(hwnd: HWND, state: &Rc<RefCell<AppState>>, document_mode: bool) {
+    {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        // With a startup document .NET resolves the root from that document
+        // instead (see `note_render`).
+        if let (false, Some(root)) = (document_mode, chrome.saved_root.take()) {
+            if root.is_dir() {
+                chrome.repository_root = Some(root.clone());
+                chrome.start_tree(&root);
+            } else {
+                chrome.save(|settings| settings.repository_root = None);
+            }
+        }
+    }
+    sync_ui(hwnd);
+}
+
+/// The chrome's window messages; `None` leaves the message to window.rs.
+pub(super) fn handle_message(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
+    match message {
+        WM_COMMAND => on_command(hwnd, wparam, lparam),
+        WM_NOTIFY => on_notify(hwnd, lparam),
+        // SAFETY: for WM_DRAWITEM, lParam points to a DRAWITEMSTRUCT that is
+        // valid for the duration of this message.
+        WM_DRAWITEM => unsafe { (lparam.0 as *const DRAWITEMSTRUCT).as_ref() }
+            .and_then(|item| on_draw_item(hwnd, item)),
+        WM_CHROME_ACTION => {
+            run_actions(hwnd);
+            Some(LRESULT(0))
+        }
+        WM_CHROME_WORKER => {
+            apply_worker_results(hwnd);
+            Some(LRESULT(0))
+        }
+        _ => None,
+    }
+}
+
+/// Keyboard handling from the message loop, before dispatch: the .NET
+/// accelerators, Tab traversal between chrome controls, and Enter/Space on
+/// the outline and recent lists. Runs with no borrow held.
+pub(super) fn translate_message(hwnd: HWND, msg: &MSG) -> bool {
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return false;
+    }
+    // SAFETY: plain window relationship query.
+    if msg.hwnd != hwnd && !unsafe { IsChild(hwnd, msg.hwnd) }.as_bool() {
+        return false;
+    }
+    let key = msg.wParam.0 as u16;
+    let ctrl = key_down(VK_CONTROL.0);
+    let shift = key_down(VK_SHIFT.0);
+    let alt = msg.message == WM_SYSKEYDOWN || key_down(VK_MENU.0);
+    if let Some(command) = route_chrome_key(key, ctrl, shift, alt) {
+        run_command(hwnd, command);
+        return true;
+    }
+    if msg.message != WM_KEYDOWN || ctrl || alt {
+        return false;
+    }
+    if key == VK_TAB.0 {
+        return move_focus(hwnd, shift);
+    }
+    if key == VK_RETURN.0 || key == VK_SPACE.0 {
+        let lists = state_of(hwnd).and_then(|state| {
+            state.try_borrow().ok().and_then(|state| {
+                state
+                    .chrome
+                    .controls
+                    .as_ref()
+                    .map(|c| (c.sidebar.outline, c.sidebar.recent))
+            })
+        });
+        // SAFETY: reads this thread's focus window.
+        let focus = unsafe { GetFocus() };
+        if let Some((outline, recent)) = lists {
+            if focus == outline {
+                if let Some(index) = sidebar::list_selection(outline) {
+                    run_action(hwnd, ChromeAction::OutlineJump(index));
+                }
+                return true;
+            }
+            if focus == recent {
+                if let Some(index) = sidebar::list_selection(recent) {
+                    run_action(hwnd, ChromeAction::OpenRecent(index));
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A shell accelerator pressed inside the document that `route_key` did
+/// not handle.
+pub(super) fn route_accelerator(hwnd: HWND, chord: ShellAccelerator) {
+    if let Some(command) = route_chrome_key(chord.virtual_key, chord.ctrl, chord.shift, chord.alt) {
+        run_command(hwnd, command);
+    }
+}
+
+/// Selection or tab set changed: refresh the outline and history buttons.
+pub(super) fn tabs_changed(state: &Rc<RefCell<AppState>>) {
+    if let Ok(mut state) = state.try_borrow_mut() {
+        state.chrome.post(ChromeAction::Sync);
+    }
+}
+
+/// Applies a render result's chrome effects before window.rs hosts it.
+/// Returns `None` when the result must not replace the tab's document: a
+/// failed reload keeps the previous document, as .NET `Reload_Click` does.
+pub(super) fn filter_render_outcome(
+    state: &Rc<RefCell<AppState>>,
+    tab_id: u64,
+    result: Result<marknexia_webview::policy::HostDocument, OpenError>,
+    outline: Vec<OutlineEntry>,
+) -> Option<Result<marknexia_webview::policy::HostDocument, OpenError>> {
+    let mut state = state.borrow_mut();
+    let chrome = &mut state.chrome;
+    let reloading = chrome.reloading.remove(&tab_id);
+    match &result {
+        Ok(_) => {
+            chrome.outline_generation = chrome.outline_generation.wrapping_add(1);
+            chrome
+                .outlines
+                .insert(tab_id, (chrome.outline_generation, outline));
+            if reloading {
+                // .NET `PendingScroll`: restore the location after the load.
+                chrome.pending_scroll.insert(tab_id);
+            }
+            chrome.post(ChromeAction::Sync);
+            Some(result)
+        }
+        Err(error) if reloading => {
+            chrome.diagnostic(
+                format!("Unable to reload document: {error}"),
+                DiagnosticSeverity::Error,
+            );
+            None
+        }
+        Err(error) => {
+            chrome.outlines.remove(&tab_id);
+            chrome.diagnostic(
+                format!("Unable to open document: {error}"),
+                DiagnosticSeverity::Error,
+            );
+            Some(result)
+        }
+    }
+}
+
+/// Scrolls reloaded documents to their stored location once they loaded.
+pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
+    let pending: Vec<(u64, Option<String>)> = {
+        let Ok(state) = state.try_borrow() else {
+            return;
+        };
+        if state.chrome.pending_scroll.is_empty() {
+            return;
+        }
+        state
+            .chrome
+            .pending_scroll
+            .iter()
+            .map(|tab| {
+                (
+                    *tab,
+                    state
+                        .chrome
+                        .locations
+                        .get(tab)
+                        .and_then(|location| location.fragment().map(str::to_owned)),
+                )
+            })
+            .collect()
+    };
+    let Some(session) = take_session(state) else {
+        return;
+    };
+    let mut done = Vec::new();
+    for (tab, fragment) in pending {
+        match session.host(tab) {
+            Some(host) if host.document_loaded() => {
+                if fragment.is_some() {
+                    let _ = host.scroll_to_anchor(fragment.as_deref());
+                }
+                done.push(tab);
+            }
+            Some(_) => {}
+            // The tab closed or lost its controller.
+            None => done.push(tab),
+        }
+    }
+    restore_session(state, session);
+    let mut state = state.borrow_mut();
+    for tab in done {
+        state.chrome.pending_scroll.remove(&tab);
+    }
+}
+
+/// Positions the chrome controls after window.rs placed the shell controls.
+pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let (shell, dpi, mode, diagnostics_open, refont) = {
+        let Ok(state) = state.try_borrow() else {
+            return;
+        };
+        let refont = state
+            .chrome
+            .fonts
+            .as_ref()
+            .is_none_or(|fonts| fonts.dpi != state.dpi);
+        (
+            state.controls,
+            state.dpi,
+            state.chrome.mode,
+            state.chrome.diagnostics.is_open(),
+            refont,
+        )
+    };
+    let Some(shell) = shell else {
+        return;
+    };
+    if refont {
+        let fonts = Fonts {
+            dpi,
+            text: toolbar::text_font(dpi),
+            glyph: toolbar::glyph_font(dpi),
+        };
+        let text = fonts.text;
+        // The new font is installed before the old one is deleted.
+        let previous = {
+            let mut state = state.borrow_mut();
+            state.chrome.fonts.replace(fonts)
+        };
+        with_controls(&state, |controls| apply_fonts(controls, shell, text));
+        drop(previous);
+    }
+    with_controls(&state, |controls| {
+        toolbar::layout(controls, shell.command, layout.command_bar, dpi);
+        sidebar::layout(
+            shell.sidebar,
+            &controls.sidebar,
+            layout.sidebar,
+            layout.splitter,
+            mode,
+            dpi,
+        );
+        diagnostics::layout(&controls.diagnostics, layout.diagnostics, dpi);
+        let open = diagnostics_open && layout.diagnostics.height > 0;
+        show(controls.diagnostics.text, open);
+        show(controls.diagnostics.close, open);
+    });
+    if let Ok(mut state) = state.try_borrow_mut() {
+        state.chrome.diagnostics_laid_out = diagnostics_open;
+    }
+}
+
+/// Theme-dependent control styles (dark variants in the dark theme, system
+/// defaults otherwise, so high contrast uses system colors).
+pub(super) fn theme_changed(state: &Rc<RefCell<AppState>>) {
+    let theme = state.borrow().theme;
+    let colors = palette(theme);
+    with_controls(state, |controls| {
+        let dark = theme == EffectiveTheme::Dark;
+        let tree = controls.sidebar.tree;
+        let explorer = if dark {
+            w!("DarkMode_Explorer")
+        } else if theme == EffectiveTheme::Light {
+            w!("Explorer")
+        } else {
+            PCWSTR::null()
+        };
+        for window in [tree, controls.sidebar.outline, controls.sidebar.recent] {
+            // SAFETY: theme names are static strings.
+            let _ = unsafe { SetWindowTheme(window, explorer, PCWSTR::null()) };
+        }
+        // SAFETY: as above.
+        let _ = unsafe {
+            SetWindowTheme(
+                controls.toolbar.theme,
+                if dark {
+                    w!("DarkMode_CFD")
+                } else {
+                    PCWSTR::null()
+                },
+                PCWSTR::null(),
+            )
+        };
+        let (background, text) = if dark {
+            (
+                super::native_color(colors.surface).0 as isize,
+                super::native_color(colors.text).0 as isize,
+            )
+        } else {
+            (-1, -1)
+        };
+        send(tree, TVM_SETBKCOLOR, 0, background);
+        send(tree, TVM_SETTEXTCOLOR, 0, text);
+        for window in all_windows(controls) {
+            // SAFETY: repaint request for a child of this thread.
+            let _ = unsafe { InvalidateRect(Some(window), None, true) };
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Messages.
+// ---------------------------------------------------------------------------
+
+fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    let id = wparam.0 & 0xffff;
+    let code = (wparam.0 >> 16) & 0xffff;
+    let clicked = code == 0;
+    let action = match id {
+        ID_TOGGLE_SIDEBAR | MENU_TOGGLE_SIDEBAR if clicked => {
+            ChromeAction::Command(ChromeCommand::ToggleSidebar)
+        }
+        ID_BACK if clicked => ChromeAction::Command(ChromeCommand::Back),
+        ID_FORWARD if clicked => ChromeAction::Command(ChromeCommand::Forward),
+        ID_RELOAD | MENU_RELOAD if clicked => ChromeAction::Command(ChromeCommand::Reload),
+        ID_OPEN_FOLDER | MENU_OPEN_FOLDER if clicked => {
+            ChromeAction::Command(ChromeCommand::OpenFolder)
+        }
+        MENU_OPEN_FILE if clicked => ChromeAction::Command(ChromeCommand::OpenFile),
+        MENU_CLOSE_TAB if clicked => ChromeAction::Command(ChromeCommand::CloseTab),
+        MENU_REMOTE_ASSETS if clicked => ChromeAction::Command(ChromeCommand::ToggleRemoteAssets),
+        MENU_HELP if clicked => ChromeAction::Command(ChromeCommand::ShowHelp),
+        MENU_ABOUT if clicked => ChromeAction::Command(ChromeCommand::ShowAbout),
+        ID_DIAGNOSTIC_CLOSE if clicked => ChromeAction::DismissDiagnostic,
+        ID_THEME if code == CBN_SELCHANGE => {
+            let selected = send(HWND(lparam.0 as *mut c_void), CB_GETCURSEL, 0, 0).0;
+            let theme = match selected {
+                1 => ThemePreference::Light,
+                2 => ThemePreference::Dark,
+                _ => ThemePreference::System,
+            };
+            ChromeAction::Command(ChromeCommand::SetTheme(theme))
+        }
+        ID_OUTLINE | ID_RECENT if code == LBN_DBLCLK || code == LBN_SELCHANGE => {
+            // Keyboard selection only moves focus (.NET `IsItemClickEnabled`);
+            // a click or Enter opens the item.
+            if code == LBN_SELCHANGE && keyboard_input_active() {
+                return Some(LRESULT(0));
+            }
+            let Some(index) = sidebar::list_selection(HWND(lparam.0 as *mut c_void)) else {
+                return Some(LRESULT(0));
+            };
+            if id == ID_OUTLINE {
+                ChromeAction::OutlineJump(index)
+            } else {
+                ChromeAction::OpenRecent(index)
+            }
+        }
+        _ => return None,
+    };
+    post_action(hwnd, action);
+    Some(LRESULT(0))
+}
+
+fn on_notify(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
+    // SAFETY: for WM_NOTIFY, lParam points to an NMHDR (or a larger
+    // structure that starts with one) valid for this message.
+    let header = unsafe { (lparam.0 as *const NMHDR).as_ref() }?;
+    match (header.idFrom, header.code) {
+        (ID_SELECTOR, TCN_SELCHANGE) => {
+            let index = send(header.hwndFrom, TCM_GETCURSEL, 0, 0).0;
+            if let Some(mode) = usize::try_from(index)
+                .ok()
+                .and_then(SidebarMode::from_index)
+            {
+                post_action(hwnd, ChromeAction::SetMode(mode));
+            }
+            Some(LRESULT(0))
+        }
+        (ID_TREE, NM_CLICK) => {
+            let item = sidebar::tree_item_at_cursor(header.hwndFrom);
+            open_tree_item(hwnd, header.hwndFrom, item);
+            Some(LRESULT(0))
+        }
+        (ID_TREE, NM_RETURN) => {
+            let item = sidebar::tree_selection(header.hwndFrom);
+            open_tree_item(hwnd, header.hwndFrom, item);
+            Some(LRESULT(1))
+        }
+        (ID_TREE, TVN_ITEMEXPANDINGW) => {
+            // SAFETY: TVN_ITEMEXPANDINGW carries an NMTREEVIEWW.
+            let view = unsafe { (lparam.0 as *const NMTREEVIEWW).as_ref() }?;
+            if view.action.0 & TVE_EXPAND != 0 {
+                expand_tree_item(
+                    hwnd,
+                    header.hwndFrom,
+                    view.itemNew.hItem,
+                    view.itemNew.lParam,
+                );
+            }
+            Some(LRESULT(0))
+        }
+        _ => None,
+    }
+}
+
+fn open_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM) {
+    let Some(index) = sidebar::tree_item_index(tree, item) else {
+        return;
+    };
+    let path = state_of(hwnd).and_then(|state| {
+        let state = state.try_borrow().ok()?;
+        let node = state.chrome.tree.node(index)?;
+        (!node.is_folder).then(|| node.path.clone())
+    });
+    if let Some(path) = path {
+        post_action(hwnd, ChromeAction::Open(path));
+    }
+}
+
+/// Fills a folder on first expansion (children are inserted lazily).
+fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, index: LPARAM) {
+    let Ok(index) = usize::try_from(index.0) else {
+        return;
+    };
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let children: Vec<(usize, TreeNode)> = {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return;
+        };
+        let chrome = &mut state.chrome;
+        if !chrome.tree_populated.insert(index) {
+            return;
+        }
+        let Some(node) = chrome.tree.node(index) else {
+            return;
+        };
+        node.children
+            .iter()
+            .filter_map(|child| chrome.tree.node(*child).map(|node| (*child, node.clone())))
+            .collect()
+    };
+    sidebar::insert_children(
+        tree,
+        item,
+        children
+            .iter()
+            .map(|(index, node)| (*index, node))
+            .collect(),
+    );
+}
+
+fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
+    let id = item.CtlID as usize;
+    let state = state_of(hwnd)?;
+    let state = state.try_borrow().ok()?;
+    let fonts = state.chrome.fonts.as_ref()?;
+    let colors = palette(state.theme);
+    match id {
+        ID_DIAGNOSTIC_TEXT => diagnostics::draw(
+            item,
+            colors,
+            state.chrome.diagnostics.current(),
+            (fonts.glyph, fonts.text),
+            state.dpi,
+        ),
+        ID_DIAGNOSTIC_CLOSE => {
+            toolbar::draw_button(item, colors, '\u{E711}', None, (fonts.glyph, fonts.text));
+        }
+        ID_OUTLINE => sidebar::draw_outline_item(item, colors, fonts.text, state.dpi),
+        _ => {
+            let (glyph, label) = toolbar::button_face(id)?;
+            toolbar::draw_button(item, colors, glyph, label, (fonts.glyph, fonts.text));
+        }
+    }
+    Some(LRESULT(1))
+}
+
+// ---------------------------------------------------------------------------
+// Actions and commands (message loop, no borrow held).
+// ---------------------------------------------------------------------------
+
+fn run_actions(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    if let Ok(mut state) = state.try_borrow_mut() {
+        state.chrome.action_posted = false;
+    }
+    loop {
+        let next = state
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut state| state.chrome.actions.pop_front());
+        let Some(action) = next else {
+            break;
+        };
+        run_action(hwnd, action);
+    }
+}
+
+fn run_action(hwnd: HWND, action: ChromeAction) {
+    match action {
+        ChromeAction::Command(command) => run_command(hwnd, command),
+        ChromeAction::SetMode(mode) => set_mode(hwnd, mode),
+        ChromeAction::OutlineJump(index) => outline_jump(hwnd, index),
+        ChromeAction::OpenRecent(index) => {
+            let path = state_of(hwnd).and_then(|state| {
+                state
+                    .try_borrow()
+                    .ok()
+                    .and_then(|state| state.chrome.shown_recent.get(index).cloned())
+            });
+            if let Some(path) = path {
+                open_or_select(hwnd, PathBuf::from(path));
+            }
+        }
+        ChromeAction::Open(path) => open_or_select(hwnd, path),
+        ChromeAction::DismissDiagnostic => {
+            if let Some(state) = state_of(hwnd) {
+                state.borrow_mut().chrome.diagnostics.dismiss();
+            }
+            sync_ui(hwnd);
+        }
+        ChromeAction::Sync => sync_ui(hwnd),
+    }
+}
+
+fn run_command(hwnd: HWND, command: ChromeCommand) {
+    match command {
+        ChromeCommand::OpenFile => {
+            // The existing Open dialog path (multi-select, Markdown filters).
+            // SAFETY: posts to this thread's own live window; no pointers.
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_OPEN_DIALOG, WPARAM(0), LPARAM(0)) };
+        }
+        ChromeCommand::OpenFolder => match dialogs::pick_folder(hwnd) {
+            Ok(Some(folder)) => open_repository(hwnd, &folder),
+            Ok(None) => {}
+            Err(error) => with_chrome(hwnd, |chrome| {
+                chrome.diagnostic(
+                    format!("Open folder dialog failed: {error}"),
+                    DiagnosticSeverity::Warning,
+                );
+            }),
+        },
+        ChromeCommand::Reload => reload_active(hwnd),
+        ChromeCommand::Back => history_step(hwnd, true),
+        ChromeCommand::Forward => history_step(hwnd, false),
+        ChromeCommand::CloseTab => {
+            let _ = execute_command(hwnd, ShellCommand::CloseTab);
+        }
+        ChromeCommand::ToggleSidebar => toggle_sidebar(hwnd),
+        ChromeCommand::ToggleRemoteAssets => toggle_remote_assets(hwnd),
+        ChromeCommand::SetTheme(theme) => set_theme(hwnd, theme),
+        ChromeCommand::ShowHelp => dialogs::show_help(hwnd),
+        ChromeCommand::ShowAbout => dialogs::show_about(hwnd),
+    }
+}
+
+fn with_chrome(hwnd: HWND, change: impl FnOnce(&mut ChromeState)) {
+    if let Some(state) = state_of(hwnd)
+        && let Ok(mut state) = state.try_borrow_mut()
+    {
+        change(&mut state.chrome);
+    }
+}
+
+fn with_controls(state: &Rc<RefCell<AppState>>, apply: impl FnOnce(&ChromeControls)) {
+    // Control handles are copied out so no borrow is held while the
+    // controls are sent messages.
+    let controls = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.chrome.controls);
+    if let Some(controls) = controls {
+        apply(&controls);
+    }
+}
+
+fn all_windows(c: &ChromeControls) -> [HWND; 14] {
+    [
+        c.toolbar.toggle,
+        c.toolbar.back,
+        c.toolbar.forward,
+        c.toolbar.reload,
+        c.toolbar.folder,
+        c.toolbar.theme_label,
+        c.toolbar.theme,
+        c.sidebar.header,
+        c.sidebar.outline,
+        c.sidebar.tree,
+        c.sidebar.recent,
+        c.sidebar.splitter,
+        c.diagnostics.text,
+        c.diagnostics.close,
+    ]
+}
+
+fn apply_fonts(controls: &ChromeControls, shell: ShellControls, font: HFONT) {
+    for window in all_windows(controls).into_iter().chain([shell.sidebar]) {
+        send(window, WM_SETFONT, font.0 as usize, 1);
+    }
+}
+
+/// Tab order follows the visual order: toolbar, tab strip, sidebar,
+/// document, find bar, diagnostics, status.
+fn order_controls(c: &ChromeControls, shell: ShellControls) {
+    let order = [
+        c.toolbar.toggle,
+        c.toolbar.back,
+        c.toolbar.forward,
+        c.toolbar.reload,
+        shell.command,
+        c.toolbar.folder,
+        c.toolbar.theme_label,
+        c.toolbar.theme,
+        shell.tabs,
+        shell.sidebar,
+        c.sidebar.header,
+        c.sidebar.outline,
+        c.sidebar.tree,
+        c.sidebar.recent,
+        c.sidebar.splitter,
+        shell.find,
+        c.diagnostics.text,
+        c.diagnostics.close,
+        shell.status,
+    ];
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+    // SAFETY: z-order changes among this window's own children.
+    let _ = unsafe { SetWindowPos(order[0], Some(HWND_TOP), 0, 0, 0, 0, flags) };
+    for pair in order.windows(2) {
+        // SAFETY: as above.
+        let _ = unsafe { SetWindowPos(pair[1], Some(pair[0]), 0, 0, 0, 0, flags) };
+    }
+}
+
+/// Tab and Shift+Tab move between the shell's tab stops (the WebView
+/// document is reached with F6, as before).
+fn move_focus(hwnd: HWND, backward: bool) -> bool {
+    // SAFETY: focus queries and changes on this thread's own windows.
+    unsafe {
+        let focus = GetFocus();
+        let current = if focus == hwnd || !IsChild(hwnd, focus).as_bool() {
+            None
+        } else {
+            // A control's inner window (for example a combo box edit) maps
+            // to the direct child of the shell window.
+            let mut child = focus;
+            while let Ok(parent) = windows::Win32::UI::WindowsAndMessaging::GetParent(child) {
+                if parent == hwnd {
+                    break;
+                }
+                child = parent;
+            }
+            Some(child)
+        };
+        match GetNextDlgTabItem(hwnd, current, backward) {
+            Ok(next) => {
+                let _ = SetFocus(Some(next));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+fn active_tab(state: &Rc<RefCell<AppState>>) -> Option<u64> {
+    let portable = Rc::clone(&state.borrow().portable);
+    portable.borrow().active_tab().map(crate::tabs::TabId::get)
+}
+
+/// .NET `Reload_Click`: re-read and re-render the active document; on
+/// failure the previous document stays.
+fn reload_active(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let Some(active) = active_tab(&state) else {
+        return;
+    };
+    let path = {
+        let mut state = state.borrow_mut();
+        let Some(path) = state
+            .chrome
+            .locations
+            .get(&active)
+            .map(|location| location.path().to_path_buf())
+        else {
+            return;
+        };
+        state.chrome.reloading.insert(active);
+        path
+    };
+    start_render(hwnd, &state, active, path);
+    refresh_status(&state);
+}
+
+/// Back or forward within the tab's history (.NET `Back_Click`,
+/// `Forward_Click`). History entries come from outline jumps in the same
+/// document, so the entry is shown by scrolling (CHROME-4).
+fn history_step(hwnd: HWND, back: bool) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let Some(active) = active_tab(&state) else {
+        return;
+    };
+    let entry = {
+        let mut state = state.borrow_mut();
+        state
+            .chrome
+            .locations
+            .get_mut(&active)
+            .and_then(|location| {
+                if back {
+                    location.go_back()
+                } else {
+                    location.go_forward()
+                }
+            })
+    };
+    if let Some(entry) = entry {
+        scroll_tab(&state, active, entry.fragment.as_deref());
+    }
+    sync_ui(hwnd);
+}
+
+fn scroll_tab(state: &Rc<RefCell<AppState>>, tab: u64, fragment: Option<&str>) {
+    if let Some(session) = take_session(state) {
+        if let Some(host) = session.host(tab) {
+            let _ = host.scroll_to_anchor(fragment);
+        }
+        restore_session(state, session);
+    }
+}
+
+/// .NET `OutlineItem_Click`: the same document at the heading's anchor.
+fn outline_jump(hwnd: HWND, index: usize) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let Some(active) = active_tab(&state) else {
+        return;
+    };
+    let target = {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        let slug = chrome
+            .outlines
+            .get(&active)
+            .and_then(|(_, entries)| entries.get(index))
+            .map(|entry| entry.slug.clone());
+        match (slug, chrome.locations.get_mut(&active)) {
+            (Some(slug), Some(location)) => location.navigate_to_anchor(&slug).then_some(slug),
+            _ => None,
+        }
+    };
+    if let Some(slug) = target {
+        scroll_tab(&state, active, Some(&slug));
+    }
+    sync_ui(hwnd);
+}
+
+/// .NET `OpenDocumentInTabAsync(path)` from the recent list, the tree and
+/// a repository README: a missing file is reported; an open document is
+/// selected and scrolled to its top; otherwise a new tab opens.
+fn open_or_select(hwnd: HWND, path: PathBuf) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    if !path.is_file() {
+        state.borrow_mut().chrome.diagnostic(
+            format!("File not found: {}", path.display()),
+            DiagnosticSeverity::Error,
+        );
+        return;
+    }
+    let existing = {
+        let state = state.borrow();
+        state
+            .chrome
+            .locations
+            .iter()
+            .find(|(_, location)| same_document_path(location.path(), &path))
+            .map(|(tab, _)| *tab)
+    };
+    let open_tabs: Vec<u64> = {
+        let portable = Rc::clone(&state.borrow().portable);
+        portable
+            .borrow()
+            .tabs()
+            .tabs()
+            .iter()
+            .map(|tab| tab.id().get())
+            .collect()
+    };
+    match existing.filter(|tab| open_tabs.contains(tab)) {
+        Some(tab) => {
+            {
+                let mut state = state.borrow_mut();
+                let chrome = &mut state.chrome;
+                let text = path.to_string_lossy().into_owned();
+                if let Some(error) = settings_bridge::add_recent_file(chrome.store.as_mut(), &text)
+                {
+                    chrome.diagnostics.show(error, DiagnosticSeverity::Warning);
+                }
+                chrome.recent_dirty = true;
+            }
+            let _ = select_tab_id(hwnd, tab, false);
+            let changed = state
+                .borrow_mut()
+                .chrome
+                .locations
+                .get_mut(&tab)
+                .is_some_and(|location| location.navigate_to(None));
+            if changed {
+                scroll_tab(&state, tab, None);
+            }
+            sync_ui(hwnd);
+        }
+        None => open_document(hwnd, path),
+    }
+}
+
+/// .NET `OpenRepositoryFolderAsync`.
+fn open_repository(hwnd: HWND, folder: &Path) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    if !folder.is_dir() {
+        state.borrow_mut().chrome.diagnostic(
+            format!("Folder not found: {}", folder.display()),
+            DiagnosticSeverity::Error,
+        );
+        return;
+    }
+    let (selector, portable) = {
+        let mut state = state.borrow_mut();
+        let selector = state.controls.map(|c| c.sidebar);
+        let portable = Rc::clone(&state.portable);
+        let chrome = &mut state.chrome;
+        let root = folder.to_string_lossy().into_owned();
+        chrome.repository_root = Some(folder.to_path_buf());
+        chrome.save(|settings| {
+            settings.repository_root = Some(root.clone());
+            settings.sidebar_mode = 1;
+        });
+        if let Some(error) = settings_bridge::add_recent_folder(chrome.store.as_mut(), &root) {
+            chrome.diagnostics.show(error, DiagnosticSeverity::Warning);
+        }
+        chrome.start_tree(folder);
+        chrome.mode = SidebarMode::Repository;
+        (selector, portable)
+    };
+    // .NET opens the pane without saving `IsSidebarOpen`.
+    portable.borrow_mut().set_sidebar_visible(true);
+    if let Some(selector) = selector {
+        sidebar::select_mode(selector, SidebarMode::Repository);
+    }
+    relayout(hwnd, &state);
+    let readme = folder.join("README.md");
+    if readme.is_file() {
+        open_or_select(hwnd, readme);
+    }
+    sync_ui(hwnd);
+}
+
+fn relayout(hwnd: HWND, state: &Rc<RefCell<AppState>>) {
+    let dpi = state.borrow().dpi;
+    reflow(hwnd, dpi);
+}
+
+fn set_mode(hwnd: HWND, mode: SidebarMode) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        if chrome.mode == mode {
+            return;
+        }
+        chrome.mode = mode;
+        if let Some(value) = mode.setting_value() {
+            chrome.save(|settings| settings.sidebar_mode = value);
+        }
+        if mode == SidebarMode::Recent {
+            chrome.recent_dirty = true;
+        }
+    }
+    relayout(hwnd, &state);
+    sync_ui(hwnd);
+}
+
+/// .NET `ToggleSidebar_Click`: toggles and saves `IsSidebarOpen`.
+fn toggle_sidebar(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let visible = !portable.borrow().sidebar_visible();
+    portable.borrow_mut().set_sidebar_visible(visible);
+    state
+        .borrow_mut()
+        .chrome
+        .save(|settings| settings.is_sidebar_open = visible);
+    relayout(hwnd, &state);
+}
+
+/// .NET `RemoteAssetsMenuItem_Click`.
+fn toggle_remote_assets(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        let enabled = !chrome.allow_remote_assets;
+        chrome.allow_remote_assets = enabled;
+        chrome.save(|settings| settings.allow_remote_assets = enabled);
+        chrome.diagnostic(remote_assets_notice(enabled), DiagnosticSeverity::Info);
+    }
+    reload_active(hwnd);
+    sync_ui(hwnd);
+}
+
+/// .NET `ThemeSelector_SelectionChanged`.
+fn set_theme(hwnd: HWND, theme: ThemePreference) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    if portable.borrow().theme() == theme {
+        return;
+    }
+    portable.borrow_mut().set_theme(theme);
+    state
+        .borrow_mut()
+        .chrome
+        .save(|settings| settings.theme = to_stored(theme));
+    update_theme(hwnd);
+    relayout(hwnd, &state);
+    reload_active(hwnd);
+}
+
+/// Splitter drag start (.NET `SidebarResizeHandle_PointerPressed`).
+pub(super) fn begin_sidebar_drag(hwnd: HWND) {
+    let visible = state_of(hwnd).is_some_and(|state| {
+        let portable = Rc::clone(&state.borrow().portable);
+        portable.borrow().sidebar_visible()
+    });
+    with_chrome(hwnd, |chrome| chrome.dragging = visible);
+    drag_sidebar(hwnd);
+}
+
+/// .NET `UpdateSidebarWidth`: the pane width follows the pointer.
+pub(super) fn drag_sidebar(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let (dragging, dpi) = {
+        let state = state.borrow();
+        (state.chrome.dragging, state.dpi)
+    };
+    if !dragging {
+        return;
+    }
+    let mut point = windows::Win32::Foundation::POINT::default();
+    // SAFETY: point conversion for this thread's own window.
+    let converted = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).is_ok()
+            && windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point).as_bool()
+    };
+    if !converted {
+        return;
+    }
+    let width = clamp_sidebar_width(f64::from(point.x) * 96.0 / f64::from(dpi.max(1)));
+    let changed = {
+        let mut state = state.borrow_mut();
+        let changed = sidebar_width_dip(state.chrome.sidebar_width) != sidebar_width_dip(width);
+        state.chrome.sidebar_width = width;
+        changed
+    };
+    if changed {
+        reflow(hwnd, dpi);
+    }
+}
+
+/// .NET `StopSidebarResize`: saves the width.
+pub(super) fn end_sidebar_drag(hwnd: HWND) {
+    with_chrome(hwnd, |chrome| {
+        if chrome.dragging {
+            chrome.dragging = false;
+            let width = chrome.sidebar_width;
+            chrome.save(|settings| settings.sidebar_width = width);
+        }
+    });
+}
+
+/// Keyboard resize on the focused splitter; saved after each step.
+pub(super) fn resize_sidebar_by_key(hwnd: HWND, step: SidebarResize) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    if !portable.borrow().sidebar_visible() {
+        return;
+    }
+    let dpi = {
+        let mut state = state.borrow_mut();
+        let width = resize_sidebar(state.chrome.sidebar_width, step);
+        state.chrome.sidebar_width = width;
+        state.chrome.save(|settings| settings.sidebar_width = width);
+        state.dpi
+    };
+    reflow(hwnd, dpi);
+}
+
+fn apply_worker_results(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let results: Vec<WorkerResult> = state.borrow().chrome.worker_results.try_iter().collect();
+    for result in results {
+        let mut state_ref = state.borrow_mut();
+        let chrome = &mut state_ref.chrome;
+        match result {
+            WorkerResult::Tree { generation, result } if generation == chrome.tree_generation => {
+                chrome.tree_cancel = None;
+                match result {
+                    Ok(arena) => {
+                        if arena.incomplete() {
+                            chrome
+                                .diagnostics
+                                .show(REPOSITORY_INCOMPLETE_NOTICE, DiagnosticSeverity::Warning);
+                        }
+                        chrome.tree = arena;
+                        chrome.tree_populated.clear();
+                        chrome.tree_populated.insert(0);
+                        chrome.tree_dirty = true;
+                    }
+                    Err(ScanError::Cancelled) => {}
+                    Err(_) => chrome
+                        .diagnostics
+                        .show(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning),
+                }
+            }
+            WorkerResult::Tree { .. } => {}
+            WorkerResult::DetectedRoot(root) => {
+                chrome.detecting_root = false;
+                // .NET: the first document with a repository sets the root
+                // when none is open, and saves it.
+                if chrome.repository_root.is_none()
+                    && let Some(root) = root
+                {
+                    let text = root.to_string_lossy().into_owned();
+                    chrome.repository_root = Some(root.clone());
+                    chrome.save(|settings| settings.repository_root = Some(text));
+                    chrome.start_tree(&root);
+                }
+            }
+        }
+    }
+    sync_ui(hwnd);
+}
+
+/// The tree root and its children, copied for filling the control.
+type TreeSnapshot = (TreeNode, Vec<(usize, TreeNode)>);
+
+/// Brings every chrome control in line with the state. Lists are refilled
+/// only when their content changed.
+fn sync_ui(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    let Some(active) = state.try_borrow().ok().map(|_| active_tab(&state)) else {
+        return;
+    };
+    let portable = Rc::clone(&state.borrow().portable);
+    let theme = portable.borrow().theme();
+    struct Snapshot {
+        controls: Option<ChromeControls>,
+        selector: Option<HWND>,
+        outline: Option<Vec<OutlineEntry>>,
+        recent: Option<Vec<String>>,
+        tree: Option<Option<TreeSnapshot>>,
+        back: bool,
+        forward: bool,
+        reload: bool,
+        remote: bool,
+        mode: SidebarMode,
+        header: &'static str,
+        diagnostic: Option<String>,
+        relayout: bool,
+    }
+    let open_tabs: BTreeSet<u64> = portable
+        .borrow()
+        .tabs()
+        .tabs()
+        .iter()
+        .map(|tab| tab.id().get())
+        .collect();
+    let snapshot = {
+        let Ok(mut state_ref) = state.try_borrow_mut() else {
+            return;
+        };
+        let selector = state_ref.controls.map(|c| c.sidebar);
+        let chrome = &mut state_ref.chrome;
+        // Forget closed tabs (tab ids are never reused).
+        chrome.locations.retain(|tab, _| open_tabs.contains(tab));
+        chrome.outlines.retain(|tab, _| open_tabs.contains(tab));
+        chrome.reloading.retain(|tab| open_tabs.contains(tab));
+        chrome.pending_scroll.retain(|tab| open_tabs.contains(tab));
+        let outline_key = active.map(|tab| {
+            (
+                tab,
+                chrome
+                    .outlines
+                    .get(&tab)
+                    .map_or(0, |(generation, _)| *generation),
+            )
+        });
+        let outline = (outline_key != chrome.shown_outline).then(|| {
+            chrome.shown_outline = outline_key;
+            active
+                .and_then(|tab| chrome.outlines.get(&tab))
+                .map(|(_, entries)| entries.clone())
+                .unwrap_or_default()
+        });
+        let recent = chrome.recent_dirty.then(|| {
+            chrome.recent_dirty = false;
+            let settings = settings_bridge::current(chrome.store.as_ref());
+            let visible: Vec<String> = settings
+                .visible_recent_files(|path| Path::new(path).is_file())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            chrome.shown_recent.clone_from(&visible);
+            visible
+        });
+        let tree = chrome.tree_dirty.then(|| {
+            chrome.tree_dirty = false;
+            chrome.tree.root().map(|root| {
+                let children = root
+                    .children
+                    .iter()
+                    .filter_map(|index| chrome.tree.node(*index).map(|n| (*index, n.clone())))
+                    .collect();
+                (root.clone(), children)
+            })
+        });
+        let location = chrome.active_location(active);
+        let header = match chrome.mode {
+            SidebarMode::Repository => repository_header(chrome.tree.incomplete()),
+            mode => mode.header(),
+        };
+        let open = chrome.diagnostics.is_open();
+        Snapshot {
+            controls: chrome.controls,
+            selector,
+            outline,
+            recent,
+            tree,
+            back: location.is_some_and(TabLocation::can_go_back),
+            forward: location.is_some_and(TabLocation::can_go_forward),
+            reload: location.is_some(),
+            remote: chrome.allow_remote_assets,
+            mode: chrome.mode,
+            header,
+            diagnostic: chrome
+                .diagnostics
+                .current()
+                .map(crate::chrome_model::DiagnosticMessage::accessible_name),
+            relayout: open != chrome.diagnostics_laid_out,
+        }
+    };
+    let Some(controls) = snapshot.controls else {
+        return;
+    };
+    if let Some(entries) = snapshot.outline {
+        sidebar::fill_outline(controls.sidebar.outline, &entries);
+    }
+    if let Some(paths) = snapshot.recent {
+        sidebar::fill_recent(controls.sidebar.recent, &paths);
+    }
+    if let Some(tree) = snapshot.tree {
+        sidebar::fill_tree(
+            controls.sidebar.tree,
+            tree.as_ref().map(|(root, children)| {
+                (
+                    root,
+                    children
+                        .iter()
+                        .map(|(index, node)| (*index, node))
+                        .collect(),
+                )
+            }),
+        );
+    }
+    // SAFETY: enable state, menu check and combo selection of this thread's
+    // own controls; no borrow is held.
+    unsafe {
+        let _ = EnableWindow(controls.toolbar.back, snapshot.back);
+        let _ = EnableWindow(controls.toolbar.forward, snapshot.forward);
+        let _ = EnableWindow(controls.toolbar.reload, snapshot.reload);
+        if let Some(menu) = controls.menu {
+            let check = if snapshot.remote {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+            CheckMenuItem(menu, MENU_REMOTE_ASSETS as u32, (MF_BYCOMMAND | check).0);
+        }
+    }
+    send(controls.toolbar.theme, CB_SETCURSEL, theme_index(theme), 0);
+    if let Some(selector) = snapshot.selector {
+        sidebar::select_mode(selector, snapshot.mode);
+    }
+    set_text(controls.sidebar.header, snapshot.header);
+    set_text(
+        controls.diagnostics.text,
+        snapshot.diagnostic.as_deref().unwrap_or(""),
+    );
+    // SAFETY: repaint request for a child of this thread.
+    let _ = unsafe { InvalidateRect(Some(controls.diagnostics.text), None, true) };
+    if snapshot.relayout {
+        relayout(hwnd, &state);
+    }
+}

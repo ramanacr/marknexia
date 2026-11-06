@@ -86,6 +86,15 @@ use crate::{
     theme::{ColorSpec, EffectiveTheme, SystemColorRole, palette, resolve_theme},
 };
 
+// Shell chrome ported from the .NET MainWindow (toolbar, menu, sidebar,
+// diagnostics bar, settings). Hooks into this file are marked "chrome:".
+mod chrome;
+mod diagnostics;
+mod dialogs;
+mod settings_bridge;
+mod sidebar;
+mod toolbar;
+
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
 /// Applies a UIA-initiated selection to the WebView outside the UIA call.
@@ -163,6 +172,8 @@ struct AppState {
     startup: StartupTracker,
     /// Tabs whose rendered Markdown document is in the WebView session.
     rendered_tabs: BTreeSet<u64>,
+    /// chrome: toolbar, sidebar, diagnostics bar and settings.
+    chrome: chrome::ChromeState,
 }
 
 impl AppState {
@@ -176,6 +187,7 @@ impl AppState {
             render_sender,
             render_results,
             rendered_tabs: BTreeSet::new(),
+            chrome: chrome::ChromeState::new(),
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -268,6 +280,8 @@ pub fn run() -> Result<(), WindowError> {
             break;
         }
         let handled = msg.message == WM_KEYDOWN && route_native_key(hwnd, msg.wParam.0 as u16);
+        // chrome: .NET accelerators, Tab traversal, list activation.
+        let handled = handled || chrome::translate_message(hwnd, &msg);
         if !handled {
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -326,7 +340,8 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
             1001,
         )?,
         tabs: create_child(hwnd, instance, TAB_CLASS_NAME, w!(""), child_style(0), 1002)?,
-        sidebar: create_child(hwnd, instance, w!("LISTBOX"), w!(""), child_style(1), 1003)?,
+        // chrome: the sidebar view selector (.NET `SidebarModeSelector`).
+        sidebar: sidebar::create_mode_selector(hwnd, instance)?,
         find: create_child(
             hwnd,
             instance,
@@ -353,6 +368,8 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         state.readiness = Some(Readiness::create());
         Rc::clone(&state.portable)
     };
+    // chrome: controls, menu and saved settings, before startup renders.
+    chrome::install(hwnd, instance, &state)?;
     // Placeholder tabs only without documents. Document renders start before
     // the window is shown and overlap WebView2 startup.
     // Document mode follows the requested paths, not the tabs that opened:
@@ -526,6 +543,8 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     // StartupFailed now so a harness does not wait for its timeout.
     update_startup_readiness(&state);
     refresh_status(&state);
+    // chrome: restore the saved repository, show the chrome state.
+    chrome::after_startup(hwnd, &state, document_mode);
     Ok(())
 }
 
@@ -577,6 +596,9 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
     let title = documents::tab_title(&path);
     let (ticket, cancelled) = state_ref.renders.begin(tab_id);
     state_ref.tab_errors.remove(&tab_id);
+    // chrome: tab location, recent files, repository root detection.
+    state_ref.chrome.note_render(tab_id, &path);
+    let allow_remote_assets = state_ref.chrome.allow_remote_assets();
     let pool = state_ref.render_pool.get_or_insert_with(|| {
         let window = hwnd.0 as isize;
         let notify: documents::Notify = Arc::new(move || {
@@ -605,6 +627,7 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
         path,
         title,
         theme,
+        allow_remote_assets,
         cancelled,
     });
     if let Err(error) = submitted {
@@ -659,6 +682,7 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         tab_id,
         ticket,
         result,
+        outline,
     } = outcome;
     let portable = Rc::clone(&state.borrow().portable);
     let title = portable
@@ -673,6 +697,10 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         // The tab closed (or re-rendered) while this render was in flight.
         return;
     };
+    // chrome: outline, diagnostics; a failed reload keeps its document.
+    let Some(result) = chrome::filter_render_outcome(state, tab_id, result, outline) else {
+        return;
+    };
     let rendered = result.is_ok();
     let document = result.or_else(|error| {
         let message = format!("Could not open {title}: {error}");
@@ -685,6 +713,10 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
     let mut displayed = true;
     let added = match take_session(state) {
         Some(mut session) => {
+            // chrome: a reload replaces the tab's earlier document.
+            if session.has_document(tab_id) {
+                let _ = session.remove_document(tab_id);
+            }
             let added = document.and_then(|document| {
                 session
                     .add_document(document)
@@ -889,6 +921,12 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // chrome: control notifications, owner-drawn chrome, chrome actions.
+    if message != WM_NCCREATE
+        && let Some(result) = chrome::handle_message(hwnd, message, wparam, lparam)
+    {
+        return result;
+    }
     match message {
         WM_NCCREATE => {
             let creation = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
@@ -1344,6 +1382,8 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
         state.borrow_mut().notice = None;
     }
     refresh_status(state);
+    // chrome: outline and history buttons follow the active tab.
+    chrome::tabs_changed(state);
 }
 
 fn poll_webview(hwnd: HWND) {
@@ -1418,11 +1458,16 @@ fn poll_webview(hwnd: HWND) {
             chord.virtual_key,
             chord.ctrl,
             chord.shift,
-            false,
+            chord.alt,
         )) {
             let _ = execute_command(hwnd, command);
+        } else {
+            // chrome: the .NET command accelerators.
+            chrome::route_accelerator(hwnd, chord);
         }
     }
+    // chrome: restore reloaded documents' locations once loaded.
+    chrome::after_poll(&state);
     if let Some(error) = error {
         {
             let mut state = state.borrow_mut();
@@ -1531,6 +1576,8 @@ fn reflow(hwnd: HWND, dpi: u32) {
     };
     let actual_dpi = dpi.max(96);
     state.borrow_mut().dpi = actual_dpi;
+    // chrome: persisted sidebar width and the diagnostics bar.
+    let (sidebar_width, diagnostics_open) = state.borrow().chrome.layout_inputs();
     let app = portable.borrow();
     let layout = ShellLayout::compute(
         ShellLayoutRequest::new(
@@ -1539,7 +1586,9 @@ fn reflow(hwnd: HWND, dpi: u32) {
             actual_dpi,
         )
         .with_sidebar_visible(app.sidebar_visible())
-        .with_find_bar_visible(app.find_bar_visible()),
+        .with_find_bar_visible(app.find_bar_visible())
+        .with_sidebar_width(sidebar_width)
+        .with_diagnostics_visible(diagnostics_open),
     );
     drop(app);
     if let Some(c) = controls {
@@ -1587,6 +1636,8 @@ fn reflow(hwnd: HWND, dpi: u32) {
     if let Some(a11y) = a11y.as_ref() {
         a11y.update_tab_strip_bounds(layout.tab_strip);
     }
+    // chrome: toolbar, sidebar and diagnostics bar placement.
+    chrome::layout_children(hwnd, &layout);
 }
 
 fn move_child(hwnd: HWND, b: PixelRect) {
@@ -1634,6 +1685,8 @@ fn update_theme(hwnd: HWND) {
             let _ = unsafe { InvalidateRect(Some(window), None, true) };
         }
     }
+    // chrome: tree colors and control visual styles.
+    chrome::theme_changed(&state);
 }
 
 /// GDI brushes for dark-theme standard controls, deleted on drop.
@@ -2022,6 +2075,8 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
         }
         state.destroyed = true;
         state.uia_selection.take();
+        // chrome: cancel repository work.
+        state.chrome.shutdown();
         (
             state.webview.take(),
             state.accessibility.take(),
