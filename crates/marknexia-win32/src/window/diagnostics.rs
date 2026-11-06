@@ -80,6 +80,41 @@ pub(super) fn layout(controls: &DiagnosticsControls, bar: PixelRect, dpi: u32) {
     );
 }
 
+/// Announces a new message to assistive technology: a UIA notification
+/// from the message element's host provider (Narrator reads it), plus the
+/// MSAA live-region event for older clients.
+pub(super) fn announce(text_window: HWND, message: &str) {
+    use windows::{
+        Win32::UI::{
+            Accessibility::{
+                NotificationKind_Other, NotificationProcessing_ImportantMostRecent, NotifyWinEvent,
+                UiaHostProviderFromHwnd, UiaRaiseNotificationEvent,
+            },
+            WindowsAndMessaging::{CHILDID_SELF, EVENT_OBJECT_LIVEREGIONCHANGED, OBJID_CLIENT},
+        },
+        core::BSTR,
+    };
+    // SAFETY: the window is this thread's own control; the provider is
+    // released on drop; the BSTRs outlive the call.
+    unsafe {
+        if let Ok(provider) = UiaHostProviderFromHwnd(text_window) {
+            let _ = UiaRaiseNotificationEvent(
+                &provider,
+                NotificationKind_Other,
+                NotificationProcessing_ImportantMostRecent,
+                &BSTR::from(message),
+                &BSTR::from("MarknexiaDiagnostic"),
+            );
+        }
+        NotifyWinEvent(
+            EVENT_OBJECT_LIVEREGIONCHANGED,
+            text_window,
+            OBJID_CLIENT.0,
+            CHILDID_SELF as i32,
+        );
+    }
+}
+
 /// The .NET InfoBar icons (Segoe MDL2 Assets): Info, Warning, ErrorBadge.
 fn severity_glyph(severity: DiagnosticSeverity) -> char {
     match severity {
@@ -108,6 +143,9 @@ pub(super) fn draw(
         DiagnosticSeverity::Warning => colors.warning,
         DiagnosticSeverity::Error => colors.error,
     };
+    // High contrast: the glyph and text use ButtonText on ButtonFace.
+    let accent = super::chrome::readable_on(colors.elevated, accent);
+    let text_color = super::chrome::readable_on(colors.elevated, colors.text);
     let dc = item.hDC;
     let rect = item.rcItem;
     fill(dc, &rect, native_color(colors.elevated));
@@ -143,7 +181,7 @@ pub(super) fn draw(
             windows::Win32::Graphics::Gdi::DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         );
         SelectObject(dc, HGDIOBJ(fonts.1.0));
-        SetTextColor(dc, native_color(colors.text));
+        SetTextColor(dc, native_color(text_color));
         let mut text: Vec<u16> = message.message.encode_utf16().collect();
         let mut text_area = RECT {
             left: glyph_area.right,

@@ -4,19 +4,22 @@
 use std::path::PathBuf;
 
 use marknexia_core::settings::AppSettings;
+use marknexia_files::path::GatedPath;
 use marknexia_files::settings_store::{SettingsNotice, SettingsSaveError, SettingsStore};
 
 /// Test harnesses isolate the settings file the same way they isolate the
 /// WebView2 profile; only an absolute path is honored.
 const SETTINGS_PATH_VARIABLE: &str = "MARKNEXIA_SETTINGS_PATH";
 
-/// Opens the settings file: `MARKNEXIA_SETTINGS_PATH` when it is absolute,
-/// otherwise `%LOCALAPPDATA%\Marknexia\settings.json`. `None` when no path
+/// Opens the settings file: `MARKNEXIA_SETTINGS_PATH` when it is an
+/// absolute path that passes the path gate, otherwise `%LOCALAPPDATA%\Marknexia\settings.json`. `None` when no path
 /// is known (no `LOCALAPPDATA`); the shell then runs on defaults.
 pub(super) fn open() -> Option<(SettingsStore, Option<SettingsNotice>)> {
     if let Some(path) = std::env::var_os(SETTINGS_PATH_VARIABLE)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+        // Only a drive or UNC file path: no device, pipe or `\\?\` forms.
+        .filter(|path| GatedPath::new(&path.to_string_lossy()).is_ok())
     {
         return Some(SettingsStore::open(path));
     }

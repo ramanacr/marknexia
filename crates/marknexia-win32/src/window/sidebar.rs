@@ -305,29 +305,57 @@ pub(super) fn list_selection(list: HWND) -> Option<usize> {
 /// Clears the tree and inserts the root with its children expanded, as
 /// .NET `BuildTreeNode(tree, isRoot: true)` does. Deeper folders are filled
 /// on expansion ([`insert_children`]).
-pub(super) fn fill_tree(tree: HWND, root: Option<(&TreeNode, Vec<(usize, &TreeNode)>)>) {
+pub(super) fn fill_tree(
+    tree: HWND,
+    generation: u32,
+    root: Option<(&TreeNode, Vec<(usize, &TreeNode)>)>,
+) {
     send(tree, TVM_DELETEITEM, 0, TVI_ROOT.0);
     let Some((root, children)) = root else {
         return;
     };
-    let root_item = insert_item(tree, TVI_ROOT, 0, root);
+    let root_item = insert_item(tree, TVI_ROOT, generation, 0, root);
     if root_item.0 == 0 {
         return;
     }
     for (index, child) in children {
-        insert_item(tree, root_item, index, child);
+        insert_item(tree, root_item, generation, index, child);
     }
     send(tree, TVM_EXPAND, TVE_EXPAND, root_item.0);
 }
 
 /// Inserts the children of an expanding folder.
-pub(super) fn insert_children(tree: HWND, parent: HTREEITEM, children: Vec<(usize, &TreeNode)>) {
+pub(super) fn insert_children(
+    tree: HWND,
+    parent: HTREEITEM,
+    generation: u32,
+    children: Vec<(usize, &TreeNode)>,
+) {
     for (index, child) in children {
-        insert_item(tree, parent, index, child);
+        insert_item(tree, parent, generation, index, child);
     }
 }
 
-fn insert_item(tree: HWND, parent: HTREEITEM, index: usize, node: &TreeNode) -> HTREEITEM {
+/// An item's lParam: the tree generation in the high 32 bits and the arena
+/// index in the low 32 bits, so an item of an earlier tree is recognized.
+fn encode_tree_item(generation: u32, index: usize) -> LPARAM {
+    let index = u32::try_from(index).unwrap_or(u32::MAX);
+    LPARAM(((u64::from(generation) << 32) | u64::from(index)) as isize)
+}
+
+/// The (generation, arena index) stored by [`encode_tree_item`].
+pub(super) fn decode_tree_item(data: LPARAM) -> (u32, usize) {
+    let value = data.0 as u64;
+    ((value >> 32) as u32, (value & 0xFFFF_FFFF) as usize)
+}
+
+fn insert_item(
+    tree: HWND,
+    parent: HTREEITEM,
+    generation: u32,
+    index: usize,
+    node: &TreeNode,
+) -> HTREEITEM {
     let mut text = wide(&node.name);
     let insert = TVINSERTSTRUCTW {
         hParent: parent,
@@ -337,7 +365,7 @@ fn insert_item(tree: HWND, parent: HTREEITEM, index: usize, node: &TreeNode) -> 
                 mask: TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN,
                 pszText: PWSTR(text.as_mut_ptr()),
                 cChildren: TVITEMEXW_CHILDREN(i32::from(!node.children.is_empty())),
-                lParam: LPARAM(isize::try_from(index).unwrap_or(-1)),
+                lParam: encode_tree_item(generation, index),
                 ..Default::default()
             },
         },
@@ -351,8 +379,8 @@ fn insert_item(tree: HWND, parent: HTREEITEM, index: usize, node: &TreeNode) -> 
     HTREEITEM(item.0)
 }
 
-/// The arena index stored in a tree item.
-pub(super) fn tree_item_index(tree: HWND, item: HTREEITEM) -> Option<usize> {
+/// The (generation, arena index) stored in a tree item.
+pub(super) fn tree_item_index(tree: HWND, item: HTREEITEM) -> Option<(u32, usize)> {
     if item.0 == 0 {
         return None;
     }
@@ -368,9 +396,7 @@ pub(super) fn tree_item_index(tree: HWND, item: HTREEITEM) -> Option<usize> {
         std::ptr::from_mut(&mut query) as isize,
     )
     .0 != 0;
-    found
-        .then(|| usize::try_from(query.lParam.0).ok())
-        .flatten()
+    found.then(|| decode_tree_item(query.lParam))
 }
 
 pub(super) fn tree_selection(tree: HWND) -> HTREEITEM {
@@ -413,7 +439,10 @@ pub(super) fn draw_outline_item(item: &DRAWITEMSTRUCT, colors: Palette, font: HF
     let (background, foreground) = if selected {
         (colors.accent, colors.on_accent)
     } else {
-        (colors.surface, colors.text)
+        (
+            colors.surface,
+            chrome::readable_on(colors.surface, colors.text),
+        )
     };
     let dc = item.hDC;
     let rect = item.rcItem;

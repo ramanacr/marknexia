@@ -13,5 +13,11 @@ fn main() {
         println!(
             "cargo:rustc-link-arg-bins=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
         );
+    } else if windows {
+        // Without the manifest the shell runs on comctl32 5.8: no visual
+        // styles, and the sidebar controls lose their v6 behaviour.
+        println!(
+            "cargo:warning=marknexia-win32: no Common Controls 6.0 manifest is embedded for this non-MSVC Windows target"
+        );
     }
 }

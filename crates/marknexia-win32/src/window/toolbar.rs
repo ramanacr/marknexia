@@ -326,6 +326,8 @@ pub(super) fn draw_button(
     } else {
         (colors.elevated, colors.text)
     };
+    // High contrast: ButtonText (or GrayText) on ButtonFace.
+    let text = super::chrome::readable_on(face, text);
     let dc = item.hDC;
     let rect = item.rcItem;
     fill(dc, &rect, native_color(face));

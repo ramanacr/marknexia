@@ -16,7 +16,7 @@
 //!   the Open dialog does (`WM_OPEN_DIALOG`).
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::c_void,
     path::{Path, PathBuf},
@@ -30,6 +30,7 @@ use std::{
 
 use marknexia_core::{contracts::DiagnosticSeverity, settings::ThemePreference as StoredTheme};
 use marknexia_files::{
+    path::GatedPath,
     repository::{ScanError, ScanLimits, build_repository_tree, detect_repository_root},
     settings_store::SettingsStore,
 };
@@ -45,10 +46,11 @@ use windows::{
                 VK_SHIFT, VK_SPACE, VK_TAB,
             },
             WindowsAndMessaging::{
-                CheckMenuItem, GetNextDlgTabItem, HMENU, HWND_TOP, IsChild, MF_BYCOMMAND,
-                MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-                WM_APP, WM_COMMAND, WM_DRAWITEM, WM_KEYDOWN, WM_NOTIFY, WM_SYSKEYDOWN,
+                CheckMenuItem, GetNextDlgTabItem, GetWindowThreadProcessId, HMENU, HWND_TOP,
+                IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW,
+                SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+                SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND, WM_DRAWITEM,
+                WM_KEYDOWN, WM_NOTIFY, WM_SYSKEYDOWN,
             },
         },
     },
@@ -69,10 +71,10 @@ use crate::{
         SidebarResize, TabLocation, TreeArena, TreeNode, clamp_sidebar_width, remote_assets_notice,
         repository_header, resize_sidebar, route_chrome_key, same_document_path, sidebar_width_dip,
     },
-    documents::OpenError,
+    documents::{OpenError, check_document_path},
     keyboard::ShellCommand,
     layout::{Dip, PixelRect, ShellLayout},
-    theme::{EffectiveTheme, ThemePreference},
+    theme::{ColorSpec, EffectiveTheme, SystemColorRole, ThemePreference},
 };
 
 /// Runs queued chrome actions outside the control notification.
@@ -167,17 +169,124 @@ enum ChromeAction {
     Sync,
 }
 
+/// File-system work done off the UI thread, so an offline UNC path never
+/// blocks the window. Every path passed the lexical gate first.
 enum WorkerResult {
     Tree {
         generation: u64,
         result: Result<TreeArena, ScanError>,
     },
     DetectedRoot(Option<PathBuf>),
+    /// The visible recent files (gated, existing), for one listing request.
+    Recent {
+        generation: u64,
+        visible: Vec<String>,
+    },
+    /// A document to open from the sidebar, after its existence check.
+    OpenChecked {
+        path: PathBuf,
+        exists: bool,
+    },
+    /// A folder to open as the repository, with its README if one exists.
+    FolderChecked {
+        folder: PathBuf,
+        exists: bool,
+        readme: Option<PathBuf>,
+    },
+    /// The saved repository root at startup.
+    RootChecked {
+        root: PathBuf,
+        exists: bool,
+    },
+}
+
+// Chrome actions are queued outside `AppState`, so queueing never needs a
+// `RefCell` borrow and a busy borrow can never strand the queue.
+thread_local! {
+    static ACTIONS: RefCell<VecDeque<ChromeAction>> = const { RefCell::new(VecDeque::new()) };
+    static ACTION_POSTED: Cell<bool> = const { Cell::new(false) };
+    static ACTION_WINDOW: Cell<isize> = const { Cell::new(0) };
+}
+
+/// Queues `action` and posts `WM_CHROME_ACTION` once per batch.
+fn queue_action(action: ChromeAction) {
+    ACTIONS.with(|actions| actions.borrow_mut().push_back(action));
+    let window = ACTION_WINDOW.with(Cell::get);
+    if window != 0 && !ACTION_POSTED.with(Cell::get) {
+        ACTION_POSTED.with(|posted| posted.set(true));
+        // SAFETY: posts to this thread's own window; no pointers.
+        let posted = unsafe {
+            PostMessageW(
+                Some(HWND(window as *mut c_void)),
+                WM_CHROME_ACTION,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+        if posted.is_err() {
+            ACTION_POSTED.with(|flag| flag.set(false));
+        }
+    }
+}
+
+fn next_action() -> Option<ChromeAction> {
+    ACTIONS.with(|actions| actions.borrow_mut().pop_front())
+}
+
+/// How a worker thread reports back: the result channel, the shell window,
+/// and a flag cleared when the window is destroyed.
+#[derive(Clone)]
+struct WorkerLink {
+    window: isize,
+    alive: Arc<AtomicBool>,
+    sender: mpsc::Sender<WorkerResult>,
+}
+
+impl WorkerLink {
+    fn deliver(&self, result: WorkerResult) {
+        if !self.alive.load(Ordering::Acquire) || self.sender.send(result).is_err() {
+            return;
+        }
+        let window = HWND(self.window as *mut c_void);
+        let mut owner = 0;
+        // SAFETY: plain window queries and a post without pointers. The
+        // alive flag is cleared at WM_DESTROY; IsWindow and the owning
+        // process guard against a recycled handle.
+        unsafe {
+            if !self.alive.load(Ordering::Acquire) || !IsWindow(Some(window)).as_bool() {
+                return;
+            }
+            GetWindowThreadProcessId(window, Some(&mut owner));
+            if owner != std::process::id() {
+                return;
+            }
+            let _ = PostMessageW(Some(window), WM_CHROME_WORKER, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// Runs `work` on a named thread; `false` when the thread could not
+    /// start.
+    fn spawn(
+        &self,
+        name: &str,
+        work: impl FnOnce() -> Option<WorkerResult> + Send + 'static,
+    ) -> bool {
+        let link = self.clone();
+        std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                if let Some(result) = work() {
+                    link.deliver(result);
+                }
+            })
+            .is_ok()
+    }
 }
 
 /// Chrome state inside the shell's `AppState`.
 pub(super) struct ChromeState {
-    window: isize,
+    link: WorkerLink,
+    worker_results: mpsc::Receiver<WorkerResult>,
     controls: Option<ChromeControls>,
     store: Option<SettingsStore>,
     allow_remote_assets: bool,
@@ -187,35 +296,46 @@ pub(super) struct ChromeState {
     diagnostics: DiagnosticsBar,
     /// Whether the last layout had the diagnostics bar open.
     diagnostics_laid_out: bool,
+    /// The last message announced to assistive technology.
+    announced: Option<String>,
     outlines: BTreeMap<u64, (u64, Vec<OutlineEntry>)>,
     outline_generation: u64,
     shown_outline: Option<(u64, u64)>,
     locations: BTreeMap<u64, TabLocation>,
+    /// Tabs whose first render of their path has not succeeded yet; the
+    /// path joins the recent files only after it does.
+    recent_pending: BTreeSet<u64>,
     reloading: BTreeSet<u64>,
     pending_scroll: BTreeSet<u64>,
     repository_root: Option<PathBuf>,
     /// The saved root, restored after startup when no document was given.
     saved_root: Option<PathBuf>,
     detecting_root: bool,
+    root_cancel: Option<Arc<AtomicBool>>,
     tree: TreeArena,
     tree_populated: BTreeSet<usize>,
     tree_dirty: bool,
     tree_generation: u64,
+    /// The generation of the tree shown in the control (item lParams).
+    tree_shown: u32,
     tree_cancel: Option<Arc<AtomicBool>>,
-    worker_sender: mpsc::Sender<WorkerResult>,
-    worker_results: mpsc::Receiver<WorkerResult>,
-    actions: VecDeque<ChromeAction>,
-    action_posted: bool,
     recent_dirty: bool,
+    recent_generation: u64,
+    recent_fill: bool,
     shown_recent: Vec<String>,
     fonts: Option<Fonts>,
 }
 
 impl ChromeState {
     pub(super) fn new() -> Self {
-        let (worker_sender, worker_results) = mpsc::channel();
+        let (sender, worker_results) = mpsc::channel();
         Self {
-            window: 0,
+            link: WorkerLink {
+                window: 0,
+                alive: Arc::new(AtomicBool::new(true)),
+                sender,
+            },
+            worker_results,
             controls: None,
             store: None,
             allow_remote_assets: false,
@@ -224,25 +344,27 @@ impl ChromeState {
             dragging: false,
             diagnostics: DiagnosticsBar::default(),
             diagnostics_laid_out: false,
+            announced: None,
             outlines: BTreeMap::new(),
             outline_generation: 0,
             shown_outline: None,
             locations: BTreeMap::new(),
+            recent_pending: BTreeSet::new(),
             reloading: BTreeSet::new(),
             pending_scroll: BTreeSet::new(),
             repository_root: None,
             saved_root: None,
             detecting_root: false,
+            root_cancel: None,
             tree: TreeArena::default(),
             tree_populated: BTreeSet::new(),
             tree_dirty: false,
             tree_generation: 0,
+            tree_shown: 0,
             tree_cancel: None,
-            worker_sender,
-            worker_results,
-            actions: VecDeque::new(),
-            action_posted: false,
             recent_dirty: true,
+            recent_generation: 0,
+            recent_fill: false,
             shown_recent: Vec::new(),
             fonts: None,
         }
@@ -262,8 +384,9 @@ impl ChromeState {
     }
 
     /// Records the document a render is for. The first render of a path in
-    /// a tab is an open: .NET adds it to the recent files and, without a
-    /// repository, looks for the document's repository root. Data only; no
+    /// a tab is an open: once it succeeds, the path joins the recent files
+    /// (`filter_render_outcome`); without a repository, the document's
+    /// repository root is looked for off the UI thread. Data only; no
     /// control is touched, because `start_render` holds the state borrow.
     pub(super) fn note_render(&mut self, tab_id: u64, path: &Path) {
         if self
@@ -275,40 +398,28 @@ impl ChromeState {
         }
         self.locations
             .insert(tab_id, TabLocation::new(path.to_path_buf()));
-        let text = path.to_string_lossy().into_owned();
-        if let Some(error) = settings_bridge::add_recent_file(self.store.as_mut(), &text) {
-            self.diagnostics.show(error, DiagnosticSeverity::Warning);
-        }
-        self.recent_dirty = true;
+        self.recent_pending.insert(tab_id);
         if self.repository_root.is_none() && !self.detecting_root {
-            self.detecting_root = true;
-            self.spawn_root_detection(text);
+            self.spawn_root_detection(path.to_string_lossy().into_owned());
         }
         self.post(ChromeAction::Sync);
     }
 
-    /// Stops repository work when the window closes.
+    /// Stops repository work and worker notifications when the window
+    /// closes (WM_DESTROY).
     pub(super) fn shutdown(&mut self) {
-        if let Some(cancel) = self.tree_cancel.take() {
+        self.link.alive.store(false, Ordering::Release);
+        for cancel in [self.tree_cancel.take(), self.root_cancel.take()]
+            .into_iter()
+            .flatten()
+        {
             cancel.store(true, Ordering::Release);
         }
-        self.window = 0;
+        ACTION_WINDOW.with(|window| window.set(0));
     }
 
     fn post(&mut self, action: ChromeAction) {
-        self.actions.push_back(action);
-        if !self.action_posted && self.window != 0 {
-            self.action_posted = true;
-            // SAFETY: posts to this thread's own window; no pointers.
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(self.window as *mut c_void)),
-                    WM_CHROME_ACTION,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
-        }
+        queue_action(action);
     }
 
     fn diagnostic(&mut self, message: impl Into<String>, severity: DiagnosticSeverity) {
@@ -322,20 +433,36 @@ impl ChromeState {
         }
     }
 
-    fn spawn_root_detection(&self, document: String) {
-        let sender = self.worker_sender.clone();
-        let window = self.window;
-        let spawned = std::thread::Builder::new()
-            .name("marknexia-repository-root".to_owned())
-            .spawn(move || {
-                // Errors (other than access denied) mean no root, as the
-                // .NET catch in `ResolveRepositoryRootForDocument` callers.
-                let root = detect_repository_root(&document).ok().flatten();
-                if sender.send(WorkerResult::DetectedRoot(root)).is_ok() {
-                    notify_worker(window);
-                }
-            });
-        drop(spawned);
+    fn add_recent(&mut self, path: &Path) {
+        let text = path.to_string_lossy().into_owned();
+        if let Some(error) = settings_bridge::add_recent_file(self.store.as_mut(), &text) {
+            self.diagnostics.show(error, DiagnosticSeverity::Warning);
+        }
+        self.recent_dirty = true;
+        self.post(ChromeAction::Sync);
+    }
+
+    /// .NET `DetectRepositoryRoot` for the first document without a
+    /// repository. Cancelled when a repository is opened or the window
+    /// closes; the result is then dropped.
+    fn spawn_root_detection(&mut self, document: String) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let started = self.link.spawn("marknexia-repository-root", move || {
+            // `detect_repository_root` gates the path before any access.
+            // Errors (other than access denied) mean no root.
+            let root = detect_repository_root(&document).ok().flatten();
+            (!worker_cancel.load(Ordering::Acquire)).then_some(WorkerResult::DetectedRoot(root))
+        });
+        self.detecting_root = started;
+        self.root_cancel = started.then_some(cancel);
+    }
+
+    fn cancel_root_detection(&mut self) {
+        if let Some(cancel) = self.root_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.detecting_root = false;
     }
 
     /// Starts a repository scan (.NET `RefreshRepositoryFilesAsync`): any
@@ -348,44 +475,49 @@ impl ChromeState {
         let generation = self.tree_generation;
         let cancel = Arc::new(AtomicBool::new(false));
         self.tree_cancel = Some(Arc::clone(&cancel));
-        let sender = self.worker_sender.clone();
-        let window = self.window;
         let root = root.to_string_lossy().into_owned();
-        let spawned = std::thread::Builder::new()
-            .name("marknexia-repository".to_owned())
-            .spawn(move || {
-                let result = build_repository_tree(&root, &ScanLimits::default(), &|| {
-                    cancel.load(Ordering::Acquire)
-                })
-                .map(TreeArena::from_tree);
-                if sender
-                    .send(WorkerResult::Tree { generation, result })
-                    .is_ok()
-                {
-                    notify_worker(window);
-                }
-            });
-        if spawned.is_err() {
+        // `build_repository_tree` gates the root before any access.
+        let started = self.link.spawn("marknexia-repository", move || {
+            let result = build_repository_tree(&root, &ScanLimits::default(), &|| {
+                cancel.load(Ordering::Acquire)
+            })
+            .map(TreeArena::from_tree);
+            Some(WorkerResult::Tree { generation, result })
+        });
+        if !started {
             self.diagnostic(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning);
         }
+    }
+
+    /// Lists the recent files that pass the document path gate and exist,
+    /// off the UI thread (.NET `RefreshRecentFiles`).
+    fn start_recent_listing(&mut self) {
+        self.recent_dirty = false;
+        self.recent_generation = self.recent_generation.wrapping_add(1);
+        let generation = self.recent_generation;
+        let recent = settings_bridge::current(self.store.as_ref()).recent_files;
+        self.link.spawn("marknexia-recent-files", move || {
+            let settings = marknexia_core::settings::AppSettings {
+                recent_files: recent,
+                ..Default::default()
+            };
+            let visible = settings
+                .visible_recent_files(|path| {
+                    check_document_path(path).is_ok() && Path::new(path).is_file()
+                })
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            Some(WorkerResult::Recent {
+                generation,
+                visible,
+            })
+        });
     }
 
     fn active_location(&self, active: Option<u64>) -> Option<&TabLocation> {
         active.and_then(|tab| self.locations.get(&tab))
     }
-}
-
-fn notify_worker(window: isize) {
-    // SAFETY: PostMessageW may target a window owned by another thread;
-    // after the window is destroyed the post just fails.
-    let _ = unsafe {
-        PostMessageW(
-            Some(HWND(window as *mut c_void)),
-            WM_CHROME_WORKER,
-            WPARAM(0),
-            LPARAM(0),
-        )
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -464,12 +596,8 @@ fn theme_index(theme: ThemePreference) -> usize {
     }
 }
 
-fn post_action(hwnd: HWND, action: ChromeAction) {
-    if let Some(state) = state_of(hwnd)
-        && let Ok(mut state) = state.try_borrow_mut()
-    {
-        state.chrome.post(action);
-    }
+fn post_action(_hwnd: HWND, action: ChromeAction) {
+    queue_action(action);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +652,8 @@ pub(super) fn install(
     {
         let mut state = state.borrow_mut();
         let chrome = &mut state.chrome;
-        chrome.window = hwnd.0 as isize;
+        chrome.link.window = hwnd.0 as isize;
+        ACTION_WINDOW.with(|window| window.set(hwnd.0 as isize));
         chrome.allow_remote_assets = settings.allow_remote_assets;
         chrome.mode = mode;
         chrome.sidebar_width = clamp_sidebar_width(settings.sidebar_width);
@@ -552,9 +681,15 @@ pub(super) fn after_startup(hwnd: HWND, state: &Rc<RefCell<AppState>>, document_
         // With a startup document .NET resolves the root from that document
         // instead (see `note_render`).
         if let (false, Some(root)) = (document_mode, chrome.saved_root.take()) {
-            if root.is_dir() {
-                chrome.repository_root = Some(root.clone());
-                chrome.start_tree(&root);
+            if GatedPath::new(&root.to_string_lossy()).is_ok() {
+                // The existence check can block on an offline share.
+                let started = chrome.link.spawn("marknexia-repository-restore", move || {
+                    let exists = root.is_dir();
+                    Some(WorkerResult::RootChecked { root, exists })
+                });
+                if !started {
+                    chrome.diagnostic(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning);
+                }
             } else {
                 chrome.save(|settings| settings.repository_root = None);
             }
@@ -681,6 +816,14 @@ pub(super) fn filter_render_outcome(
                 // .NET `PendingScroll`: restore the location after the load.
                 chrome.pending_scroll.insert(tab_id);
             }
+            if chrome.recent_pending.remove(&tab_id)
+                && let Some(path) = chrome
+                    .locations
+                    .get(&tab_id)
+                    .map(|location| location.path().to_path_buf())
+            {
+                chrome.add_recent(&path);
+            }
             chrome.post(ChromeAction::Sync);
             Some(result)
         }
@@ -692,6 +835,7 @@ pub(super) fn filter_render_outcome(
             None
         }
         Err(error) => {
+            chrome.recent_pending.remove(&tab_id);
             chrome.outlines.remove(&tab_id);
             chrome.diagnostic(
                 format!("Unable to open document: {error}"),
@@ -956,11 +1100,15 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
 }
 
 fn open_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM) {
-    let Some(index) = sidebar::tree_item_index(tree, item) else {
+    let Some((generation, index)) = sidebar::tree_item_index(tree, item) else {
         return;
     };
     let path = state_of(hwnd).and_then(|state| {
         let state = state.try_borrow().ok()?;
+        // An item of an earlier tree is stale.
+        if generation != state.chrome.tree_shown {
+            return None;
+        }
         let node = state.chrome.tree.node(index)?;
         (!node.is_folder).then(|| node.path.clone())
     });
@@ -970,10 +1118,8 @@ fn open_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM) {
 }
 
 /// Fills a folder on first expansion (children are inserted lazily).
-fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, index: LPARAM) {
-    let Ok(index) = usize::try_from(index.0) else {
-        return;
-    };
+fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, data: LPARAM) {
+    let (generation, index) = sidebar::decode_tree_item(data);
     let Some(state) = state_of(hwnd) else {
         return;
     };
@@ -982,7 +1128,7 @@ fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, index: LPARAM) {
             return;
         };
         let chrome = &mut state.chrome;
-        if !chrome.tree_populated.insert(index) {
+        if generation != chrome.tree_shown || !chrome.tree_populated.insert(index) {
             return;
         }
         let Some(node) = chrome.tree.node(index) else {
@@ -996,6 +1142,7 @@ fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, index: LPARAM) {
     sidebar::insert_children(
         tree,
         item,
+        generation,
         children
             .iter()
             .map(|(index, node)| (*index, node))
@@ -1005,28 +1152,45 @@ fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, index: LPARAM) {
 
 fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
     let id = item.CtlID as usize;
-    let state = state_of(hwnd)?;
-    let state = state.try_borrow().ok()?;
-    let fonts = state.chrome.fonts.as_ref()?;
-    let colors = palette(state.theme);
-    match id {
-        ID_DIAGNOSTIC_TEXT => diagnostics::draw(
-            item,
-            colors,
-            state.chrome.diagnostics.current(),
+    let face = toolbar::button_face(id);
+    if !matches!(id, ID_DIAGNOSTIC_TEXT | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE) && face.is_none() {
+        return None;
+    }
+    // Copy what painting needs, then release the borrow: painting the
+    // outline sends LB_GETTEXT to the list box.
+    let (colors, fonts, dpi, message) = {
+        let state = state_of(hwnd)?;
+        let state = state.try_borrow().ok()?;
+        let fonts = state.chrome.fonts.as_ref()?;
+        (
+            palette(state.theme),
             (fonts.glyph, fonts.text),
             state.dpi,
-        ),
-        ID_DIAGNOSTIC_CLOSE => {
-            toolbar::draw_button(item, colors, '\u{E711}', None, (fonts.glyph, fonts.text));
-        }
-        ID_OUTLINE => sidebar::draw_outline_item(item, colors, fonts.text, state.dpi),
-        _ => {
-            let (glyph, label) = toolbar::button_face(id)?;
-            toolbar::draw_button(item, colors, glyph, label, (fonts.glyph, fonts.text));
-        }
+            (id == ID_DIAGNOSTIC_TEXT)
+                .then(|| state.chrome.diagnostics.current().cloned())
+                .flatten(),
+        )
+    };
+    match (id, face) {
+        (ID_DIAGNOSTIC_TEXT, _) => diagnostics::draw(item, colors, message.as_ref(), fonts, dpi),
+        (ID_DIAGNOSTIC_CLOSE, _) => toolbar::draw_button(item, colors, '\u{E711}', None, fonts),
+        (ID_OUTLINE, _) => sidebar::draw_outline_item(item, colors, fonts.1, dpi),
+        (_, Some((glyph, label))) => toolbar::draw_button(item, colors, glyph, label, fonts),
+        _ => return None,
     }
     Some(LRESULT(1))
+}
+
+/// The foreground color for text on `background`: in high contrast, text on
+/// a button face uses ButtonText (WindowText belongs on Window).
+pub(super) fn readable_on(background: ColorSpec, foreground: ColorSpec) -> ColorSpec {
+    match (background, foreground) {
+        (
+            ColorSpec::System(SystemColorRole::ButtonFace),
+            ColorSpec::System(SystemColorRole::WindowText),
+        ) => ColorSpec::System(SystemColorRole::ButtonText),
+        _ => foreground,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,20 +1198,8 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
 // ---------------------------------------------------------------------------
 
 fn run_actions(hwnd: HWND) {
-    let Some(state) = state_of(hwnd) else {
-        return;
-    };
-    if let Ok(mut state) = state.try_borrow_mut() {
-        state.chrome.action_posted = false;
-    }
-    loop {
-        let next = state
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut state| state.chrome.actions.pop_front());
-        let Some(action) = next else {
-            break;
-        };
+    ACTION_POSTED.with(|posted| posted.set(false));
+    while let Some(action) = next_action() {
         run_action(hwnd, action);
     }
 }
@@ -1322,7 +1474,35 @@ fn open_or_select(hwnd: HWND, path: PathBuf) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if !path.is_file() {
+    let mut state = state.borrow_mut();
+    let chrome = &mut state.chrome;
+    if let Err(error) = check_document_path(&path.to_string_lossy()) {
+        chrome.diagnostic(
+            format!("Unable to open document: {error}"),
+            DiagnosticSeverity::Error,
+        );
+        return;
+    }
+    // The existence check can block on an offline share.
+    let started = chrome.link.spawn("marknexia-open-check", move || {
+        let exists = path.is_file();
+        Some(WorkerResult::OpenChecked { path, exists })
+    });
+    if !started {
+        chrome.diagnostic(
+            "Unable to open document: the file check could not start.",
+            DiagnosticSeverity::Error,
+        );
+    }
+}
+
+/// The rest of `open_or_select` once the file is known to exist: an open
+/// document is selected and scrolled to its top; otherwise a new tab opens.
+fn finish_open(hwnd: HWND, path: PathBuf, exists: bool) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    if !exists {
         state.borrow_mut().chrome.diagnostic(
             format!("File not found: {}", path.display()),
             DiagnosticSeverity::Error,
@@ -1353,12 +1533,10 @@ fn open_or_select(hwnd: HWND, path: PathBuf) {
             {
                 let mut state = state.borrow_mut();
                 let chrome = &mut state.chrome;
-                let text = path.to_string_lossy().into_owned();
-                if let Some(error) = settings_bridge::add_recent_file(chrome.store.as_mut(), &text)
-                {
-                    chrome.diagnostics.show(error, DiagnosticSeverity::Warning);
+                // .NET adds the path again; only a document that rendered.
+                if chrome.outlines.contains_key(&tab) {
+                    chrome.add_recent(&path);
                 }
-                chrome.recent_dirty = true;
             }
             let _ = select_tab_id(hwnd, tab, false);
             let changed = state
@@ -1376,12 +1554,44 @@ fn open_or_select(hwnd: HWND, path: PathBuf) {
     }
 }
 
-/// .NET `OpenRepositoryFolderAsync`.
+/// .NET `OpenRepositoryFolderAsync`: the folder passes the root gate here;
+/// its existence and README are checked on a worker.
 fn open_repository(hwnd: HWND, folder: &Path) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if !folder.is_dir() {
+    let mut state = state.borrow_mut();
+    let chrome = &mut state.chrome;
+    if let Err(error) = GatedPath::new(&folder.to_string_lossy()) {
+        chrome.diagnostic(
+            format!("{}", ScanError::InvalidRoot(error)),
+            DiagnosticSeverity::Error,
+        );
+        return;
+    }
+    let folder = folder.to_path_buf();
+    let started = chrome.link.spawn("marknexia-folder-check", move || {
+        let exists = folder.is_dir();
+        let readme = folder.join("README.md");
+        let readme =
+            (exists && check_document_path(&readme.to_string_lossy()).is_ok() && readme.is_file())
+                .then_some(readme);
+        Some(WorkerResult::FolderChecked {
+            folder,
+            exists,
+            readme,
+        })
+    });
+    if !started {
+        chrome.diagnostic(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning);
+    }
+}
+
+fn finish_open_repository(hwnd: HWND, folder: &Path, exists: bool, readme: Option<PathBuf>) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    if !exists {
         state.borrow_mut().chrome.diagnostic(
             format!("Folder not found: {}", folder.display()),
             DiagnosticSeverity::Error,
@@ -1394,6 +1604,9 @@ fn open_repository(hwnd: HWND, folder: &Path) {
         let portable = Rc::clone(&state.portable);
         let chrome = &mut state.chrome;
         let root = folder.to_string_lossy().into_owned();
+        // A detection still running for an earlier document must not
+        // replace the chosen folder.
+        chrome.cancel_root_detection();
         chrome.repository_root = Some(folder.to_path_buf());
         chrome.save(|settings| {
             settings.repository_root = Some(root.clone());
@@ -1412,9 +1625,8 @@ fn open_repository(hwnd: HWND, folder: &Path) {
         sidebar::select_mode(selector, SidebarMode::Repository);
     }
     relayout(hwnd, &state);
-    let readme = folder.join("README.md");
-    if readme.is_file() {
-        open_or_select(hwnd, readme);
+    if let Some(readme) = readme {
+        finish_open(hwnd, readme, true);
     }
     sync_ui(hwnd);
 }
@@ -1576,46 +1788,83 @@ fn apply_worker_results(hwnd: HWND) {
     };
     let results: Vec<WorkerResult> = state.borrow().chrome.worker_results.try_iter().collect();
     for result in results {
-        let mut state_ref = state.borrow_mut();
-        let chrome = &mut state_ref.chrome;
+        // Opening continues outside the borrow: it selects tabs, starts
+        // renders and talks to WebView2.
         match result {
-            WorkerResult::Tree { generation, result } if generation == chrome.tree_generation => {
-                chrome.tree_cancel = None;
-                match result {
-                    Ok(arena) => {
-                        if arena.incomplete() {
-                            chrome
-                                .diagnostics
-                                .show(REPOSITORY_INCOMPLETE_NOTICE, DiagnosticSeverity::Warning);
-                        }
-                        chrome.tree = arena;
-                        chrome.tree_populated.clear();
-                        chrome.tree_populated.insert(0);
-                        chrome.tree_dirty = true;
-                    }
-                    Err(ScanError::Cancelled) => {}
-                    Err(_) => chrome
-                        .diagnostics
-                        .show(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning),
-                }
+            WorkerResult::OpenChecked { path, exists } => {
+                finish_open(hwnd, path, exists);
+                continue;
             }
-            WorkerResult::Tree { .. } => {}
-            WorkerResult::DetectedRoot(root) => {
-                chrome.detecting_root = false;
-                // .NET: the first document with a repository sets the root
-                // when none is open, and saves it.
-                if chrome.repository_root.is_none()
-                    && let Some(root) = root
-                {
-                    let text = root.to_string_lossy().into_owned();
-                    chrome.repository_root = Some(root.clone());
-                    chrome.save(|settings| settings.repository_root = Some(text));
-                    chrome.start_tree(&root);
-                }
+            WorkerResult::FolderChecked {
+                folder,
+                exists,
+                readme,
+            } => {
+                finish_open_repository(hwnd, &folder, exists, readme);
+                continue;
             }
+            result => apply_worker_result(&mut state.borrow_mut().chrome, result),
         }
     }
     sync_ui(hwnd);
+}
+
+fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
+    match result {
+        WorkerResult::Tree { generation, result } if generation == chrome.tree_generation => {
+            chrome.tree_cancel = None;
+            match result {
+                Ok(arena) => {
+                    if arena.incomplete() {
+                        chrome
+                            .diagnostics
+                            .show(REPOSITORY_INCOMPLETE_NOTICE, DiagnosticSeverity::Warning);
+                    }
+                    chrome.tree = arena;
+                    chrome.tree_populated.clear();
+                    chrome.tree_populated.insert(0);
+                    chrome.tree_dirty = true;
+                }
+                Err(ScanError::Cancelled) => {}
+                Err(_) => chrome
+                    .diagnostics
+                    .show(REPOSITORY_LOAD_FAILED, DiagnosticSeverity::Warning),
+            }
+        }
+        WorkerResult::DetectedRoot(root) => {
+            chrome.detecting_root = false;
+            chrome.root_cancel = None;
+            // .NET: the first document with a repository sets the root
+            // when none is open, and saves it.
+            if chrome.repository_root.is_none()
+                && let Some(root) = root
+            {
+                let text = root.to_string_lossy().into_owned();
+                chrome.repository_root = Some(root.clone());
+                chrome.save(|settings| settings.repository_root = Some(text));
+                chrome.start_tree(&root);
+            }
+        }
+        WorkerResult::RootChecked { root, exists } => {
+            if !exists {
+                chrome.save(|settings| settings.repository_root = None);
+            } else if chrome.repository_root.is_none() {
+                chrome.repository_root = Some(root.clone());
+                chrome.start_tree(&root);
+            }
+        }
+        WorkerResult::Recent {
+            generation,
+            visible,
+        } if generation == chrome.recent_generation => {
+            chrome.shown_recent = visible;
+            chrome.recent_fill = true;
+        }
+        WorkerResult::Tree { .. }
+        | WorkerResult::Recent { .. }
+        | WorkerResult::OpenChecked { .. }
+        | WorkerResult::FolderChecked { .. } => {}
+    }
 }
 
 /// The tree root and its children, copied for filling the control.
@@ -1645,6 +1894,8 @@ fn sync_ui(hwnd: HWND) {
         mode: SidebarMode,
         header: &'static str,
         diagnostic: Option<String>,
+        announce: Option<String>,
+        tree_generation: u32,
         relayout: bool,
     }
     let open_tabs: BTreeSet<u64> = portable
@@ -1681,19 +1932,14 @@ fn sync_ui(hwnd: HWND) {
                 .map(|(_, entries)| entries.clone())
                 .unwrap_or_default()
         });
-        let recent = chrome.recent_dirty.then(|| {
-            chrome.recent_dirty = false;
-            let settings = settings_bridge::current(chrome.store.as_ref());
-            let visible: Vec<String> = settings
-                .visible_recent_files(|path| Path::new(path).is_file())
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-            chrome.shown_recent.clone_from(&visible);
-            visible
-        });
+        if chrome.recent_dirty {
+            chrome.start_recent_listing();
+        }
+        let recent = std::mem::take(&mut chrome.recent_fill).then(|| chrome.shown_recent.clone());
         let tree = chrome.tree_dirty.then(|| {
             chrome.tree_dirty = false;
+            // Only the low 32 bits travel in item lParams.
+            chrome.tree_shown = chrome.tree_generation as u32;
             chrome.tree.root().map(|root| {
                 let children = root
                     .children
@@ -1703,12 +1949,22 @@ fn sync_ui(hwnd: HWND) {
                 (root.clone(), children)
             })
         });
-        let location = chrome.active_location(active);
         let header = match chrome.mode {
             SidebarMode::Repository => repository_header(chrome.tree.incomplete()),
             mode => mode.header(),
         };
         let open = chrome.diagnostics.is_open();
+        let diagnostic = chrome
+            .diagnostics
+            .current()
+            .map(crate::chrome_model::DiagnosticMessage::accessible_name);
+        // Announce each new message once.
+        let announce = diagnostic
+            .as_ref()
+            .filter(|text| chrome.announced.as_ref() != Some(*text))
+            .cloned();
+        chrome.announced.clone_from(&diagnostic);
+        let location = chrome.active_location(active);
         Snapshot {
             controls: chrome.controls,
             selector,
@@ -1721,10 +1977,9 @@ fn sync_ui(hwnd: HWND) {
             remote: chrome.allow_remote_assets,
             mode: chrome.mode,
             header,
-            diagnostic: chrome
-                .diagnostics
-                .current()
-                .map(crate::chrome_model::DiagnosticMessage::accessible_name),
+            diagnostic,
+            announce,
+            tree_generation: chrome.tree_shown,
             relayout: open != chrome.diagnostics_laid_out,
         }
     };
@@ -1740,6 +1995,7 @@ fn sync_ui(hwnd: HWND) {
     if let Some(tree) = snapshot.tree {
         sidebar::fill_tree(
             controls.sidebar.tree,
+            snapshot.tree_generation,
             tree.as_ref().map(|(root, children)| {
                 (
                     root,
@@ -1779,5 +2035,8 @@ fn sync_ui(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(controls.diagnostics.text), None, true) };
     if snapshot.relayout {
         relayout(hwnd, &state);
+    }
+    if let Some(text) = snapshot.announce {
+        diagnostics::announce(controls.diagnostics.text, &text);
     }
 }
