@@ -78,3 +78,25 @@ fn scroll_script_json_encodes_the_anchor() {
         r#"window.marknexiaBridge?.scrollToAnchor("a\");alert(1);//")"#
     );
 }
+
+#[test]
+fn the_find_adapter_is_bound_to_the_document_origin() {
+    use marknexia_webview::host::{document_origin, find_adapter_script};
+    assert_eq!(
+        document_origin("https://tab-7.marknexia.invalid/document"),
+        Some("https://tab-7.marknexia.invalid")
+    );
+    assert_eq!(
+        document_origin("https://document-ab.marknexia.viewer/a/b.md"),
+        Some("https://document-ab.marknexia.viewer")
+    );
+    assert_eq!(document_origin("https://host"), Some("https://host"));
+    assert_eq!(document_origin("no-scheme/document"), None);
+    assert_eq!(document_origin("https:///document"), None);
+    let script = find_adapter_script("https://tab-7.marknexia.invalid").unwrap();
+    assert!(script.starts_with("(// Host-injected find adapter"));
+    assert!(script.ends_with(")(\"https://tab-7.marknexia.invalid\");"));
+    // The origin is JSON data, never script text.
+    let hostile = find_adapter_script("x\");alert(1);//").unwrap();
+    assert!(hostile.ends_with(")(\"x\\\");alert(1);//\");"));
+}

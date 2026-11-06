@@ -28,14 +28,38 @@ use windows::{
     core::{BOOL, Interface, PCWSTR},
 };
 
-/// The host-injected find adapter (see `find_adapter.js`).
+/// The host-injected find adapter (see `find_adapter.js`): a function
+/// expression that takes the document's origin.
 pub const FIND_ADAPTER_JS: &str = include_str!("find_adapter.js");
 
-/// Registers [`FIND_ADAPTER_JS`] for every document this controller loads.
-/// The completion result is not needed: WebView2 orders the registration
-/// before a later `Navigate` on the same controller.
-fn add_find_adapter(core: &ICoreWebView2) -> Result<(), HostError> {
-    let script: Vec<u16> = FIND_ADAPTER_JS
+/// The origin (`scheme://host[:port]`) of an absolute document URI.
+#[must_use]
+pub fn document_origin(document_uri: &str) -> Option<&str> {
+    let after_scheme = document_uri.find("://")? + 3;
+    let end = document_uri[after_scheme..]
+        .find('/')
+        .map_or(document_uri.len(), |index| after_scheme + index);
+    (end > after_scheme).then(|| &document_uri[..end])
+}
+
+/// The adapter invoked with `origin` as JSON data: it stays inert in any
+/// other origin or frame.
+///
+/// # Errors
+///
+/// Only when the origin cannot be serialized (never for a `&str`).
+pub fn find_adapter_script(origin: &str) -> Result<String, HostError> {
+    let origin = serde_json::to_string(origin).map_err(|_| HostError::InvalidDocument)?;
+    Ok(format!("({})({origin});", FIND_ADAPTER_JS.trim_end()))
+}
+
+/// Registers the find adapter, bound to the pinned document's origin, for
+/// every document this controller loads. The completion result is not
+/// needed: WebView2 orders the registration before a later `Navigate` on the
+/// same controller.
+fn add_find_adapter(core: &ICoreWebView2, document_uri: &str) -> Result<(), HostError> {
+    let origin = document_origin(document_uri).ok_or(HostError::InvalidDocument)?;
+    let script: Vec<u16> = find_adapter_script(origin)?
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -440,7 +464,7 @@ impl WebViewHost {
         // The find adapter is registered before the pinned document's
         // navigation starts. A failure closes this controller, like any other
         // binding failure.
-        if let Err(error) = add_find_adapter(&core) {
+        if let Err(error) = add_find_adapter(&core, &document.document_uri()) {
             let _ = self.close();
             return Err(error);
         }

@@ -3,10 +3,13 @@
 // adapter only translates typed host messages into the .NET bridge calls
 // `findText(query, backwards)` and `clearSearch()`, and posts the result back
 // as a typed page message. Every field is checked; anything else is ignored.
-(() => {
+// The host invokes this function expression with the document's origin and
+// the adapter stays inert in any other origin or frame.
+(expectedOrigin) => {
   'use strict';
   const webview = window.chrome && window.chrome.webview;
-  if (!webview || window.top !== window) return;
+  if (!webview || window.top !== window || typeof expectedOrigin !== 'string'
+    || window.location.origin !== expectedOrigin) return;
   const PROTOCOL = 1;
   const MAX_QUERY = 1024;
   const MAX_MATCHES = 1000000;
@@ -57,4 +60,4 @@
       }
     });
   });
-})();
+}
