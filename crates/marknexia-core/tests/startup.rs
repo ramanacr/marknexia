@@ -254,3 +254,77 @@ fn quoted_path_with_trailing_backslash_does_not_swallow_the_next_argument() {
         Some("C:\\work\\x.md".into())
     );
 }
+
+#[test]
+fn file_uri_query_and_fragment_are_removed_but_encoded_ones_stay() {
+    assert_eq!(
+        file_uri_to_local_path("file:///C:/docs/a.md?x=1#top").as_deref(),
+        Some("C:\\docs\\a.md")
+    );
+    assert_eq!(
+        file_uri_to_local_path("file:///C:/docs/a.md#top?x").as_deref(),
+        Some("C:\\docs\\a.md")
+    );
+    assert_eq!(
+        file_uri_to_local_path("file:///C:/docs/what%3F%23.md").as_deref(),
+        Some("C:\\docs\\what?#.md")
+    );
+    let probe = MemoryProbe::new(&["C:\\docs\\a.md"]);
+    assert_eq!(
+        find(&[Some("file:///C:/docs/a.md?view=raw")], &probe),
+        Some("C:\\docs\\a.md".into())
+    );
+}
+
+/// Expands `PROGRA~1` the way `GetLongPathNameW` would.
+struct ShortNameProbe {
+    inner: MemoryProbe,
+    expansions: RefCell<usize>,
+}
+
+impl StartupFileProbe for ShortNameProbe {
+    fn full_path(&self, path: &str) -> Option<String> {
+        self.inner.full_path(path)
+    }
+
+    fn is_file(&self, full_path: &str) -> bool {
+        self.inner.is_file(full_path)
+    }
+
+    fn expand_short_names(&self, full_path: &str) -> Option<String> {
+        *self.expansions.borrow_mut() += 1;
+        full_path
+            .contains("PROGRA~1")
+            .then(|| full_path.replace("PROGRA~1", "Program Files"))
+    }
+}
+
+#[test]
+fn short_names_are_expanded_through_the_probe_hook() {
+    let probe = ShortNameProbe {
+        inner: MemoryProbe::new(&["C:\\Program Files\\a.md", "C:\\x~y\\b.md"]),
+        expansions: RefCell::new(0),
+    };
+    assert_eq!(
+        find_first_existing([Some("C:\\PROGRA~1\\a.md")], &probe),
+        Some("C:\\Program Files\\a.md".into())
+    );
+    // A `~` that is not a short name keeps the path.
+    assert_eq!(
+        find_first_existing([Some("C:\\x~y\\b.md")], &probe),
+        Some("C:\\x~y\\b.md".into())
+    );
+    assert_eq!(*probe.expansions.borrow(), 2);
+    // Paths without `~` never call the hook.
+    assert_eq!(find_first_existing([Some("C:\\docs\\c.md")], &probe), None);
+    assert_eq!(*probe.expansions.borrow(), 2);
+}
+
+#[test]
+fn the_default_hook_keeps_short_names() {
+    let probe = MemoryProbe::new(&["C:\\PROGRA~1\\a.md"]);
+    assert_eq!(
+        find(&[Some("C:\\PROGRA~1\\a.md")], &probe),
+        Some("C:\\PROGRA~1\\a.md".into())
+    );
+}

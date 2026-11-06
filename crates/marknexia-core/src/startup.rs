@@ -23,6 +23,16 @@ pub trait StartupFileProbe {
     /// Returns `true` when `full_path` names an existing file, not a
     /// directory (.NET `File.Exists`).
     fn is_file(&self, full_path: &str) -> bool;
+
+    /// Expands 8.3 short names in an absolute path (Win32
+    /// `GetLongPathNameW`). .NET `Path.GetFullPath` does this when the path
+    /// contains `~`. The resolver calls it only for such paths. `None` keeps
+    /// the path as it is; that is the default, because a portable probe
+    /// cannot expand short names (SET-8c).
+    fn expand_short_names(&self, full_path: &str) -> Option<String> {
+        let _ = full_path;
+        None
+    }
 }
 
 /// Returns the full path of the first candidate that names an existing
@@ -67,7 +77,12 @@ fn existing_markdown<P: StartupFileProbe + ?Sized>(path: &str, probe: &P) -> Opt
     if !has_markdown_extension(&local) {
         return None;
     }
-    let full_path = probe.full_path(&local)?;
+    let mut full_path = probe.full_path(&local)?;
+    if full_path.contains('~')
+        && let Some(long_path) = probe.expand_short_names(&full_path)
+    {
+        full_path = long_path;
+    }
     probe.is_file(&full_path).then_some(full_path)
 }
 
@@ -103,15 +118,17 @@ fn is_file_uri(path: &str) -> bool {
 /// Converts a `file:` URI to a Windows path (.NET `Uri.LocalPath`).
 ///
 /// Supported forms: `file:///C:/dir/a.md`, `file://localhost/C:/dir/a.md`
-/// and `file://server/share/a.md` (UNC). The fragment is removed and the
-/// path is percent-decoded as UTF-8. Other forms return `None`.
+/// and `file://server/share/a.md` (UNC). The query (`?…`) and the fragment
+/// (`#…`) are removed, as `Uri.LocalPath` does, and the path is
+/// percent-decoded as UTF-8 (so `%3F` and `%23` stay in the path). Other
+/// forms return `None`.
 #[must_use]
 pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     if !is_file_uri(uri) {
         return None;
     }
     let rest = &uri[5..];
-    let rest = rest.split_once('#').map_or(rest, |(path, _)| path);
+    let rest = rest.find(['?', '#']).map_or(rest, |index| &rest[..index]);
     let slashes = rest.len() - rest.trim_start_matches(['/', '\\']).len();
     let after_slashes = &rest[slashes..];
 
