@@ -64,11 +64,11 @@ use windows::{
                 VK_SHIFT, VK_SPACE, VK_TAB,
             },
             WindowsAndMessaging::{
-                CheckMenuItem, DestroyIcon, GetNextDlgTabItem, GetWindowThreadProcessId, HICON,
-                HMENU, HWND_TOP, IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG,
-                PostMessageW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND,
-                WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NOTIFY,
+                CheckMenuItem, GetNextDlgTabItem, GetWindowThreadProcessId, HMENU, HWND_TOP,
+                IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW,
+                SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+                SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND, WM_CTLCOLORSTATIC,
+                WM_DRAWITEM, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NOTIFY, WM_PAINT,
                 WM_SYSKEYDOWN,
             },
         },
@@ -142,9 +142,9 @@ pub(super) const MENU_SBOM: usize = 2134;
 /// outline row, "Reveal in File Explorer" for the selected tree row.
 pub(super) const ID_COPY_ANCHOR: usize = 2018;
 pub(super) const ID_REVEAL: usize = 2019;
-/// The brand area (.NET `BrandIcon` and `BrandDetails`). 2030 to 2033
-/// belong to the WebView2 runtime state (`runtime`).
-pub(super) const ID_BRAND_ICON: usize = 2040;
+/// The brand texts (.NET `BrandDetails`). 2030 to 2033 belong to the
+/// WebView2 runtime state (`runtime`). The brand image (.NET `BrandIcon`)
+/// has no window: `toolbar::paint_brand` paints it.
 pub(super) const ID_BRAND_NAME: usize = 2041;
 pub(super) const ID_BRAND_TAGLINE: usize = 2042;
 /// `ShellControls::sidebar`, the view selector.
@@ -201,7 +201,6 @@ struct Fonts {
     /// .NET `BrandDetails`: the name and the tagline.
     brand_name: HFONT,
     brand_tagline: HFONT,
-    brand_icon: Option<HICON>,
 }
 
 impl Fonts {
@@ -213,7 +212,6 @@ impl Fonts {
             glyph: toolbar::glyph_font(dpi),
             brand_name,
             brand_tagline,
-            brand_icon: toolbar::brand_icon(dpi),
         }
     }
 }
@@ -226,11 +224,6 @@ impl Drop for Fonts {
                 // longer selected: controls get the replacement first.
                 let _ = unsafe { DeleteObject(HGDIOBJ(font.0)) };
             }
-        }
-        if let Some(icon) = self.brand_icon.take() {
-            // SAFETY: the icon was created by this struct; the brand image
-            // repaints with the replacement.
-            let _ = unsafe { DestroyIcon(icon) };
         }
     }
 }
@@ -528,6 +521,7 @@ impl ChromeState {
     /// closes (WM_DESTROY).
     pub(super) fn shutdown(&mut self) {
         self.link.alive.store(false, Ordering::Release);
+        toolbar::clear_brand();
         // Annotations are cleared while the controls still exist; oleacc
         // keeps them per HWND otherwise.
         if let (Some(names), Some(controls)) = (self.names.take(), self.controls) {
@@ -882,6 +876,11 @@ pub(super) fn handle_message(
             .then_some(LRESULT(1)),
         WM_MENUCHAR => menu_theme::menu_char(menu_handle(hwnd), wparam, lparam),
         WM_CTLCOLORSTATIC => brand_text_color(hwnd, HDC(wparam.0 as *mut c_void), lparam),
+        // The brand image (no child window); reads no shell state.
+        WM_PAINT => {
+            toolbar::paint_brand(hwnd);
+            Some(LRESULT(0))
+        }
         // Dispatched by a nested pump while an outer frame holds the state:
         // run from the message loop instead (input's deferred work).
         WM_CHROME_ACTION | WM_CHROME_WORKER
@@ -1441,19 +1440,14 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
     let id = item.CtlID as usize;
     if !matches!(
         id,
-        ID_DIAGNOSTIC_ICON
-            | ID_DIAGNOSTIC_CLOSE
-            | ID_OUTLINE
-            | ID_BRAND_ICON
-            | ID_COPY_ANCHOR
-            | ID_REVEAL
+        ID_DIAGNOSTIC_ICON | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE | ID_COPY_ANCHOR | ID_REVEAL
     ) && toolbar::button_face(id, false).is_none()
     {
         return None;
     }
     // Copy what painting needs, then release the borrow: painting the
     // outline sends LB_GETTEXT to the list box.
-    let (theme, colors, fonts, dpi, message, compact, icon) = {
+    let (theme, colors, fonts, dpi, message, compact) = {
         let state = state_of(hwnd)?;
         let state = state.try_borrow().ok()?;
         let fonts = state.chrome.fonts.as_ref()?;
@@ -1466,7 +1460,6 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
                 .then(|| state.chrome.diagnostics.current().cloned())
                 .flatten(),
             state.chrome.compact == Some(true),
-            fonts.brand_icon,
         )
     };
     let face = toolbar::button_face(id, compact);
@@ -1479,14 +1472,7 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
         (ID_COPY_ANCHOR, _) => toolbar::draw_button(item, colors, '\u{E8C8}', None, fonts),
         (ID_REVEAL, _) => toolbar::draw_button(item, colors, '\u{E8B7}', None, fonts),
         (ID_OUTLINE, _) => sidebar::draw_outline_item(item, colors, fonts.1, dpi),
-        (ID_BRAND_ICON, _) => {
-            let background = if theme == EffectiveTheme::Dark {
-                colors.background
-            } else {
-                ColorSpec::System(SystemColorRole::Window)
-            };
-            toolbar::draw_brand_icon(item, background, icon, dpi);
-        }
+
         (_, Some((glyph, label))) => toolbar::draw_button(item, colors, glyph, label, fonts),
         _ => return None,
     }
@@ -1811,10 +1797,9 @@ fn with_controls(state: &Rc<RefCell<AppState>>, apply: impl FnOnce(&ChromeContro
     }
 }
 
-fn all_windows(c: &ChromeControls) -> [HWND; 24] {
+fn all_windows(c: &ChromeControls) -> [HWND; 23] {
     [
         c.toolbar.toggle,
-        c.toolbar.brand_icon,
         c.toolbar.brand_name,
         c.toolbar.brand_tagline,
         c.toolbar.back,
@@ -1861,7 +1846,6 @@ fn apply_fonts(controls: &ChromeControls, shell: ShellControls, fonts: (HFONT, H
 fn order_controls(c: &ChromeControls, shell: ShellControls) {
     let order = [
         c.toolbar.toggle,
-        c.toolbar.brand_icon,
         c.toolbar.brand_name,
         c.toolbar.brand_tagline,
         c.toolbar.back,
@@ -2520,9 +2504,6 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
         controls.sidebar.outline_label,
         controls.sidebar.tree_label,
         controls.sidebar.recent_label,
-        // The brand image is decoration beside the product name text, so
-        // "Marknexia" is exposed once.
-        controls.toolbar.brand_icon,
     ] {
         // The list carries the name; its label is not a separate element.
         for property in [
@@ -2785,7 +2766,6 @@ mod tests {
             ID_DIAGNOSTIC_TEXT,
             ID_DIAGNOSTIC_CLOSE,
             ID_DIAGNOSTIC_ICON,
-            ID_BRAND_ICON,
             ID_BRAND_NAME,
             ID_BRAND_TAGLINE,
             super::super::runtime::ID_RUNTIME_TEXT,

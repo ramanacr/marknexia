@@ -851,17 +851,45 @@ fn the_brand_tooltips_and_open_button_follow_dotnet() {
     // .NET `OpenFileButton` name.
     let open = shell.wait_id("1001", UIA_ButtonControlTypeId, "Open Markdown file");
     assert_target(&open, minimum, true);
-    // .NET `BrandDetails`; the brand image is decoration, outside the
-    // control view, so "Marknexia" is exposed once.
+    // .NET `BrandDetails`. The brand image has no window and no UIA
+    // element (the shell window paints it), so "Marknexia" is exposed once.
     let product = shell.wait_id("2041", UIA_TextControlTypeId, "Marknexia");
-    assert!(
-        shell
-            .find_id("2040")
-            .is_none_or(|icon| !unsafe { icon.CurrentIsControlElement() }
-                .is_ok_and(|control| control.as_bool())),
-        "the brand image is not a control element"
-    );
+    assert!(shell.find_id("2040").is_none(), "no element for the image");
+    let named: Vec<String> = shell
+        .find_all(&shell.root, UIA_TextControlTypeId, false)
+        .iter()
+        .chain(&shell.find_all(
+            &shell.root,
+            windows::Win32::UI::Accessibility::UIA_ImageControlTypeId,
+            false,
+        ))
+        .map(name)
+        .filter(|text| text == "Marknexia")
+        .collect();
+    assert_eq!(named.len(), 1, "\"Marknexia\" exposed once");
     assert!(is_onscreen(&product));
+    // The image is painted right of the sidebar toggle: some pixel of its
+    // 36-DIP slot differs from the background in the gap before it.
+    let toggle = shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    let bounds = unsafe { toggle.CurrentBoundingRectangle() }.expect("toggle bounds");
+    let scale = shell.dpi() / 96.0;
+    let gap = bounds.right + (2.0 * scale) as i32;
+    let slot = bounds.right + (4.0 * scale) as i32;
+    let middle = (bounds.top + bounds.bottom) / 2;
+    let mut points = vec![(gap, middle)];
+    for step in 0..9 {
+        points.push((
+            slot + ((8.0 + 2.5 * f64::from(step)) * scale) as i32,
+            middle,
+        ));
+    }
+    match capture_client_pixels(shell.hwnd, &points) {
+        Some(pixels) => assert!(
+            pixels[1..].iter().any(|pixel| *pixel != pixels[0]),
+            "the brand image is painted: {pixels:X?}"
+        ),
+        None => eprintln!("the window capture is unavailable on this desktop"),
+    }
     let tagline = shell.wait_id("2042", UIA_TextControlTypeId, "Read. Explore. Understand.");
     assert!(is_onscreen(&tagline));
     // One tooltip window owned by the shell: six toolbar buttons, the
@@ -1363,4 +1391,58 @@ fn capture_menu_bar_background(hwnd: HWND) -> Option<u32> {
         ReleaseDC(None, screen);
     }
     pixel
+}
+
+/// Pixels at screen `points`, from a `PrintWindow` capture of the client
+/// area (no screen access needed). `None` when the capture fails.
+fn capture_client_pixels(hwnd: HWND, points: &[(i32, i32)]) -> Option<Vec<u32>> {
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel,
+            HGDIOBJ, ReleaseDC, ScreenToClient, SelectObject,
+        },
+        Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow},
+        UI::WindowsAndMessaging::{GetClientRect, WM_NULL},
+    };
+    let mut reply = 0_usize;
+    let responsive = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            5000,
+            Some(&mut reply),
+        )
+    };
+    if responsive.0 == 0 {
+        return None;
+    }
+    let mut client = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut client) }.ok()?;
+    let screen = unsafe { GetDC(None) };
+    let memory = unsafe { CreateCompatibleDC(Some(screen)) };
+    let bitmap = unsafe { CreateCompatibleBitmap(screen, client.right, client.bottom) };
+    let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+    // PW_CLIENTONLY | PW_RENDERFULLCONTENT.
+    let printed = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(3)) }.as_bool();
+    let pixels = printed.then(|| {
+        points
+            .iter()
+            .map(|(x, y)| {
+                let mut point = POINT { x: *x, y: *y };
+                let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+                unsafe { GetPixel(memory, point.x, point.y) }.0
+            })
+            .collect::<Vec<u32>>()
+    });
+    unsafe {
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+    }
+    pixels.filter(|pixels| !pixels.contains(&0xFFFF_FFFF))
 }

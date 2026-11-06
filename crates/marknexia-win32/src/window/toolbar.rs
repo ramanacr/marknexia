@@ -3,15 +3,17 @@
 //! window text is the .NET automation name, the face shows the .NET glyph
 //! and label, and a tooltip shows the .NET `ToolTipService.ToolTip` text.
 
+use std::cell::RefCell;
+
 use windows::{
     Win32::{
         Foundation::{HWND, RECT},
         Graphics::Gdi::{
-            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-            DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-            DeleteObject, DrawFocusRect, DrawTextW, FF_DONTCARE, FONT_WEIGHT, FW_NORMAL,
-            FW_SEMIBOLD, FrameRect, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode,
-            SetTextColor, TRANSPARENT,
+            BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
+            DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+            DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint, FF_DONTCARE, FONT_WEIGHT,
+            FW_NORMAL, FW_SEMIBOLD, FrameRect, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
+            PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
         UI::{
             Controls::{
@@ -20,9 +22,9 @@ use windows::{
             },
             WindowsAndMessaging::{
                 AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreateMenu, CreatePopupMenu,
-                CreateWindowExW, DI_NORMAL, DrawIconEx, HICON, HMENU, LR_DEFAULTCOLOR, MF_POPUP,
-                MF_SEPARATOR, MF_STRING, SetMenu, WINDOW_STYLE, WS_CHILD, WS_EX_TOPMOST, WS_POPUP,
-                WS_VISIBLE,
+                CreateWindowExW, DI_NORMAL, DestroyIcon, DrawIconEx, HICON, HMENU, LR_DEFAULTCOLOR,
+                MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenu, WINDOW_STYLE, WS_CHILD, WS_EX_TOPMOST,
+                WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -32,24 +34,20 @@ use windows::{
 use super::{
     COMMAND_OPEN_ID, child_style,
     chrome::{
-        ChromeControls, ID_BACK, ID_BRAND_ICON, ID_BRAND_NAME, ID_BRAND_TAGLINE, ID_FIND,
-        ID_FORWARD, ID_OPEN_FOLDER, ID_RELOAD, ID_THEME, ID_THEME_LABEL, ID_TOGGLE_SIDEBAR,
-        MENU_ABOUT, MENU_CLOSE_TAB, MENU_FIND, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER,
-        MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TOGGLE_SIDEBAR, MENU_TROUBLESHOOTING, dip,
-        send, set_bounds, show, wide,
+        ChromeControls, ID_BACK, ID_BRAND_NAME, ID_BRAND_TAGLINE, ID_FIND, ID_FORWARD,
+        ID_OPEN_FOLDER, ID_RELOAD, ID_THEME, ID_THEME_LABEL, ID_TOGGLE_SIDEBAR, MENU_ABOUT,
+        MENU_CLOSE_TAB, MENU_FIND, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER, MENU_RELOAD,
+        MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TOGGLE_SIDEBAR, MENU_TROUBLESHOOTING, dip, send,
+        set_bounds, show, wide,
     },
     create_child, fill, native_color,
 };
-use crate::{
-    layout::PixelRect,
-    theme::{ColorSpec, Palette},
-};
+use crate::{layout::PixelRect, theme::Palette};
 use windows::Win32::Foundation::HINSTANCE;
 
 const BS_OWNERDRAW: u32 = 0x0B;
 const CBS_DROPDOWNLIST: u32 = 0x3;
 const WS_VSCROLL: u32 = 0x0020_0000;
-const SS_OWNERDRAW: u32 = 0x0D;
 const SS_NOPREFIX: u32 = 0x80;
 const SS_CENTERIMAGE: u32 = 0x200;
 const SS_ENDELLIPSIS: u32 = 0x4000;
@@ -152,8 +150,7 @@ const PADDING: u32 = 8;
 #[derive(Clone, Copy)]
 pub(super) struct Toolbar {
     pub toggle: HWND,
-    /// The brand image (an owner-drawn static named "Marknexia").
-    pub brand_icon: HWND,
+
     /// .NET `BrandDetails`: the product name and the tagline.
     pub brand_name: HWND,
     pub brand_tagline: HWND,
@@ -180,14 +177,7 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<Toolbar, super
     }
     // Not tab stops: the brand is decoration, as in .NET.
     let static_style = |extra: u32| WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SS_NOPREFIX | extra);
-    let brand_icon = create_child(
-        parent,
-        instance,
-        w!("STATIC"),
-        w!("Marknexia"),
-        static_style(SS_OWNERDRAW),
-        ID_BRAND_ICON as isize,
-    )?;
+
     let brand_name = create_child(
         parent,
         instance,
@@ -226,7 +216,6 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<Toolbar, super
     }
     Ok(Toolbar {
         toggle: buttons[0],
-        brand_icon,
         brand_name,
         brand_tagline,
         back: buttons[1],
@@ -435,7 +424,22 @@ pub(super) fn layout(
     };
     let toolbar = &controls.toolbar;
     place(&mut x, toolbar.toggle, ICON_WIDTH, GAP);
-    place(&mut x, toolbar.brand_icon, BRAND_ICON_WIDTH, GAP);
+    // The brand image has no window: the shell window paints it here.
+    if let Ok(parent) =
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(toolbar.toggle) }
+    {
+        set_brand(
+            parent,
+            PixelRect {
+                x,
+                y: bar.y,
+                width: dip(BRAND_ICON_WIDTH, dpi),
+                height,
+            },
+            dpi,
+        );
+    }
+    x = x.saturating_add(dip(BRAND_ICON_WIDTH + GAP, dpi));
     show(toolbar.brand_name, plan.details);
     show(toolbar.brand_tagline, plan.details);
     if plan.details {
@@ -586,7 +590,7 @@ fn create_font(face: PCWSTR, height: i32, weight: FONT_WEIGHT) -> HFONT {
 
 /// The brand image at 28 DIPs for `dpi`, from the embedded PNG (an icon
 /// resource may hold PNG data). `None` if it could not be decoded.
-pub(super) fn brand_icon(dpi: u32) -> Option<HICON> {
+fn brand_icon(dpi: u32) -> Option<HICON> {
     let size = dip(BRAND_ICON_DIP, dpi);
     let source = if size <= 64 {
         BRAND_PNG_64
@@ -594,31 +598,116 @@ pub(super) fn brand_icon(dpi: u32) -> Option<HICON> {
         BRAND_PNG_128
     };
     let size = i32::try_from(size).ok()?;
-    // SAFETY: reads the embedded bytes during the call; the caller owns and
+    // SAFETY: reads the embedded bytes during the call; `Brand` owns and
     // destroys the returned icon.
     unsafe { CreateIconFromResourceEx(source, true, 0x0003_0000, size, size, LR_DEFAULTCOLOR) }.ok()
 }
 
-/// Paints the brand image centred on `background` (the shell background).
-pub(super) fn draw_brand_icon(
-    item: &DRAWITEMSTRUCT,
-    background: ColorSpec,
-    icon: Option<HICON>,
+/// The brand image (.NET `BrandIcon`), painted by the shell window itself:
+/// no child window and no UI Automation element, so "Marknexia" is exposed
+/// once, by the product name text. The icon is destroyed on drop.
+struct Brand {
+    window: HWND,
+    rect: PixelRect,
     dpi: u32,
-) {
-    let dc = item.hDC;
-    let rect = item.rcItem;
-    fill(dc, &rect, native_color(background));
-    let Some(icon) = icon else {
-        return;
-    };
-    let size = i32::try_from(dip(BRAND_ICON_DIP, dpi)).unwrap_or(28);
-    let x = rect.left + (rect.right - rect.left - size) / 2;
-    let y = rect.top + (rect.bottom - rect.top - size) / 2;
-    // SAFETY: the DC is valid for WM_DRAWITEM and the icon is alive.
-    let _ = unsafe { DrawIconEx(dc, x, y, icon, size, size, 0, None, DI_NORMAL) };
+    icon: Option<HICON>,
 }
 
+impl Drop for Brand {
+    fn drop(&mut self) {
+        if let Some(icon) = self.icon.take() {
+            // SAFETY: the icon was created for this struct and is no longer
+            // painted (painting borrows the slot).
+            let _ = unsafe { DestroyIcon(icon) };
+        }
+    }
+}
+
+// Kept outside the shell state: painting never borrows it.
+thread_local! {
+    static BRAND: RefCell<Option<Brand>> = const { RefCell::new(None) };
+}
+
+fn invalidate(window: HWND, rect: PixelRect) {
+    let area = RECT {
+        left: i32::try_from(rect.x).unwrap_or(i32::MAX),
+        top: i32::try_from(rect.y).unwrap_or(i32::MAX),
+        right: i32::try_from(rect.right()).unwrap_or(i32::MAX),
+        bottom: i32::try_from(rect.bottom()).unwrap_or(i32::MAX),
+    };
+    // SAFETY: repaint request for this thread's window; the background is
+    // erased first.
+    let _ = unsafe { InvalidateRect(Some(window), Some(&area), true) };
+}
+
+/// `layout`: the brand image's place in `window` at `dpi`. A DPI change
+/// makes a new icon; the old and new places repaint.
+fn set_brand(window: HWND, rect: PixelRect, dpi: u32) {
+    let previous = BRAND.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return None;
+        };
+        let previous = slot.as_ref().map(|brand| brand.rect);
+        match slot.as_mut() {
+            Some(brand) if brand.dpi == dpi => {
+                brand.window = window;
+                brand.rect = rect;
+            }
+            _ => {
+                *slot = Some(Brand {
+                    window,
+                    rect,
+                    dpi,
+                    icon: brand_icon(dpi),
+                });
+            }
+        }
+        previous
+    });
+    if previous != Some(rect) {
+        if let Some(previous) = previous {
+            invalidate(window, previous);
+        }
+        invalidate(window, rect);
+    }
+}
+
+/// `WM_PAINT` of the shell window: the brand image on the background that
+/// `WM_ERASEBKGND` painted (the dark background, or the system window color,
+/// which is also the high-contrast pair). Reads no shell state.
+pub(super) fn paint_brand(window: HWND) {
+    let mut paint = PAINTSTRUCT::default();
+    // SAFETY: BeginPaint/EndPaint pair for this window's WM_PAINT.
+    let dc = unsafe { BeginPaint(window, &mut paint) };
+    BRAND.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return;
+        };
+        let Some(brand) = slot.as_ref().filter(|brand| brand.window == window) else {
+            return;
+        };
+        let Some(icon) = brand.icon else {
+            return;
+        };
+        let size = i32::try_from(dip(BRAND_ICON_DIP, brand.dpi)).unwrap_or(28);
+        let rect = brand.rect;
+        let x = i32::try_from(rect.x).unwrap_or(0)
+            + (i32::try_from(rect.width).unwrap_or(0) - size) / 2;
+        let y = i32::try_from(rect.y).unwrap_or(0)
+            + (i32::try_from(rect.height).unwrap_or(0) - size) / 2;
+        // SAFETY: the paint DC is valid until EndPaint; the icon is alive
+        // while the slot is borrowed.
+        let _ = unsafe { DrawIconEx(dc, x, y, icon, size, size, 0, None, DI_NORMAL) };
+    });
+    // SAFETY: ends the paint started above.
+    let _ = unsafe { EndPaint(window, &paint) };
+}
+
+/// `WM_DESTROY`: destroys the brand icon.
+pub(super) fn clear_brand() {
+    let brand = BRAND.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
+    drop(brand);
+}
 /// Paints one of the toolbar buttons (or the diagnostics close button):
 /// glyph, optional label, focus rectangle; light, dark and high-contrast
 /// colors from the palette.
