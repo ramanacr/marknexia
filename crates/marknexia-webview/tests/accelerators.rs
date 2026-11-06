@@ -7,6 +7,8 @@ const VK_W: u16 = 0x57;
 const VK_F6: u16 = 0x75;
 const VK_C: u16 = 0x43;
 const VK_F: u16 = 0x46;
+const VK_F3: u16 = 0x72;
+const VK_ESCAPE: u16 = 0x1B;
 
 #[test]
 fn only_shell_owned_chords_leave_the_document() {
@@ -16,10 +18,18 @@ fn only_shell_owned_chords_leave_the_document() {
     assert!(ShellAccelerator::from_key(VK_F6, false, false, false).is_some());
     assert!(ShellAccelerator::from_key(VK_F6, false, true, false).is_some());
 
-    // Plain Tab moves focus inside the page; copy and find stay in WebView2.
+    // The shell's find chords leave the page, so WebView2's own find bar
+    // never opens.
+    assert!(ShellAccelerator::from_key(VK_F, true, false, false).is_some());
+    assert!(ShellAccelerator::from_key(VK_F3, false, false, false).is_some());
+    assert!(ShellAccelerator::from_key(VK_F3, false, true, false).is_some());
+
+    // Plain Tab moves focus inside the page; copy and Escape stay in WebView2.
     assert!(ShellAccelerator::from_key(VK_TAB, false, false, false).is_none());
     assert!(ShellAccelerator::from_key(VK_C, true, false, false).is_none());
-    assert!(ShellAccelerator::from_key(VK_F, true, false, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_F, true, true, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_F3, true, false, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_ESCAPE, false, false, false).is_none());
     assert!(ShellAccelerator::from_key(VK_W, true, true, false).is_none());
     assert!(ShellAccelerator::from_key(VK_F6, true, false, false).is_none());
     assert!(ShellAccelerator::from_key(VK_TAB, true, false, true).is_none());

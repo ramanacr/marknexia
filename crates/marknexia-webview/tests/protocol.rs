@@ -221,3 +221,146 @@ fn rejects_safely_created_content_when_json_escaping_crosses_host_cap() {
         Err(MessageError::TooLarge)
     );
 }
+
+fn find_result(payload: &str) -> String {
+    format!(
+        "{{\"type\":\"findResult\",\"payload\":{{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,{payload}}}}}"
+    )
+}
+
+#[test]
+fn accepts_a_consistent_find_result_for_the_current_document() {
+    let json = find_result(r#""requestId":3,"query":"Mark","matchCount":4,"currentMatch":2"#);
+    assert_eq!(
+        parse_page_message(json.as_bytes(), SOURCE, &context()),
+        Ok(PageToHost::FindResult {
+            protocol: 1,
+            document_epoch: 42,
+            tab_id: 7,
+            request_id: 3,
+            query: "Mark".to_owned(),
+            match_count: 4,
+            current_match: 2,
+        })
+    );
+    let none = find_result(r#""requestId":3,"query":"Mark","matchCount":0,"currentMatch":0"#);
+    assert!(parse_page_message(none.as_bytes(), SOURCE, &context()).is_ok());
+    let empty = find_result(r#""requestId":3,"query":"","matchCount":0,"currentMatch":0"#);
+    assert!(parse_page_message(empty.as_bytes(), SOURCE, &context()).is_ok());
+}
+
+#[test]
+fn rejects_inconsistent_or_unbounded_find_results() {
+    for payload in [
+        // Position past the count, no position with matches, matches for an
+        // empty query, request id 0.
+        r#""requestId":3,"query":"a","matchCount":2,"currentMatch":3"#,
+        r#""requestId":3,"query":"a","matchCount":2,"currentMatch":0"#,
+        r#""requestId":3,"query":"","matchCount":1,"currentMatch":1"#,
+        r#""requestId":0,"query":"a","matchCount":0,"currentMatch":0"#,
+        // Negative, fractional and oversized numbers.
+        r#""requestId":3,"query":"a","matchCount":-1,"currentMatch":0"#,
+        r#""requestId":3,"query":"a","matchCount":1.5,"currentMatch":1"#,
+        r#""requestId":3,"query":"a","matchCount":1000001,"currentMatch":1"#,
+        // Missing and unknown fields, wrong types.
+        r#""requestId":3,"query":"a","matchCount":1"#,
+        r#""requestId":3,"query":"a","matchCount":1,"currentMatch":1,"extra":true"#,
+        r#""requestId":"3","query":"a","matchCount":1,"currentMatch":1"#,
+        r#""requestId":3,"query":null,"matchCount":0,"currentMatch":0"#,
+    ] {
+        assert_eq!(
+            parse_page_message(find_result(payload).as_bytes(), SOURCE, &context()),
+            Err(MessageError::InvalidPayload),
+            "{payload}"
+        );
+    }
+    let long = "q".repeat(1025);
+    let json = find_result(&format!(
+        r#""requestId":3,"query":"{long}","matchCount":0,"currentMatch":0"#
+    ));
+    assert_eq!(
+        parse_page_message(json.as_bytes(), SOURCE, &context()),
+        Err(MessageError::InvalidPayload)
+    );
+}
+
+#[test]
+fn find_results_are_bound_to_the_document_identity() {
+    let json = br#"{"type":"findResult","payload":{"protocol":1,"tabId":8,"documentEpoch":42,"requestId":3,"query":"a","matchCount":1,"currentMatch":1}}"#;
+    assert_eq!(
+        parse_page_message(json, SOURCE, &context()),
+        Err(MessageError::CrossTab)
+    );
+    let json = br#"{"type":"findUnavailable","payload":{"protocol":1,"tabId":7,"documentEpoch":41,"requestId":3}}"#;
+    assert_eq!(
+        parse_page_message(json, SOURCE, &context()),
+        Err(MessageError::StaleEpoch)
+    );
+    let json = br#"{"type":"findUnavailable","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"requestId":0}}"#;
+    assert_eq!(
+        parse_page_message(json, SOURCE, &context()),
+        Err(MessageError::InvalidPayload)
+    );
+    let json = br#"{"type":"findUnavailable","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"requestId":5}}"#;
+    assert_eq!(
+        parse_page_message(json, SOURCE, &context()),
+        Ok(PageToHost::FindUnavailable {
+            protocol: 1,
+            document_epoch: 42,
+            tab_id: 7,
+            request_id: 5,
+        })
+    );
+}
+
+#[test]
+fn serializes_find_requests_as_json_data() {
+    let message = HostToPage::Find {
+        protocol: 1,
+        tab_id: 7,
+        document_epoch: 42,
+        request_id: 9,
+        query: "a\"</script>".to_owned(),
+        backwards: true,
+    };
+    assert_eq!(message.identity(), (1, 7, 42));
+    assert_eq!(
+        serialize_host_message(&message),
+        Ok("{\"type\":\"find\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42,\"requestId\":9,\"query\":\"a\\\"</script>\",\"backwards\":true}}".to_owned())
+    );
+    let clear = HostToPage::ClearFind {
+        protocol: 1,
+        tab_id: 7,
+        document_epoch: 42,
+    };
+    assert_eq!(
+        serialize_host_message(&clear),
+        Ok("{\"type\":\"clearFind\",\"payload\":{\"protocol\":1,\"tabId\":7,\"documentEpoch\":42}}".to_owned())
+    );
+}
+
+#[test]
+fn refuses_to_serialize_oversized_or_unnumbered_find_requests() {
+    let find = |request_id: u64, query: String| HostToPage::Find {
+        protocol: 1,
+        tab_id: 7,
+        document_epoch: 42,
+        request_id,
+        query,
+        backwards: false,
+    };
+    // 1,024 UTF-16 units fit; a supplementary character counts as two.
+    assert!(serialize_host_message(&find(1, "q".repeat(1024))).is_ok());
+    assert_eq!(
+        serialize_host_message(&find(1, "q".repeat(1025))),
+        Err(MessageError::TooLarge)
+    );
+    assert_eq!(
+        serialize_host_message(&find(1, "\u{1F600}".repeat(513))),
+        Err(MessageError::TooLarge)
+    );
+    assert_eq!(
+        serialize_host_message(&find(0, "q".to_owned())),
+        Err(MessageError::InvalidPayload)
+    );
+}

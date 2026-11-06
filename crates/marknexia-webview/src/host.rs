@@ -7,7 +7,7 @@ use std::{
 };
 
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler,
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_COLOR, COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
         COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
@@ -22,11 +22,31 @@ use windows::{
     Win32::{
         Foundation::RECT,
         UI::Input::KeyboardAndMouse::{
-            GetKeyState, VK_CONTROL, VK_F6, VK_MENU, VK_SHIFT, VK_TAB, VK_W,
+            GetKeyState, VK_CONTROL, VK_F, VK_F3, VK_F6, VK_MENU, VK_SHIFT, VK_TAB, VK_W,
         },
     },
-    core::{BOOL, Interface},
+    core::{BOOL, Interface, PCWSTR},
 };
+
+/// The host-injected find adapter (see `find_adapter.js`).
+pub const FIND_ADAPTER_JS: &str = include_str!("find_adapter.js");
+
+/// Registers [`FIND_ADAPTER_JS`] for every document this controller loads.
+/// The completion result is not needed: WebView2 orders the registration
+/// before a later `Navigate` on the same controller.
+fn add_find_adapter(core: &ICoreWebView2) -> Result<(), HostError> {
+    let script: Vec<u16> = FIND_ADAPTER_JS
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+        |_result, _id| Ok(()),
+    ));
+    // SAFETY: the script buffer outlives this synchronous call; WebView2
+    // copies it. The handler is a refcounted COM object owned by WebView2.
+    unsafe { core.AddScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(script.as_ptr()), &handler) }
+        .map_err(HostError::from_com)
+}
 
 use crate::{
     callbacks::CallbackTokens,
@@ -146,9 +166,11 @@ pub struct ShellAccelerator {
 
 impl ShellAccelerator {
     /// Only chords the native shell owns leave the page: Ctrl+Tab,
-    /// Ctrl+Shift+Tab, Ctrl+W and F6/Shift+F6, plus the .NET command
-    /// accelerators (see [`Self::is_command_chord`]). Everything else,
-    /// including copy and find inside the document, stays with WebView2.
+    /// Ctrl+Shift+Tab, Ctrl+W, F6/Shift+F6, the shell's find chords Ctrl+F,
+    /// F3 and Shift+F3 (so WebView2's own find bar never opens), and the .NET
+    /// command accelerators (see [`Self::is_command_chord`]). Everything
+    /// else, including copy and Escape inside the document, stays with
+    /// WebView2.
     #[must_use]
     pub fn from_key(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> Option<Self> {
         let owned = !alt
@@ -156,6 +178,8 @@ impl ShellAccelerator {
                 key if key == VK_TAB.0 => ctrl,
                 key if key == VK_W.0 => ctrl && !shift,
                 key if key == VK_F6.0 => !ctrl,
+                key if key == VK_F.0 => ctrl && !shift,
+                key if key == VK_F3.0 => !ctrl,
                 _ => false,
             };
         (owned || Self::is_command_chord(virtual_key, ctrl, shift, alt)).then_some(Self {
@@ -410,6 +434,13 @@ impl WebViewHost {
         ) {
             // Retain failed removal tokens in the host if cleanup itself
             // fails. The session can retry `close` before releasing COM.
+            let _ = self.close();
+            return Err(error);
+        }
+        // The find adapter is registered before the pinned document's
+        // navigation starts. A failure closes this controller, like any other
+        // binding failure.
+        if let Err(error) = add_find_adapter(&core) {
             let _ = self.close();
             return Err(error);
         }

@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_HOST_MESSAGE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
+/// Longest find query, in UTF-16 code units (JavaScript string length), in
+/// either direction. The page adapter enforces the same limit.
+pub const MAX_FIND_QUERY_UNITS: usize = 1024;
+/// Largest match count a page may report for one query.
+pub const MAX_FIND_MATCHES: u32 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
@@ -30,6 +35,23 @@ pub enum HostToPage {
         document_epoch: u64,
         theme: AppTheme,
     },
+    /// Runs the page bridge's `findText(query, backwards)`. The page answers
+    /// with [`PageToHost::FindResult`] or [`PageToHost::FindUnavailable`]
+    /// that carries the same `request_id`.
+    Find {
+        protocol: u16,
+        tab_id: u64,
+        document_epoch: u64,
+        request_id: u64,
+        query: String,
+        backwards: bool,
+    },
+    /// Runs the page bridge's `clearSearch()`. The page does not answer.
+    ClearFind {
+        protocol: u16,
+        tab_id: u64,
+        document_epoch: u64,
+    },
 }
 
 impl HostToPage {
@@ -46,12 +68,47 @@ impl HostToPage {
                 tab_id,
                 document_epoch,
                 ..
+            }
+            | Self::Find {
+                protocol,
+                tab_id,
+                document_epoch,
+                ..
+            }
+            | Self::ClearFind {
+                protocol,
+                tab_id,
+                document_epoch,
             } => (*protocol, *tab_id, *document_epoch),
+        }
+    }
+
+    /// Content limits that the identity check does not cover.
+    fn validate(&self) -> Result<(), MessageError> {
+        match self {
+            Self::Find {
+                request_id, query, ..
+            } => {
+                if *request_id == 0 {
+                    Err(MessageError::InvalidPayload)
+                } else if utf16_len(query) > MAX_FIND_QUERY_UNITS {
+                    Err(MessageError::TooLarge)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
         }
     }
 }
 
+/// JavaScript string length of `text`.
+fn utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
 pub fn serialize_host_message(message: &HostToPage) -> Result<String, MessageError> {
+    message.validate()?;
     let mut writer = CappedWriter::new(MAX_HOST_MESSAGE_BYTES);
     if serde_json::to_writer(&mut writer, message).is_err() {
         return Err(if writer.exceeded {
@@ -143,6 +200,25 @@ pub enum PageToHost {
         tab_id: u64,
         focused: bool,
     },
+    /// The page bridge's `findText` result for `request_id`. `current_match`
+    /// is 1-based, and 0 when there is no match.
+    FindResult {
+        protocol: u16,
+        document_epoch: u64,
+        tab_id: u64,
+        request_id: u64,
+        query: String,
+        match_count: u32,
+        current_match: u32,
+    },
+    /// The page bridge could not run `findText` for `request_id`: it is not
+    /// loaded yet, or it failed. .NET shows "Document loading…" for this.
+    FindUnavailable {
+        protocol: u16,
+        document_epoch: u64,
+        tab_id: u64,
+        request_id: u64,
+    },
 }
 
 impl PageToHost {
@@ -170,7 +246,48 @@ impl PageToHost {
                 document_epoch,
                 tab_id,
                 ..
+            }
+            | Self::FindResult {
+                protocol,
+                document_epoch,
+                tab_id,
+                ..
+            }
+            | Self::FindUnavailable {
+                protocol,
+                document_epoch,
+                tab_id,
+                ..
             } => (*protocol, *tab_id, *document_epoch),
+        }
+    }
+
+    /// Payload rules beyond the JSON shape. A find result must describe a
+    /// consistent position (the `DocumentSearchState` rules) within bounds.
+    fn validate_payload(&self) -> Result<(), MessageError> {
+        let valid = match self {
+            Self::OpenLink { href, .. } => BoundedUrl::try_new(href.clone()).is_ok(),
+            Self::FindResult {
+                request_id,
+                query,
+                match_count,
+                current_match,
+                ..
+            } => {
+                *request_id > 0
+                    && utf16_len(query) <= MAX_FIND_QUERY_UNITS
+                    && *match_count <= MAX_FIND_MATCHES
+                    && current_match <= match_count
+                    && (*match_count == 0 || *current_match > 0)
+                    && (!query.is_empty() || *match_count == 0)
+            }
+            Self::FindUnavailable { request_id, .. } => *request_id > 0,
+            Self::Ready { .. } | Self::CopyText { .. } | Self::FocusChanged { .. } => true,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(MessageError::InvalidPayload)
         }
     }
 }
@@ -218,9 +335,7 @@ pub fn parse_page_message(
 
     let message: PageToHost =
         serde_json::from_slice(raw_json).map_err(|_| MessageError::InvalidPayload)?;
-    if let PageToHost::OpenLink { href, .. } = &message {
-        BoundedUrl::try_new(href.clone()).map_err(|_| MessageError::InvalidPayload)?;
-    }
+    message.validate_payload()?;
     let (protocol, tab_id, document_epoch) = message.identity();
     if protocol != context.protocol {
         return Err(MessageError::WrongProtocol);
