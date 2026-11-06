@@ -640,8 +640,9 @@ fn catastrophic_blocks_share_one_document_budget() {
 fn large_ordinary_blocks_highlight_in_every_language() {
     for &(id, fence) in LANGUAGE_FENCES {
         let line = highlight_oracle_code(&format!("{id}/long-line"));
-        // About 1.3 MB of code per block.
-        let source = fenced(fence, &line.repeat(240));
+        // About 1.3 MB of code per block (130 KB in unoptimized builds).
+        let copies = if cfg!(debug_assertions) { 24 } else { 240 };
+        let source = fenced(fence, &line.repeat(copies));
         let document = render_bounded(&format!("large {id}"), &source);
         let Ok(document) = document else {
             continue;
