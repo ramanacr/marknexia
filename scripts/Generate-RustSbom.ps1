@@ -5,10 +5,17 @@ Writes the SPDX 2.3 SBOM and THIRD-PARTY-NOTICES.txt for one Rust/Win32 package 
 
 .DESCRIPTION
 The inventory comes from `cargo metadata --format-version 1 --locked --filter-platform <target>`
-and Cargo.lock. Starting from the shell crate, the generator follows normal and build
-dependency edges and never dev-dependency edges. Each registry crate carries the Cargo.lock
+(MetadataPath), the same for the build host (HostMetadataPath; defaults to MetadataPath for a
+native build) and Cargo.lock. Starting from the shell crate, the generator follows normal
+edges in the target graph (runtime). A build edge, or a normal edge into a proc-macro, moves to
+the host graph; everything reached there is build-time, as `cargo tree -e normal,build` shows
+it. Dev-dependency edges are never followed. Each registry crate carries the Cargo.lock
 SHA-256 of its .crate archive. The embedded Mermaid runtime and the WebView2 SDK package
-come from their lock files. Every file in the package root is hashed (SHA-256).
+come from their lock files.
+
+The document DESCRIBES one distribution package, the portable ZIP. It has filesAnalyzed=true,
+a packageVerificationCode, and CONTAINS every file in the package root; each file has SHA1
+and SHA256 checksums (SPDX 2.3 sections 7.8, 7.9 and 8.4).
 
 The package root must already hold the shell and loader files. The notices file is written
 into the package root first, so the SBOM also records its hash. The SBOM must be written
@@ -22,6 +29,8 @@ param(
     [Parameter(Mandatory)][string]$PackageRoot,
     [Parameter(Mandatory)][ValidateSet('x64', 'ARM64')][string]$Architecture,
     [Parameter(Mandatory)][string]$OutputPath,
+    [string]$HostMetadataPath,
+    [string]$DistributionFileName,
     [string]$CargoLockPath = (Join-Path $PSScriptRoot '..\Cargo.lock'),
     [string]$LoaderLockPath = (Join-Path $PSScriptRoot '..\packaging\webview\loader.lock.json'),
     [string]$MermaidLockPath = (Join-Path $PSScriptRoot '..\packaging\webview\mermaid.lock.json'),
@@ -52,8 +61,11 @@ function Select-Ordinal([object[]]$Items, [scriptblock]$Key = { $_ }) {
 function Get-TextDigest([string]$Text) {
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($utf8.GetBytes($Text))).ToLowerInvariant()
 }
-function Get-FileDigest([string]$Path) {
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+function Get-FileDigest([string]$Path, [string]$Algorithm = 'SHA256') {
+    (Get-FileHash -LiteralPath $Path -Algorithm $Algorithm).Hash.ToLowerInvariant()
+}
+function Get-FileDigestText([string]$Text) {
+    [Convert]::ToHexString([Security.Cryptography.SHA1]::HashData([Text.Encoding]::ASCII.GetBytes($Text))).ToLowerInvariant()
 }
 function Get-SpdxId([string]$Prefix, [string]$Name, [string]$Version) {
     $safe = ("$Name-$Version" -replace '[^A-Za-z0-9.-]', '-')
@@ -84,10 +96,15 @@ foreach ($required in @($ShellFileName, $LoaderFileName)) {
 }
 if (@(Get-ChildItem -LiteralPath $packageRootFull -Directory).Count -gt 0) { throw 'Package root must be flat.' }
 
-$metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json -AsHashtable
-if ($metadata.version -ne 1 -or -not $metadata.resolve -or -not $metadata.packages) {
-    throw 'MetadataPath is not `cargo metadata --format-version 1` output with a resolve graph.'
+function Read-Metadata([string]$Path) {
+    $value = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    if ($value.version -ne 1 -or -not $value.resolve -or -not $value.packages) {
+        throw "$Path is not ``cargo metadata --format-version 1`` output with a resolve graph."
+    }
+    $value
 }
+$metadata = Read-Metadata $MetadataPath
+$hostMetadata = if ($HostMetadataPath) { Read-Metadata $HostMetadataPath } else { $metadata }
 $loaderLock = Get-Content -LiteralPath $LoaderLockPath -Raw | ConvertFrom-Json -AsHashtable
 if ($loaderLock.schemaVersion -ne 'webview2-loader-lock-v1' -or -not $loaderLock.loaders.ContainsKey($Architecture)) {
     throw 'WebView2 loader lock does not cover the requested architecture.'
@@ -116,14 +133,16 @@ foreach ($block in $blocks | Select-Object -Skip 1) {
 
 # --- Dependency graph ------------------------------------------------------
 $packagesById = @{}
-foreach ($package in $metadata.packages) { $packagesById[$package.id] = $package }
-$nodesById = @{}
-foreach ($node in $metadata.resolve.nodes) { $nodesById[$node.id] = $node }
+foreach ($package in @($metadata.packages) + @($hostMetadata.packages)) { $packagesById[$package.id] = $package }
+$nodesByGraph = @{ target = @{}; host = @{} }
+foreach ($node in $metadata.resolve.nodes) { $nodesByGraph.target[$node.id] = $node }
+foreach ($node in $hostMetadata.resolve.nodes) { $nodesByGraph.host[$node.id] = $node }
 $workspaceMembers = [Collections.Generic.HashSet[string]]::new([string[]]@($metadata.workspace_members))
 $rootIds = @($metadata.packages | Where-Object { $_.name -ceq $RootPackage -and $workspaceMembers.Contains($_.id) } | ForEach-Object id)
 if ($rootIds.Count -ne 1) { throw "Root workspace package $RootPackage not found exactly once." }
 $rootId = $rootIds[0]
 if (-not $ProductVersion) { $ProductVersion = $packagesById[$rootId].version }
+if (-not $DistributionFileName) { $DistributionFileName = "marknexia-win32-$ProductVersion-$($Architecture.ToLowerInvariant())-unsigned-preview.zip" }
 
 function Get-EdgeKinds([hashtable]$Dependency) {
     @($Dependency.dep_kinds | ForEach-Object { if ($null -eq $_.kind) { 'normal' } else { [string]$_.kind } })
@@ -131,27 +150,39 @@ function Get-EdgeKinds([hashtable]$Dependency) {
 function Test-ProcMacro([hashtable]$Package) {
     @($Package.targets | Where-Object { $_.kind -contains 'proc-macro' }).Count -gt 0
 }
-# Walks the graph from the root over the allowed edge kinds. Dev edges are never allowed.
-function Get-Reachable([string[]]$Kinds, [bool]$EnterProcMacros) {
-    $seen = [Collections.Generic.HashSet[string]]::new()
-    $queue = [Collections.Generic.Queue[string]]::new()
-    [void]$seen.Add($rootId); $queue.Enqueue($rootId)
-    while ($queue.Count -gt 0) {
-        $node = $nodesById[$queue.Dequeue()]
-        if (-not $node) { throw 'Resolve graph is missing a reachable node.' }
-        foreach ($dependency in @($node.deps)) {
-            if (@(Get-EdgeKinds $dependency | Where-Object { $Kinds -contains $_ }).Count -eq 0) { continue }
-            $target = $packagesById[$dependency.pkg]
-            if (-not $target) { throw "Dependency $($dependency.pkg) is missing from packages." }
-            if (-not $EnterProcMacros -and (Test-ProcMacro $target)) { continue }
-            if ($seen.Add($dependency.pkg)) { $queue.Enqueue($dependency.pkg) }
+# Visits (crate, graph) states. Target graph: normal edges into non-proc-macro crates (runtime).
+# Build edges and proc-macros move to the host graph, where normal and build edges stay (build-time).
+# Dev edges are never followed.
+$runtimeIds = [Collections.Generic.HashSet[string]]::new()
+$shippedIds = [Collections.Generic.HashSet[string]]::new()
+$visited = [Collections.Generic.HashSet[string]]::new()
+$queue = [Collections.Generic.Queue[object]]::new()
+$queue.Enqueue(@($rootId, 'target')); [void]$visited.Add("target|$rootId")
+$crateEdges = [Collections.Generic.List[object]]::new()
+while ($queue.Count -gt 0) {
+    $id, $graph = $queue.Dequeue()
+    [void]$shippedIds.Add($id)
+    if ($graph -eq 'target') { [void]$runtimeIds.Add($id) }
+    $node = $nodesByGraph[$graph][$id]
+    if (-not $node) { throw "The $graph resolve graph has no node for $id." }
+    foreach ($dependency in @($node.deps)) {
+        $kinds = Get-EdgeKinds $dependency
+        $target = $packagesById[$dependency.pkg]
+        if (-not $target) { throw "Dependency $($dependency.pkg) is missing from packages." }
+        $next = [Collections.Generic.List[string]]::new()
+        if ($kinds -contains 'normal') {
+            $next.Add($(if ($graph -eq 'host' -or (Test-ProcMacro $target)) { 'host' } else { 'target' }))
+            $crateEdges.Add(@($id, 'DEPENDS_ON', $dependency.pkg))
+        }
+        if ($kinds -contains 'build') {
+            $next.Add('host')
+            $crateEdges.Add(@($dependency.pkg, 'BUILD_DEPENDENCY_OF', $id))
+        }
+        foreach ($nextGraph in $next) {
+            if ($visited.Add("$nextGraph|$($dependency.pkg)")) { $queue.Enqueue(@($dependency.pkg, $nextGraph)) }
         }
     }
-    , $seen
 }
-$runtimeIds = Get-Reachable @('normal') $false
-$shippedIds = Get-Reachable @('normal', 'build') $true
-
 $crates = Select-Ordinal @($shippedIds | ForEach-Object { $packagesById[$_] }) { "$($_.name)@$($_.version)" }
 $crateIdByPackageId = @{}
 $spdxPackages = [Collections.Generic.List[object]]::new()
@@ -197,7 +228,7 @@ foreach ($crate in $crates) {
 }
 $rootSpdxId = $crateIdByPackageId[$rootId]
 $spdxPackages | Where-Object { $_.SPDXID -eq $rootSpdxId } | ForEach-Object {
-    $_.comment = "Marknexia Rust/Win32 shell for $Architecture; unsigned preview built from source commit $SourceCommit."
+    $_.comment = "Marknexia Rust/Win32 shell crate (runtime) for $Architecture; unsigned preview built from source commit $SourceCommit."
 }
 
 $mermaidId = Get-SpdxId 'Asset' 'mermaid' $mermaidLock.version
@@ -283,39 +314,57 @@ if ($LoaderLicensePath) {
 $noticesPath = Join-Path $packageRootFull $NoticesFileName
 [IO.File]::WriteAllText($noticesPath, $notice.ToString(), $utf8)
 
-# --- Files in the package root ---------------------------------------------
+# --- Files and the distribution package --------------------------------------
 $edgeMap = @{}
 function Add-Relationship([string]$From, [string]$Kind, [string]$To) {
     $edgeMap["$From|$Kind|$To"] = [ordered]@{ spdxElementId = $From; relationshipType = $Kind; relatedSpdxElement = $To }
 }
-Add-Relationship 'SPDXRef-DOCUMENT' 'DESCRIBES' $rootSpdxId
+$distributionId = 'SPDXRef-Distribution-' + ($DistributionFileName -replace '[^A-Za-z0-9.-]', '-')
+Add-Relationship 'SPDXRef-DOCUMENT' 'DESCRIBES' $distributionId
+$fileSha1 = [Collections.Generic.List[string]]::new()
 $files = @((Select-Ordinal @(Get-ChildItem -LiteralPath $packageRootFull -File) { $_.Name }) | ForEach-Object {
     $fileId = "SPDXRef-File-$(Get-TextDigest $_.Name)"
-    Add-Relationship $rootSpdxId 'CONTAINS' $fileId
+    Add-Relationship $distributionId 'CONTAINS' $fileId
     $isBinary = $_.Name -ceq $ShellFileName -or $_.Name -ceq $LoaderFileName
     if ($_.Name -ceq $ShellFileName) { Add-Relationship $fileId 'CONTAINS' $mermaidId; Add-Relationship $fileId 'GENERATED_FROM' $rootSpdxId }
-    if ($_.Name -ceq $LoaderFileName) { Add-Relationship $webViewId 'CONTAINS' $fileId }
+    if ($_.Name -ceq $LoaderFileName) { Add-Relationship $fileId 'GENERATED_FROM' $webViewId }
+    $sha1 = Get-FileDigest $_.FullName 'SHA1'
+    $fileSha1.Add($sha1)
     [ordered]@{
         SPDXID = $fileId
         fileName = "./$($_.Name)"
         fileTypes = @($(if ($isBinary) { 'BINARY' } else { 'TEXT' }))
-        checksums = @([ordered]@{ algorithm = 'SHA256'; checksumValue = (Get-FileDigest $_.FullName) })
+        checksums = @(
+            [ordered]@{ algorithm = 'SHA1'; checksumValue = $sha1 },
+            [ordered]@{ algorithm = 'SHA256'; checksumValue = (Get-FileDigest $_.FullName) })
         licenseConcluded = 'NOASSERTION'
         licenseInfoInFiles = @('NOASSERTION')
         copyrightText = 'NOASSERTION'
     }
 })
+# SPDX 2.3 section 7.9: SHA1 over the ascending, concatenated SHA1 values of every file.
+$verificationCode = Get-FileDigestText ((Select-Ordinal $fileSha1.ToArray()) -join '')
+$spdxPackages.Insert(0, [ordered]@{
+    SPDXID = $distributionId
+    name = [IO.Path]::GetFileNameWithoutExtension($DistributionFileName)
+    versionInfo = $ProductVersion
+    packageFileName = $DistributionFileName
+    downloadLocation = 'NOASSERTION'
+    filesAnalyzed = $true
+    packageVerificationCode = [ordered]@{ packageVerificationCodeValue = $verificationCode }
+    primaryPackagePurpose = 'ARCHIVE'
+    licenseConcluded = 'NOASSERTION'
+    licenseInfoFromFiles = @('NOASSERTION')
+    licenseDeclared = 'NOASSERTION'
+    copyrightText = 'NOASSERTION'
+    comment = "Unsigned, unpublished portable preview ZIP for $Architecture (CI evidence only, never released)."
+})
 Add-Relationship $rootSpdxId 'DEPENDS_ON' $webViewId
-foreach ($id in $shippedIds) {
-    $node = $nodesById[$id]
-    foreach ($dependency in @($node.deps)) {
-        if (-not $crateIdByPackageId.ContainsKey($dependency.pkg)) { continue }
-        $kinds = Get-EdgeKinds $dependency
-        if ($kinds -contains 'normal') { Add-Relationship $crateIdByPackageId[$id] 'DEPENDS_ON' $crateIdByPackageId[$dependency.pkg] }
-        if ($kinds -contains 'build') { Add-Relationship $crateIdByPackageId[$dependency.pkg] 'BUILD_DEPENDENCY_OF' $crateIdByPackageId[$id] }
+foreach ($edge in $crateEdges) {
+    if ($crateIdByPackageId.ContainsKey($edge[0]) -and $crateIdByPackageId.ContainsKey($edge[2])) {
+        Add-Relationship $crateIdByPackageId[$edge[0]] $edge[1] $crateIdByPackageId[$edge[2]]
     }
 }
-
 $created = if ($env:SOURCE_DATE_EPOCH) { [DateTimeOffset]::FromUnixTimeSeconds([long]$env:SOURCE_DATE_EPOCH) } else { [DateTimeOffset]::UtcNow }
 $sbom = [ordered]@{
     spdxVersion = 'SPDX-2.3'
@@ -326,7 +375,7 @@ $sbom = [ordered]@{
         created = $created.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         creators = @('Tool: Marknexia-Rust-SBOM-1.0')
     }
-    comment = "Unsigned, unpublished preview package for $Architecture. Crates: cargo metadata resolve graph from $RootPackage over normal and build edges (dev-dependencies excluded); runtime or build-time scope is in each package comment. Files: every file in the package with its SHA-256. Licenses are declared by each component and not concluded."
+    comment = "Unsigned, unpublished preview package for $Architecture. Crates: cargo metadata resolve graphs (target for runtime, host for build-time) from $RootPackage over normal and build edges, dev-dependencies excluded; the scope is in each package comment. Files: every file in the ZIP with SHA1 and SHA256. Licenses are declared by each component and not concluded."
     packages = $spdxPackages.ToArray()
     files = $files
     relationships = @((Select-Ordinal @($edgeMap.Keys)) | ForEach-Object { $edgeMap[$_] })

@@ -60,6 +60,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8888888888888888888888888888888888888888888888888888888888888888"
 
 [[package]]
+name = "hostonly"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9999999999999999999999999999999999999999999999999999999999999999"
+
+[[package]]
 name = "marknexia-core"
 version = "0.1.0"
 dependencies = [
@@ -84,3 +90,9 @@ dependencies = [
  "devonly",
  "marknexia-core",
 ]
+
+[[package]]
+name = "targetonly"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

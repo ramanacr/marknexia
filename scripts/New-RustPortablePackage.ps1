@@ -13,9 +13,11 @@ real release executable into an archive (local antivirus policy, see the product
    (Stage-WebView2Loader.ps1), plus README.txt.
 3. Writes THIRD-PARTY-NOTICES.txt into the staging folder and the SBOM next to it
    (Generate-RustSbom.ps1).
-4. Writes a deterministic ZIP (sorted entries, SOURCE_DATE_EPOCH timestamps) and SHA256SUMS.
+4. Writes a deterministic ZIP (sorted entries, SOURCE_DATE_EPOCH timestamps) twice and requires
+   identical hashes, then SHA256SUMS with exactly the ZIP and SBOM lines.
 5. Extracts the ZIP to a fresh folder and checks every entry hash against staging, the shell
-   against both builds, the loader against its lock, the SBOM (Test-RustSbom.ps1) and SHA256SUMS.
+   against both builds, the loader against its lock, the SBOM (Test-RustSbom.ps1, including the
+   cargo tree crate set) and SHA256SUMS.
 Nothing is signed, released or published.
 #>
 [CmdletBinding()]
@@ -25,6 +27,8 @@ param(
     [Parameter(Mandatory)][string]$SecondRoot,
     [Parameter(Mandatory)][string]$LoaderPackagePath,
     [Parameter(Mandatory)][string]$MetadataPath,
+    [Parameter(Mandatory)][string]$HostMetadataPath,
+    [Parameter(Mandatory)][string]$CargoTreePath,
     [Parameter(Mandatory)][string]$OutputRoot,
     [string]$SourceCommit = 'NOASSERTION'
 )
@@ -43,7 +47,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $loaderLockPath = Join-Path $repoRoot 'packaging\webview\loader.lock.json'
 $loaderLock = Get-Content -LiteralPath $loaderLockPath -Raw | ConvertFrom-Json -AsHashtable
 $metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json -AsHashtable
-$version = @($metadata.packages | Where-Object { $_.name -ceq 'marknexia-win32' -and $metadata.workspace_members -contains $_.id })[0].version
+$rootPackages = @($metadata.packages | Where-Object { $_.name -ceq 'marknexia-win32' -and $metadata.workspace_members -contains $_.id })
+if ($rootPackages.Count -ne 1 -or $rootPackages[0].version -notmatch '^\d+\.\d+\.\d+([-+].+)?$') { throw 'cargo metadata has no single marknexia-win32 workspace crate with a version.' }
+$version = $rootPackages[0].version
 $baseName = "marknexia-win32-$version-$($architecture.ToLowerInvariant())-unsigned-preview"
 # Ordinal sort, independent of the runner's culture, so output is byte-stable.
 function Select-Ordinal([object[]]$Items, [scriptblock]$Key = { $_ }) {
@@ -110,25 +116,33 @@ try {
 # 3. Notices into the package, SBOM next to it.
 $sbomPath = Join-Path $out "$baseName.spdx.json"
 $sbomArguments = @{
-    MetadataPath = $MetadataPath; PackageRoot = $staging; Architecture = $architecture; OutputPath = $sbomPath
-    SourceCommit = $SourceCommit; LoaderLockPath = $loaderLockPath
+    MetadataPath = $MetadataPath; HostMetadataPath = $HostMetadataPath; PackageRoot = $staging; Architecture = $architecture
+    OutputPath = $sbomPath; DistributionFileName = "$baseName.zip"; SourceCommit = $SourceCommit; LoaderLockPath = $loaderLockPath
 }
 if ($loaderLicense) { $sbomArguments.LoaderLicensePath = $loaderLicense }
 & (Join-Path $PSScriptRoot 'Generate-RustSbom.ps1') @sbomArguments
 
-# 4. Deterministic ZIP and SHA256SUMS.
+# 4. Deterministic ZIP, written twice and compared, then SHA256SUMS.
 $zipPath = Join-Path $out "$baseName.zip"
 $timestamp = [DateTimeOffset]::FromUnixTimeSeconds([long]$env:SOURCE_DATE_EPOCH)
 $stagedFiles = Select-Ordinal @(Get-ChildItem -LiteralPath $staging -File) { $_.Name }
-$archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
-try {
-    foreach ($file in $stagedFiles) {
-        $zipEntry = $archive.CreateEntry($file.Name, [IO.Compression.CompressionLevel]::Optimal)
-        $zipEntry.LastWriteTime = $timestamp
-        $target = $zipEntry.Open()
-        try { $source = [IO.File]::OpenRead($file.FullName); try { $source.CopyTo($target) } finally { $source.Dispose() } } finally { $target.Dispose() }
-    }
-} finally { $archive.Dispose() }
+function Write-PortableZip([string]$Path) {
+    $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in $stagedFiles) {
+            $zipEntry = $archive.CreateEntry($file.Name, [IO.Compression.CompressionLevel]::Optimal)
+            $zipEntry.LastWriteTime = $timestamp
+            $target = $zipEntry.Open()
+            try { $source = [IO.File]::OpenRead($file.FullName); try { $source.CopyTo($target) } finally { $source.Dispose() } } finally { $target.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+}
+Write-PortableZip $zipPath
+$secondZip = Join-Path $work "$baseName.second.zip"
+Write-PortableZip $secondZip
+$zipDigests = [ordered]@{ first = (Get-Digest $zipPath); second = (Get-Digest $secondZip) }
+if ($zipDigests.first -ne $zipDigests.second) { throw "The ZIP is not reproducible: $($zipDigests.first) vs $($zipDigests.second)" }
+Remove-Item -LiteralPath $secondZip
 $sumsPath = Join-Path $out 'SHA256SUMS'
 $sums = @(Get-ChildItem -LiteralPath $out -File | Where-Object { $_.Name -in @("$baseName.zip", "$baseName.spdx.json") } |
     Sort-Object Name | ForEach-Object { "$(Get-Digest $_.FullName)  $($_.Name)" })
@@ -151,11 +165,16 @@ $entries = foreach ($file in $stagedFiles) {
 $zipShell = Get-Digest (Join-Path $verify $shellName)
 if ($zipShell -ne $firstShell -or $zipShell -ne $secondShell) { throw 'ZIP shell does not match both reproducible builds.' }
 if ((Get-Digest (Join-Path $verify $loaderName)) -ne $loaderLock.loaders[$architecture].sha256) { throw 'ZIP loader is not the pinned loader.' }
-& (Join-Path $PSScriptRoot 'Test-RustSbom.ps1') -SbomPath $sbomPath -PackageRoot $verify -MetadataPath $MetadataPath -Architecture $architecture -LoaderLockPath $loaderLockPath
-foreach ($line in [IO.File]::ReadAllLines($sumsPath)) {
-    $hash, $name = $line -split '  ', 2
+& (Join-Path $PSScriptRoot 'Test-RustSbom.ps1') -SbomPath $sbomPath -PackageRoot $verify -MetadataPath $MetadataPath -HostMetadataPath $HostMetadataPath -CargoTreePath $CargoTreePath -Architecture $architecture -LoaderLockPath $loaderLockPath
+$sumLines = @([IO.File]::ReadAllLines($sumsPath))
+if ($sumLines.Count -ne 2) { throw "SHA256SUMS must have exactly 2 lines (ZIP and SBOM); it has $($sumLines.Count)." }
+$sumNames = foreach ($line in $sumLines) {
+    if ($line -cnotmatch '^([0-9a-f]{64})  (\S+)$') { throw "Malformed SHA256SUMS line: $line" }
+    $hash, $name = $Matches[1], $Matches[2]
     if ((Get-Digest (Join-Path $out $name)) -ne $hash) { throw "SHA256SUMS mismatch for $name" }
+    $name
 }
+if ((@($sumNames | Sort-Object) -join '|') -cne ((@("$baseName.spdx.json", "$baseName.zip") | Sort-Object) -join '|')) { throw 'SHA256SUMS must list the ZIP and the SBOM.' }
 
 $evidence = [ordered]@{
     schemaVersion = 'rust-unsigned-preview-package-v1'
@@ -165,7 +184,7 @@ $evidence = [ordered]@{
     sourceCommit = $SourceCommit
     signed = $false
     published = $false
-    zip = [ordered]@{ name = "$baseName.zip"; sha256 = (Get-Digest $zipPath); bytes = (Get-Item -LiteralPath $zipPath).Length }
+    zip = [ordered]@{ name = "$baseName.zip"; sha256 = (Get-Digest $zipPath); bytes = (Get-Item -LiteralPath $zipPath).Length; reproducible = $true; secondWriteSha256 = $zipDigests.second }
     sbom = [ordered]@{ name = "$baseName.spdx.json"; format = 'SPDX-2.3'; sha256 = (Get-Digest $sbomPath) }
     reproducibleShell = [ordered]@{ firstBuildSha256 = $firstShell; secondBuildSha256 = $secondShell; zipSha256 = $zipShell }
     entries = @($entries)
