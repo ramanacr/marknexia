@@ -15,3 +15,4 @@ These decisions are deliberately outside the frozen .NET baseline and must not a
   * Containment folds ASCII case only, so non-ASCII case variants are false blocks.
 
   The file also sets native-adapter requirements: replace the virtual file lookup, and check containment on the final path of the opened handle. The positive navigation fixtures match .NET exactly.
+* **Repository scan (RS-1 to RS-6) — proposed.** See `repository-scan.md`: scan limits (depth 64, 100,000 files, 1,000,000 entries) with a partial tree and a limits flag, roots and entry names held to the document path gate (drive and UNC share), non-ASCII case folding from the Rust Unicode tables, and fail-soft access-denied handling in root detection. Filters, ignored folders, hidden and reparse-point rules, pruning and order match .NET.
