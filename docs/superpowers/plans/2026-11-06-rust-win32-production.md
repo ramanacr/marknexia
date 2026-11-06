@@ -1,6 +1,6 @@
 # Marknexia Rust/Win32 Production Rewrite Plan
 
-Status: **draft.** Phase 1 runs in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
+Status: **draft.** Phase 1 is complete (integrated at 816d931; CI run 42154523108 green after one rerun). Phase 1 ran in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
 Inputs: `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md` (architecture), `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md` (decision CONDITIONAL-GO, conditions C1–C6), `artifacts/rust-feasibility/manifest.json` (evidence index).
 Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
@@ -128,6 +128,7 @@ Retire the .NET edition after the defined overlap and successful migration.
 | Risk | Mitigation in this plan |
 |---|---|
 | Hosted ARM64 timing noise (cold p95 81–498 ms on one binary) | Reference-hardware measurement in Phase 7 decides the gate |
+| Hosted runner launch failures (`0xC0000142` three times in a row in run 42154523108; the rerun passed) | Phase 7 measures on reference hosts; the collector records every retry |
 | Hosted runner foreground interference | Tests dismiss system surfaces on GitHub Actions only; reference hosts in Phase 4/7 |
 | Highlighting scope larger than fixtures | Gate G1 before Phase 3 |
 | Updater security | Gate G2 and a separate security review in Phase 6 |
