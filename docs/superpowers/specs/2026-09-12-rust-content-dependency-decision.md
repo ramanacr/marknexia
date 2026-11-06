@@ -260,6 +260,16 @@ Evidence and design:
 * **Dependencies.** The only dependency added to `marknexia-rendering` is `markup5ever =0.40.0`, already in the graph through html5ever. It provides the HTML5 named-entity table for the `WebUtility.HtmlDecode` emulation. `Cargo.lock` gains no package. Licenses are unchanged.
 * **Binary size.** Not measured, because a binary build is outside the allowed command set. No crate was added, so the delta is only the tokenizer's code plus the 34.8 KB of bundled CSS and JS.
 
+### Update for gate G1 (2026-11-06): every ColorCode language
+
+The owner decided that highlighting must cover every ColorCode language with .NET parity. The C#-only decision above is superseded for the other 24 languages:
+
+* `crates/marknexia-rendering/tests/oracle/HighlightOracle` generates the language table (the exact `LanguageCompiler` regexes, capture-to-scope lists, aliases and styles) and the .NET character tables from the installed ColorCode 2.0.15, and records .NET output for 522 cases.
+* The patterns run on a Marknexia-owned backtracking engine with .NET regex semantics (`src/highlight/regex.rs`). The `regex` crate and `fancy-regex` cannot express the balancing groups, conditionals and capture history that the patterns need. No crate was added.
+* A per-document step budget bounds backtracking; an exhausted block falls back to plain `<pre><code>`. C# keeps the linear tokenizer above.
+* Result: 516 of 522 .NET cases byte for byte; the 6 others are budget fallbacks where .NET needs 3 s to more than 20 s. The release binary grows by 220,160 bytes.
+
+The records are HL-1 to HL-4 in `compat/decisions/highlight-differences.md`.
 ### Renderer result
 
 Frozen rendering fixtures: **7/7 exact, byte-for-byte including the complete templated page**, for both the pulldown and comrak candidates. There are 0 allowances. The gate is `crates/marknexia-rendering/tests/parity_v1.rs`, which uses the same strict and stale-allowance pattern as the Markdown and security gates.

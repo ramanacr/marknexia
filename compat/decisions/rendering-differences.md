@@ -78,6 +78,8 @@ The `*a* ` and `- x` "before" figures are 8 MiB measurements scaled per byte (21
 
 ## REND-2 — Only C# is highlighted
 
+**Superseded by owner decision G1 (2026-11-06).** Every ColorCode 2.0.15 language is now highlighted with .NET parity: 516 of 522 .NET oracle cases match byte for byte. The new behavior and its remaining differences are recorded in `highlight-differences.md` (HL-1 to HL-4, proposed). The text below describes the C#-only state that G0 approved.
+
 .NET highlights every ColorCode 2.0.15 language. Rust has a Marknexia-owned, linear-time C# tokenizer (`src/highlight.rs`) and no other grammar. For `c#`, `cs`, `csharp` and `cake`, the output has the ColorCode structure `<div class="csharp"><pre>` with `<span class="keyword|number|string|stringCSharpVerbatim|comment|xmlDocTag|xmlDocComment|preprocessorKeyword">` spans. The rules were translated from the regex strings in the ColorCode.Core 2.0.15 string heap, in the order they are stored there.
 
 | Code block language | .NET | Rust |
