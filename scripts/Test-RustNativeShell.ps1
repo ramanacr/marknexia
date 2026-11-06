@@ -79,8 +79,11 @@ $profileDir = Join-Path $isolated 'WebView2'
 [void](New-Item -ItemType Directory -Path $profileDir)
 $previousSettings = $env:MARKNEXIA_SETTINGS_PATH
 $previousProfile = $env:MARKNEXIA_WEBVIEW2_USER_DATA
+$previousKey = $env:MARKNEXIA_INSTANCE_KEY
 $env:MARKNEXIA_SETTINGS_PATH = Join-Path $isolated 'settings.json'
 $env:MARKNEXIA_WEBVIEW2_USER_DATA = $profileDir
+# Own single-instance key: never hand off to another running shell.
+$env:MARKNEXIA_INSTANCE_KEY = "mnx-shell-check-$PID-$([Guid]::NewGuid().ToString('N'))"
 $process = $null
 try {
 $process = Start-Process -FilePath $resolved -PassThru
@@ -136,6 +139,7 @@ finally {
 finally {
     $env:MARKNEXIA_SETTINGS_PATH = $previousSettings
     $env:MARKNEXIA_WEBVIEW2_USER_DATA = $previousProfile
+    $env:MARKNEXIA_INSTANCE_KEY = $previousKey
     # WebView2 processes release the profile shortly after the shell exits.
     for ($i = 0; $i -lt 60 -and (Test-Path $isolated); $i++) {
         Remove-Item -LiteralPath $isolated -Recurse -Force -ErrorAction SilentlyContinue

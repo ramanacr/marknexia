@@ -148,6 +148,8 @@ function Invoke-Run([string]$UserData) {
     $env:MARKNEXIA_WEBVIEW2_USER_DATA = $UserData
     # Default settings for every run: never the user's settings file.
     $env:MARKNEXIA_SETTINGS_PATH = Join-Path $UserData 'settings.json'
+    # Own single-instance key: never hand off to another running shell.
+    $env:MARKNEXIA_INSTANCE_KEY = "mnx-perf-$PID-$([Guid]::NewGuid().ToString('N'))"
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $process = if ($documentPath) {
         Start-Process -FilePath $exe -ArgumentList "`"$documentPath`"" -PassThru
@@ -201,6 +203,7 @@ function Invoke-Run([string]$UserData) {
         $process.Dispose()
         Remove-Item Env:\MARKNEXIA_WEBVIEW2_USER_DATA -ErrorAction SilentlyContinue
         Remove-Item Env:\MARKNEXIA_SETTINGS_PATH -ErrorAction SilentlyContinue
+        Remove-Item Env:\MARKNEXIA_INSTANCE_KEY -ErrorAction SilentlyContinue
     }
 }
 
