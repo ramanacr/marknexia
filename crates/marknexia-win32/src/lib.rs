@@ -2,6 +2,7 @@
 
 pub mod accessibility;
 pub mod app;
+pub mod chrome_model;
 pub mod documents;
 pub mod keyboard;
 pub mod layout;

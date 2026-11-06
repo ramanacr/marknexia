@@ -7,7 +7,10 @@ pub struct Dip(pub u32);
 
 impl Dip {
     pub const INTERACTION_TARGET: Self = Self(44);
-    const SIDEBAR_WIDTH: Self = Self(280);
+    /// The .NET `OpenPaneLength` default.
+    pub const SIDEBAR_WIDTH: Self = Self(280);
+    /// The .NET `SidebarResizeHandle` width, inside the sidebar's right edge.
+    pub const SPLITTER_WIDTH: Self = Self(6);
 
     pub fn to_pixels(self, dpi: u32) -> u32 {
         self.0.saturating_mul(dpi).saturating_add(BASE_DPI - 1) / BASE_DPI
@@ -39,6 +42,10 @@ pub struct ShellLayoutRequest {
     pub dpi: u32,
     pub sidebar_visible: bool,
     pub find_bar_visible: bool,
+    /// Sidebar width in DIPs (the persisted `SidebarWidth`).
+    pub sidebar_width: Dip,
+    /// The diagnostics bar is open above the document.
+    pub diagnostics_visible: bool,
 }
 
 impl ShellLayoutRequest {
@@ -49,6 +56,8 @@ impl ShellLayoutRequest {
             dpi,
             sidebar_visible: false,
             find_bar_visible: false,
+            sidebar_width: Dip::SIDEBAR_WIDTH,
+            diagnostics_visible: false,
         }
     }
 
@@ -61,6 +70,16 @@ impl ShellLayoutRequest {
         self.find_bar_visible = visible;
         self
     }
+
+    pub const fn with_sidebar_width(mut self, width: Dip) -> Self {
+        self.sidebar_width = width;
+        self
+    }
+
+    pub const fn with_diagnostics_visible(mut self, visible: bool) -> Self {
+        self.diagnostics_visible = visible;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +90,10 @@ pub struct ShellLayout {
     pub webview: PixelRect,
     pub find_bar: PixelRect,
     pub status_bar: PixelRect,
+    /// The resize handle at the sidebar's right edge (inside `sidebar`).
+    pub splitter: PixelRect,
+    /// The diagnostics bar above the document; zero height when closed.
+    pub diagnostics: PixelRect,
 }
 
 impl ShellLayout {
@@ -99,12 +122,20 @@ impl ShellLayout {
         let sidebar_width = if request.sidebar_visible {
             request
                 .client_width
-                .min(Dip::SIDEBAR_WIDTH.to_pixels(request.dpi))
+                .min(request.sidebar_width.to_pixels(request.dpi))
         } else {
             0
         };
         let content_width = request.client_width.saturating_sub(sidebar_width);
         let content_height = content_bottom.saturating_sub(content_top);
+        let splitter_width = sidebar_width.min(Dip::SPLITTER_WIDTH.to_pixels(request.dpi));
+        let diagnostics_height = if request.diagnostics_visible {
+            content_height.min(target)
+        } else {
+            0
+        };
+        let document_top = content_top.saturating_add(diagnostics_height);
+        let document_height = content_height.saturating_sub(diagnostics_height);
 
         Self {
             command_bar: PixelRect {
@@ -126,9 +157,9 @@ impl ShellLayout {
             },
             webview: PixelRect {
                 x: sidebar_width,
-                y: content_top,
+                y: document_top,
                 width: content_width,
-                height: content_height,
+                height: document_height,
             },
             find_bar: PixelRect {
                 x: sidebar_width,
@@ -141,6 +172,18 @@ impl ShellLayout {
                 width: request.client_width,
                 height: status_height,
                 ..PixelRect::default()
+            },
+            splitter: PixelRect {
+                x: sidebar_width.saturating_sub(splitter_width),
+                y: content_top,
+                width: splitter_width,
+                height: content_height,
+            },
+            diagnostics: PixelRect {
+                x: sidebar_width,
+                y: content_top,
+                width: content_width,
+                height: diagnostics_height,
             },
         }
     }

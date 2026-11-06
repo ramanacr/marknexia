@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
 marknexia-files = { path = "../marknexia-files", version = "=0.1.0" }
+marknexia-navigation = { path = "../marknexia-navigation", version = "=0.1.0" }
 marknexia-rendering = { path = "../marknexia-rendering", version = "=0.1.0" }
 marknexia-security = { path = "../marknexia-security", version = "=0.1.0" }
 marknexia-webview = { path = "../marknexia-webview", version = "=0.1.0" }

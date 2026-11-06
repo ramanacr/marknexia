@@ -321,6 +321,7 @@ version = "0.1.0"
 dependencies = [
  "marknexia-core",
  "marknexia-files",
+ "marknexia-navigation",
  "marknexia-rendering",
  "marknexia-security",
  "marknexia-webview",

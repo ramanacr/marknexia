@@ -123,6 +123,16 @@ impl AppState {
     pub fn theme(&self) -> ThemePreference {
         self.theme
     }
+
+    /// The persisted or selected theme (.NET `ThemeSelector`).
+    pub fn set_theme(&mut self, theme: ThemePreference) {
+        self.theme = theme;
+    }
+
+    /// The persisted or toggled sidebar visibility (.NET `IsPaneOpen`).
+    pub fn set_sidebar_visible(&mut self, visible: bool) {
+        self.sidebar_visible = visible;
+    }
 }
 
 impl Default for AppState {
