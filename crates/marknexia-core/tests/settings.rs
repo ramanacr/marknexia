@@ -331,3 +331,68 @@ fn visible_recent_files_skip_missing_files() {
     // Missing files stay stored.
     assert_eq!(settings.recent_files.len(), 7);
 }
+
+#[test]
+fn negative_zero_integers_are_accepted_as_dotnet_does() {
+    let settings = parse(r#"{"Theme": -0, "SidebarMode": -0}"#).unwrap();
+    assert_eq!(settings.theme, ThemePreference::System);
+    assert_eq!(settings.sidebar_mode, 0);
+    assert_eq!(
+        parse(r#"{"Theme": -2}"#).unwrap().theme,
+        ThemePreference::System
+    );
+    for literal in ["-0.0", "0.0", "0e0", "-0E1"] {
+        assert_eq!(
+            parse(&format!(r#"{{"SidebarMode": {literal}}}"#)),
+            Err(SettingsParseError::InvalidField("SidebarMode")),
+            "{literal}"
+        );
+    }
+}
+
+#[test]
+fn white_space_around_values_is_ignored() {
+    let settings =
+        parse("{ \"Theme\" :\n 1 \t, \"AllowRemoteAssets\" : true\r\n, \"SidebarMode\": 1 }")
+            .unwrap();
+    assert_eq!(settings.theme, ThemePreference::Light);
+    assert!(settings.allow_remote_assets);
+    assert_eq!(settings.sidebar_mode, 1);
+}
+
+#[test]
+fn large_unknown_properties_are_skipped() {
+    let items = vec!["[1, \"x\", {\"a\": null}]"; 200_000].join(",");
+    let document = format!(r#"{{"Unknown": [{items}], "Theme": 2}}"#);
+    assert!(document.len() < MAX_SETTINGS_BYTES);
+    assert_eq!(parse(&document).unwrap().theme, ThemePreference::Dark);
+}
+
+#[test]
+fn brackets_inside_strings_do_not_count_toward_depth() {
+    let deep_text = "[".repeat(100);
+    let document = format!(r#"{{"RepositoryRoot": "C:\\{deep_text}\"\\{{", "Theme": 1}}"#);
+    let settings = parse(&document).unwrap();
+    assert_eq!(settings.theme, ThemePreference::Light);
+    assert_eq!(
+        settings.repository_root,
+        Some(format!("C:\\{deep_text}\"\\{{"))
+    );
+}
+
+#[test]
+fn every_duplicate_occurrence_is_validated() {
+    // System.Text.Json converts each occurrence in order, so an invalid
+    // earlier value fails even when a later one is valid.
+    assert_eq!(
+        parse(r#"{"Theme": "Dark", "Theme": 1}"#),
+        Err(SettingsParseError::InvalidField("Theme"))
+    );
+    assert_eq!(
+        parse(r#"{"SchemaVersion": 0, "SchemaVersion": 2}"#),
+        Err(SettingsParseError::InvalidSchemaVersion)
+    );
+    // A newer schema reads leniently: the valid later value is used.
+    let parsed = parse_settings(br#"{"SchemaVersion": 3, "Theme": "Dark", "Theme": 1}"#).unwrap();
+    assert_eq!(parsed.settings.theme, ThemePreference::Light);
+}

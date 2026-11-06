@@ -21,8 +21,11 @@
 
 use std::fmt;
 
-use serde::Serialize;
-use serde_json::{Map, Value};
+use std::borrow::Cow;
+
+use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::contracts::AppTheme;
 use crate::recent::{
@@ -251,24 +254,29 @@ pub fn parse_settings(bytes: &[u8]) -> Result<ParsedSettings, SettingsParseError
         return Err(SettingsParseError::TooLarge { bytes: bytes.len() });
     }
     let text = decode_text(bytes);
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| SettingsParseError::Syntax(error.to_string()))?;
-    if depth(&value) > MAX_JSON_DEPTH {
+    let shape = scan_shape(&text);
+    if shape.max_depth > MAX_JSON_DEPTH {
         return Err(SettingsParseError::TooDeep);
     }
-    let Value::Object(map) = value else {
-        return Err(SettingsParseError::NotAnObject);
-    };
-    let schema_version = match map.get("SchemaVersion") {
-        None => LEGACY_SCHEMA_VERSION,
-        Some(version) => version
-            .as_u64()
-            .and_then(|version| u32::try_from(version).ok())
+    if shape.first != Some('{') {
+        // Distinguish valid JSON that is not an object from a syntax error,
+        // without building the value.
+        return Err(match serde_json::from_str::<IgnoredAny>(&text) {
+            Ok(_) => SettingsParseError::NotAnObject,
+            Err(error) => SettingsParseError::Syntax(error.to_string()),
+        });
+    }
+    let document: RawDocument<'_> = serde_json::from_str(&text)
+        .map_err(|error| SettingsParseError::Syntax(error.to_string()))?;
+    let mut schema_version = LEGACY_SCHEMA_VERSION;
+    for raw in document.occurrences(Field::SchemaVersion) {
+        schema_version = serde_json::from_str::<u32>(raw)
+            .ok()
             .filter(|version| *version >= LEGACY_SCHEMA_VERSION)
-            .ok_or(SettingsParseError::InvalidSchemaVersion)?,
-    };
+            .ok_or(SettingsParseError::InvalidSchemaVersion)?;
+    }
     let strict = schema_version <= CURRENT_SCHEMA_VERSION;
-    let settings = read_fields(&map, strict)?.normalized();
+    let settings = read_fields(&document, strict)?.normalized();
     Ok(ParsedSettings {
         settings,
         schema_version,
@@ -313,104 +321,210 @@ struct SettingsDocument<'a> {
     recent_folders: &'a [String],
 }
 
-fn read_fields(map: &Map<String, Value>, strict: bool) -> Result<AppSettings, SettingsParseError> {
+/// The known properties, in document order of the .NET class.
+#[derive(Clone, Copy)]
+enum Field {
+    SchemaVersion,
+    Theme,
+    EnforceRepositorySandbox,
+    AllowExternalLinks,
+    AllowRemoteAssets,
+    IsSidebarOpen,
+    SidebarMode,
+    SidebarWidth,
+    RepositoryRoot,
+    RecentFiles,
+    RecentFolders,
+}
+
+const FIELD_NAMES: [&str; 11] = [
+    "SchemaVersion",
+    "Theme",
+    "EnforceRepositorySandbox",
+    "AllowExternalLinks",
+    "AllowRemoteAssets",
+    "IsSidebarOpen",
+    "SidebarMode",
+    "SidebarWidth",
+    "RepositoryRoot",
+    "RecentFiles",
+    "RecentFolders",
+];
+
+/// The top-level object, with the raw text of each known property.
+///
+/// Unknown properties are skipped with [`IgnoredAny`], so they are validated
+/// but never materialized. A repeated property replaces the earlier one
+/// (last wins, as `System.Text.Json` deserialization does), but every
+/// occurrence is still validated.
+struct RawDocument<'a> {
+    /// Every occurrence of each known property, in document order.
+    values: [Vec<&'a RawValue>; FIELD_NAMES.len()],
+}
+
+impl RawDocument<'_> {
+    /// Each occurrence of `field`, in order. `System.Text.Json` converts
+    /// every occurrence, so an invalid earlier duplicate still fails.
+    fn occurrences(&self, field: Field) -> impl Iterator<Item = &str> {
+        self.values[field as usize]
+            .iter()
+            .map(|raw| raw.get().trim())
+    }
+}
+
+impl<'de> Deserialize<'de> for RawDocument<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DocumentVisitor;
+
+        impl<'de> Visitor<'de> for DocumentVisitor {
+            type Value = RawDocument<'de>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a settings object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut values: [Vec<&RawValue>; FIELD_NAMES.len()] = Default::default();
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                    match FIELD_NAMES.iter().position(|name| *name == key) {
+                        Some(index) => values[index].push(map.next_value::<&'de RawValue>()?),
+                        None => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(RawDocument { values })
+            }
+        }
+
+        deserializer.deserialize_map(DocumentVisitor)
+    }
+}
+
+fn read_fields(
+    document: &RawDocument<'_>,
+    strict: bool,
+) -> Result<AppSettings, SettingsParseError> {
     let mut settings = AppSettings::default();
-    let invalid = |name: &'static str| {
+    let invalid = |name: Field| {
         if strict {
-            Err(SettingsParseError::InvalidField(name))
+            Err(SettingsParseError::InvalidField(FIELD_NAMES[name as usize]))
         } else {
             Ok(())
         }
     };
 
-    if let Some(value) = map.get("Theme") {
-        match as_i32(value) {
+    for raw in document.occurrences(Field::Theme) {
+        match int32_literal(raw) {
             Some(theme) => settings.theme = ThemePreference::from_stored(theme.into()),
-            None => invalid("Theme")?,
+            None => invalid(Field::Theme)?,
         }
     }
-    for (name, target) in [
+    for (field, target) in [
         (
-            "EnforceRepositorySandbox",
+            Field::EnforceRepositorySandbox,
             &mut settings.enforce_repository_sandbox,
         ),
-        ("AllowExternalLinks", &mut settings.allow_external_links),
-        ("AllowRemoteAssets", &mut settings.allow_remote_assets),
-        ("IsSidebarOpen", &mut settings.is_sidebar_open),
+        (
+            Field::AllowExternalLinks,
+            &mut settings.allow_external_links,
+        ),
+        (Field::AllowRemoteAssets, &mut settings.allow_remote_assets),
+        (Field::IsSidebarOpen, &mut settings.is_sidebar_open),
     ] {
-        if let Some(value) = map.get(name) {
-            match value {
-                Value::Bool(flag) => *target = *flag,
-                _ => invalid(name)?,
+        for raw in document.occurrences(field) {
+            match raw {
+                "true" => *target = true,
+                "false" => *target = false,
+                _ => invalid(field)?,
             }
         }
     }
-    if let Some(value) = map.get("SidebarMode") {
-        match as_i32(value) {
+    for raw in document.occurrences(Field::SidebarMode) {
+        match int32_literal(raw) {
             Some(mode) => settings.sidebar_mode = mode,
-            None => invalid("SidebarMode")?,
+            None => invalid(Field::SidebarMode)?,
         }
     }
-    if let Some(value) = map.get("SidebarWidth") {
-        match value.as_f64() {
-            Some(width) => settings.sidebar_width = width,
-            None => invalid("SidebarWidth")?,
+    for raw in document.occurrences(Field::SidebarWidth) {
+        match serde_json::from_str::<f64>(raw) {
+            Ok(width) => settings.sidebar_width = width,
+            Err(_) => invalid(Field::SidebarWidth)?,
         }
     }
-    if let Some(value) = map.get("RepositoryRoot") {
-        match value {
-            Value::Null => settings.repository_root = None,
-            Value::String(root) => settings.repository_root = Some(root.clone()),
-            _ => invalid("RepositoryRoot")?,
+    for raw in document.occurrences(Field::RepositoryRoot) {
+        match serde_json::from_str::<Option<String>>(raw) {
+            Ok(root) => settings.repository_root = root,
+            Err(_) => invalid(Field::RepositoryRoot)?,
         }
     }
-    for (name, target) in [
-        ("RecentFiles", &mut settings.recent_files),
-        ("RecentFolders", &mut settings.recent_folders),
+    for (field, target) in [
+        (Field::RecentFiles, &mut settings.recent_files),
+        (Field::RecentFolders, &mut settings.recent_folders),
     ] {
-        if let Some(value) = map.get(name) {
-            match string_list(value) {
-                Some(list) => *target = list,
-                None => invalid(name)?,
+        for raw in document.occurrences(field) {
+            // `null` (no list) or an array of strings and `null`s. `null`
+            // elements are dropped here; .NET drops them in `NormalizePaths`.
+            match serde_json::from_str::<Option<Vec<Option<String>>>>(raw) {
+                Ok(list) => *target = list.into_iter().flatten().flatten().collect(),
+                Err(_) => invalid(field)?,
             }
         }
     }
     Ok(settings)
 }
 
-/// A JSON integer literal within `i32`, as `Utf8JsonReader.TryGetInt32`
-/// accepts. Fractions and exponents are rejected.
-fn as_i32(value: &Value) -> Option<i32> {
-    value.as_i64().and_then(|number| i32::try_from(number).ok())
+/// A JSON number token that `Utf8JsonReader.TryGetInt32` accepts: an
+/// optional `-` and digits only, within `i32`. `-0` is accepted (as 0);
+/// fractions and exponents (`0.0`, `1e2`) are rejected.
+fn int32_literal(raw: &str) -> Option<i32> {
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
 }
 
-/// `null` (no list) or an array of strings and `null`s. `null` elements are
-/// dropped here; .NET drops them in `NormalizePaths`.
-fn string_list(value: &Value) -> Option<Vec<String>> {
-    match value {
-        Value::Null => Some(Vec::new()),
-        Value::Array(items) => {
-            let mut list = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    Value::String(text) => list.push(text.clone()),
-                    Value::Null => {}
-                    _ => return None,
-                }
+struct Shape {
+    /// The first character that is not JSON white space.
+    first: Option<char>,
+    /// Container nesting depth; a top-level object is depth 1.
+    max_depth: usize,
+}
+
+/// Measures nesting without building a value. Brackets inside strings do
+/// not count. The result is meaningful only for valid JSON; the parser
+/// rejects anything else.
+fn scan_shape(text: &str) -> Shape {
+    let first = text
+        .chars()
+        .find(|character| !matches!(character, ' ' | '\t' | '\n' | '\r'));
+    let mut depth = 0_usize;
+    let mut max_depth = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in text.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
-            Some(list)
+            continue;
         }
-        _ => None,
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
     }
-}
-
-/// Container nesting depth; a top-level object is depth 1.
-fn depth(value: &Value) -> usize {
-    match value {
-        Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
-        Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
-        _ => 0,
-    }
+    Shape { first, max_depth }
 }
 
 fn decode_text(bytes: &[u8]) -> String {
