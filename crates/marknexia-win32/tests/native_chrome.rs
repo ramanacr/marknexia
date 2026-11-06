@@ -790,19 +790,29 @@ impl Drop for ClipboardGuard {
     }
 }
 
-/// Closes, on drop, every File Explorer window that opened after `new`,
-/// matched by the new window handles (never by title).
-struct ExplorerWindows(Vec<HWND>);
+/// Restores File Explorer on drop: closes every Explorer window that
+/// opened after `new` (matched by new window handles, never by title), and
+/// ends every `explorer.exe` process that started after `new`. On a hosted
+/// runner `SHOpenFolderAndSelectItems` can start Explorer itself; left
+/// running, it made later `ShellExecuteEx` launches (PowerShell
+/// `Start-Process` in the desktop performance step) wait.
+struct ExplorerWindows {
+    windows: Vec<HWND>,
+    processes: Vec<u32>,
+}
 
 impl ExplorerWindows {
     fn new() -> Self {
-        Self(top_level_windows("CabinetWClass"))
+        Self {
+            windows: top_level_windows("CabinetWClass"),
+            processes: explorer_processes(),
+        }
     }
 
     fn opened(&self) -> Vec<HWND> {
         top_level_windows("CabinetWClass")
             .into_iter()
-            .filter(|window| !self.0.contains(window))
+            .filter(|window| !self.windows.contains(window))
             .collect()
     }
 }
@@ -812,9 +822,36 @@ impl Drop for ExplorerWindows {
         for window in self.opened() {
             let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
         }
+        // Give a new instance a moment to finish starting before it ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !self.opened().is_empty() {
+            thread::sleep(Duration::from_millis(100));
+        }
+        for process in explorer_processes()
+            .into_iter()
+            .filter(|process| !self.processes.contains(process))
+        {
+            eprintln!("ending explorer.exe {process}, started by this test");
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &process.to_string(), "/F"])
+                .output();
+        }
     }
 }
 
+/// The process ids of the running `explorer.exe` instances.
+fn explorer_processes() -> Vec<u32> {
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq explorer.exe", "/FO", "CSV", "/NH"])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split("\",\"").nth(1)?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// The menu bar items' names and access keys.
 fn menu_bar_items(shell: &Launched) -> Vec<(String, String)> {
     shell.until("the menu bar items", || {

@@ -35,7 +35,10 @@ param(
     [Parameter(Mandatory)][string]$Scenario,
     [Parameter(Mandatory)][string]$OutputPath,
     [ValidateRange(1, 1000)][int]$Runs = 30,
-    [ValidateRange(1000, 120000)][int]$TimeoutMs = 30000
+    [ValidateRange(1000, 120000)][int]$TimeoutMs = 30000,
+    # The whole collection stops (with a diagnostic) before the CI step's own
+    # 15-minute limit would kill it silently.
+    [ValidateRange(1, 600)][int]$TotalTimeoutMinutes = 12
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +110,28 @@ public static class PerfWindowProbe {
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+    // Never sends a message, so a hung shell cannot block the dump.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int InternalGetWindowText(IntPtr window, StringBuilder text, int capacity);
+    public static string DescribeWindows(uint processId) {
+        var lines = new StringBuilder();
+        EnumWindows((window, _) => {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner != processId) { return true; }
+            var name = new StringBuilder(64);
+            GetClassName(window, name, name.Capacity);
+            var text = new StringBuilder(256);
+            InternalGetWindowText(window, text, text.Capacity);
+            lines.AppendFormat("  0x{0:X} class={1} title=\"{2}\" visible={3} enabled={4} hung={5} owner=0x{6:X}\n",
+                window.ToInt64(), name, text, IsWindowVisible(window), IsWindowEnabled(window),
+                IsHungAppWindow(window), GetWindow(window, 4).ToInt64());
+            return true;
+        }, IntPtr.Zero);
+        return lines.Length == 0 ? "  (no top-level windows)\n" : lines.ToString();
+    }
     public static IntPtr FindVisibleShell(uint processId) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((window, _) => {
@@ -124,7 +149,7 @@ public static class PerfWindowProbe {
 '@
 
 function Get-DescendantProcesses([int]$RootId) {
-    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name)
+    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -OperationTimeoutSec 20)
     $result = [System.Collections.Generic.List[object]]::new()
     $frontier = [System.Collections.Generic.Queue[int]]::new()
     $frontier.Enqueue($RootId)
@@ -144,6 +169,19 @@ function Test-EventSignaled([string]$Name) {
     try { return $handle.WaitOne(0) } finally { $handle.Dispose() }
 }
 
+# What the shell process is doing: its state and its top-level windows (a
+# modal dialog or a message box shows up here), so a stall is never silent.
+function Get-ShellDiagnostic([Diagnostics.Process]$Process) {
+    try {
+        $Process.Refresh()
+        $state = if ($Process.HasExited) { "exited with code $($Process.ExitCode)" }
+        else { "running, responding=$($Process.Responding), threads=$($Process.Threads.Count)" }
+        $windows = if ($Process.HasExited) { '' } else { [PerfWindowProbe]::DescribeWindows([uint32]$Process.Id) }
+        return "shell $($Process.Id) $state`n$windows"
+    }
+    catch { return "shell diagnostic unavailable: $_" }
+}
+
 function Invoke-Run([string]$UserData) {
     $env:MARKNEXIA_WEBVIEW2_USER_DATA = $UserData
     # Default settings for every run: never the user's settings file.
@@ -151,18 +189,21 @@ function Invoke-Run([string]$UserData) {
     # Own single-instance key: never hand off to another running shell.
     $env:MARKNEXIA_INSTANCE_KEY = "mnx-perf-$PID-$([Guid]::NewGuid().ToString('N'))"
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $process = if ($documentPath) {
-        Start-Process -FilePath $exe -ArgumentList "`"$documentPath`"" -PassThru
-    }
-    else {
-        Start-Process -FilePath $exe -PassThru
-    }
+    # CreateProcess directly: no ShellExecuteEx (Start-Process), which depends
+    # on the desktop shell and can wait without a timeout. The environment
+    # variables above are inherited.
+    $start = [Diagnostics.ProcessStartInfo]::new($exe)
+    $start.UseShellExecute = $false
+    if ($documentPath) { $start.ArgumentList.Add($documentPath) }
+    $process = [Diagnostics.Process]::Start($start)
     $sample = [ordered]@{}
     $window = [IntPtr]::Zero
     try {
         $id = $process.Id
         while (-not $sample.Contains('firstRenderMs')) {
-            if ($clock.ElapsedMilliseconds -gt $TimeoutMs) { throw "Run timed out; reached: $($sample.Keys -join ', ')" }
+            if ($clock.ElapsedMilliseconds -gt $TimeoutMs) {
+                throw "Run timed out; reached: $($sample.Keys -join ', ')`n$(Get-ShellDiagnostic $process)"
+            }
             if ($process.HasExited) { throw "Shell exited early with code $($process.ExitCode)." }
             if (Test-EventSignaled "Local\Marknexia.StartupFailed.$id") {
                 throw "The shell signalled StartupFailed (no startup document or placeholder can render); its status bar names the error."
@@ -195,7 +236,11 @@ function Invoke-Run([string]$UserData) {
     finally {
         $children = @(Get-DescendantProcesses $process.Id)
         if ($window -ne [IntPtr]::Zero) { [void][PerfWindowProbe]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
-        if (-not $process.WaitForExit(10000)) { Stop-Process -Id $process.Id -Force }
+        if (-not $process.WaitForExit(10000)) {
+            Write-Host "The shell did not exit within 10 s of WM_CLOSE; ending it.`n$(Get-ShellDiagnostic $process)"
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            [void]$process.WaitForExit(10000)
+        }
         foreach ($child in $children) {
             $live = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
             if ($live -and -not $live.WaitForExit(10000)) { Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -211,9 +256,18 @@ function Invoke-Run([string]$UserData) {
 # 0xC0000142 when desktop resources run low). Retry such a run at most twice;
 # every retry is recorded in the samples so nothing is hidden.
 $script:retries = [System.Collections.Generic.List[object]]::new()
+$script:collection = [Diagnostics.Stopwatch]::StartNew()
 function Invoke-MeasuredRun([string]$UserData, [string]$Label) {
+    if ($script:collection.Elapsed.TotalMinutes -gt $TotalTimeoutMinutes) {
+        throw "Collection exceeded $TotalTimeoutMinutes minutes before run $Label."
+    }
     for ($attempt = 1; ; $attempt++) {
-        try { return Invoke-Run $UserData }
+        try {
+            $run = [Diagnostics.Stopwatch]::StartNew()
+            $sample = Invoke-Run $UserData
+            Write-Host ("{0}: first render {1:N0} ms, run {2:N1} s" -f $Label, $sample.firstRenderMs, $run.Elapsed.TotalSeconds)
+            return $sample
+        }
         catch {
             if ($attempt -ge 3 -or "$_" -notmatch 'Shell exited early') { throw }
             $script:retries.Add([ordered]@{ run = $Label; attempt = $attempt; reason = "$_" })

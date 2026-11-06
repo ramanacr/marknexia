@@ -51,6 +51,24 @@ try {
     $after = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'marknexia-perf-large-document-*.md').Count
     Assert-That ($after -le $before) 'The generated large document must be removed when collection stops.'
 
+    # Every wait in the collector is bounded, so a stalled shell can never
+    # hang the CI step silently: no ShellExecuteEx launch (Start-Process), a
+    # timeout on every WaitForExit and WMI query, and a diagnostic dump.
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
+    Assert-That ($errors.Count -eq 0) "The collector must parse: $errors"
+    $commands = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+    Assert-That (-not ($commands | Where-Object { $_.GetCommandName() -in 'Start-Process', 'Wait-Process', 'Wait-Job' })) 'The collector must not use Start-Process, Wait-Process or Wait-Job.'
+    foreach ($cim in $commands | Where-Object { $_.GetCommandName() -eq 'Get-CimInstance' }) {
+        Assert-That ($cim.Extent.Text -match '-OperationTimeoutSec') "Get-CimInstance needs -OperationTimeoutSec: $($cim.Extent.Text)"
+    }
+    $calls = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+    $unbounded = @($calls | Where-Object { $_.Member.Extent.Text -in 'WaitForExit', 'WaitOne', 'WaitForInputIdle' -and @($_.Arguments).Count -eq 0 })
+    Assert-That ($unbounded.Count -eq 0) "Waits need a timeout: $($unbounded.Extent.Text -join '; ')"
+    $source = Get-Content -LiteralPath $script -Raw
+    Assert-That ($source -match 'Get-ShellDiagnostic') 'A stalled run must dump the shell state.'
+    Assert-That ($source -match 'TotalTimeoutMinutes') 'The collection needs an overall deadline.'
+
     $scan = Invoke-Collector 'repository-scan'
     Assert-That ($scan -like "*repository-scan*not implement*") "repository-scan must fail clearly, got: $scan"
     Write-Host 'Collect-RustDesktopPerf fixture tests passed.'
