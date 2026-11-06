@@ -480,7 +480,7 @@ impl ChromeState {
         queue_action(action);
     }
 
-    fn diagnostic(&mut self, message: impl Into<String>, severity: DiagnosticSeverity) {
+    pub(super) fn diagnostic(&mut self, message: impl Into<String>, severity: DiagnosticSeverity) {
         self.diagnostics.show(message, severity);
         self.post(ChromeAction::Sync);
     }
@@ -571,6 +571,15 @@ impl ChromeState {
                 visible,
             })
         });
+    }
+
+    /// runtime: every tab's document path, to render again once WebView2
+    /// is installed.
+    pub(super) fn document_tabs(&self) -> Vec<(u64, PathBuf)> {
+        self.locations
+            .iter()
+            .map(|(tab, location)| (*tab, location.path().to_path_buf()))
+            .collect()
     }
 
     fn active_location(&self, active: Option<u64>) -> Option<&TabLocation> {

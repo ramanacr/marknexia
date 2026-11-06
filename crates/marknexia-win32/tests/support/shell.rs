@@ -97,11 +97,39 @@ impl ShellProcess {
         Self::launch_with_options(executable, args, None, instance_key)
     }
 
+    /// Like [`Self::launch`], with `browser_folder` passed to WebView2 as
+    /// `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` (relative to the isolated
+    /// profile). A folder that does not exist makes the loader report no
+    /// runtime, without touching the installed one.
+    pub fn launch_with_browser_folder(
+        executable: &OsStr,
+        args: &[&OsStr],
+        browser_folder: &str,
+    ) -> Self {
+        Self::launch_inner(
+            executable,
+            args,
+            None,
+            &unique_instance_key(),
+            Some(browser_folder),
+        )
+    }
+
     fn launch_with_options(
         executable: &OsStr,
         args: &[&OsStr],
         settings: Option<&[u8]>,
         instance_key: &str,
+    ) -> Self {
+        Self::launch_inner(executable, args, settings, instance_key, None)
+    }
+
+    fn launch_inner(
+        executable: &OsStr,
+        args: &[&OsStr],
+        settings: Option<&[u8]>,
+        instance_key: &str,
+        browser_folder: Option<&str>,
     ) -> Self {
         let profile =
             std::env::temp_dir().join(format!("marknexia-native-test-{}", unique_suffix()));
@@ -113,13 +141,22 @@ impl ShellProcess {
         if let Some(settings) = settings {
             std::fs::write(&settings_path, settings).expect("write test settings");
         }
-        let child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(args)
             .env("MARKNEXIA_WEBVIEW2_USER_DATA", &profile)
             .env("MARKNEXIA_SETTINGS_PATH", &settings_path)
-            .env("MARKNEXIA_INSTANCE_KEY", instance_key)
-            .spawn()
-            .expect("launch shell");
+            .env("MARKNEXIA_INSTANCE_KEY", instance_key);
+        match browser_folder {
+            Some(folder) => {
+                command.env("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", profile.join(folder));
+            }
+            // Never inherit an override from the test runner.
+            None => {
+                command.env_remove("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+            }
+        }
+        let child = command.spawn().expect("launch shell");
         Self { child, profile }
     }
 

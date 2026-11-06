@@ -97,6 +97,9 @@ mod sidebar;
 mod toolbar;
 // Find in page, drag and drop, single instance, tab close and reorder.
 mod input;
+// The WebView2 missing-runtime state and its user-initiated install. Hooks
+// into this file are marked "runtime:".
+mod runtime;
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
@@ -179,6 +182,8 @@ struct AppState {
     chrome: chrome::ChromeState,
     /// Find, drag and drop, activation and tab-pointer state (`input`).
     input: input::InputState,
+    /// runtime: the WebView2 missing-runtime state.
+    runtime: runtime::RuntimeUi,
 }
 
 impl AppState {
@@ -194,6 +199,7 @@ impl AppState {
             rendered_tabs: BTreeSet::new(),
             chrome: chrome::ChromeState::new(),
             input: input::InputState::default(),
+            runtime: runtime::RuntimeUi::new(),
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -309,6 +315,8 @@ pub fn run() -> Result<(), WindowError> {
         input::run_deferred(hwnd);
         // Results that arrived while an outer call held the session.
         apply_deferred_render_results(hwnd);
+        // runtime: WebView2 setup progress and results.
+        runtime::poll(hwnd);
         // Work still queued (its wake-up consumed by a pump inside the tail
         // work) gets exactly one new wake-up, so the loop never blocks.
         input::rearm_wake();
@@ -463,93 +471,15 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     }
     match StaApartment::enter() {
         Ok(apartment) => {
-            // Until the session is stored, a reentrant UIA Select must not
-            // report success against a controller it cannot reach.
-            state.borrow_mut().webview_checked_out = true;
             let apartment = Rc::new(apartment);
-            let observer: Rc<dyn Fn(PageToHost)> = input::page_observer(&state);
-            let mut session = WebViewSession::new(
-                Rc::clone(&apartment),
-                hwnd,
-                webview_folder(),
-                Rc::downgrade(&observer),
-            );
-            let (tabs, active) = {
-                let app = portable.borrow();
-                (
-                    app.tabs()
-                        .tabs()
-                        .iter()
-                        .map(|tab| (tab.id(), tab.title().to_owned()))
-                        .collect::<Vec<_>>(),
-                    app.active_tab(),
-                )
-            };
-            let mut startup_error = None;
-            // Placeholders that could not join the session (or be shown):
-            // as startup tabs they resolve as failed, never stay pending.
-            let mut failed_placeholders = Vec::new();
-            for (tab_id, title) in tabs {
-                // Document tabs join the session when their render arrives.
-                if state.borrow().renders.is_pending(tab_id.get()) {
-                    continue;
-                }
-                // Startup placeholders without documents: plain text only,
-                // through the sealed sanitized constructor.
-                let document = text_document(
-                    tab_id.get(),
-                    &title,
-                    &format!("{title}: Marknexia native document viewport."),
-                );
-                let added = document.and_then(|document| {
-                    session
-                        .add_document(document)
-                        .map_err(|error| format!("{error:?}"))
-                });
-                if let Err(error) = added {
-                    startup_error = Some(format!("WebView2 document: {error}"));
-                    failed_placeholders.push(tab_id.get());
-                }
-            }
-            let mut shown = None;
-            if let Some(active) = active {
-                if session.select_tab(active.get()).is_ok() {
-                    shown = Some(active.get());
-                } else if !state.borrow().renders.is_pending(active.get()) {
-                    // A placeholder that cannot be shown; a document tab
-                    // whose render is pending is expected to be unselectable.
-                    failed_placeholders.push(active.get());
-                }
-            }
-            {
-                let mut state = state.borrow_mut();
-                for tab_id in failed_placeholders {
-                    let signal = state.startup.failed(tab_id);
-                    state.apply_startup(signal);
-                }
-            }
-            match session.start() {
-                Ok(()) => {
-                    let mut state = state.borrow_mut();
-                    state.webview_checked_out = false;
-                    state.webview_active = shown;
-                    state.webview = Some(session);
-                    state.apartment = Some(apartment);
-                    state.page_observer = Some(observer);
-                    state.shell_error = startup_error;
-                }
-                Err(error) => {
-                    let _ = session.close();
-                    drop(session);
-                    let mut state = state.borrow_mut();
-                    state.webview_checked_out = false;
-                    // The STA stays entered without WebView2: the Open dialog
-                    // and UIA still need COM on this thread.
-                    state.apartment = Some(apartment);
-                    state.shell_error = Some(format!("WebView2 unavailable: {error:?}"));
-                    let signal = state.startup.webview_unavailable();
-                    state.apply_startup(signal);
-                }
+            // runtime: without an Evergreen runtime no session is created;
+            // the shell shows the missing-runtime state instead.
+            if runtime::runtime_missing() {
+                // The STA stays entered: the Open dialog and UIA need COM.
+                state.borrow_mut().apartment = Some(apartment);
+                runtime::show_missing(hwnd, &state);
+            } else {
+                start_session(hwnd, &state, apartment);
             }
         }
         Err(error) => {
@@ -569,6 +499,131 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     // chrome: restore the saved repository, show the chrome state.
     chrome::after_startup(hwnd, &state, document_mode);
     Ok(())
+}
+
+/// runtime: WebView2 was installed from the missing-runtime state. The
+/// session starts now; documents rendered while it was missing were not
+/// kept, so they render again and join the session when they arrive.
+fn start_after_install(hwnd: HWND) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let apartment = {
+        let state = state.borrow();
+        if state.destroyed || state.webview.is_some() || state.webview_checked_out {
+            return;
+        }
+        state.apartment.clone()
+    };
+    let Some(apartment) = apartment else {
+        return;
+    };
+    state.borrow_mut().shell_error = None;
+    let documents = state.borrow().chrome.document_tabs();
+    for (tab_id, path) in documents {
+        state.borrow_mut().tab_errors.remove(&tab_id);
+        start_render(hwnd, &state, tab_id, path);
+    }
+    start_session(hwnd, &state, apartment);
+    let dpi = state.borrow().dpi;
+    update_theme(hwnd);
+    reflow(hwnd, dpi);
+    refresh_status(&state);
+}
+
+/// Creates the WebView session with every tab that is not waiting for its
+/// render (placeholders get their text document), shows the active tab and
+/// starts environment creation. A failed start keeps the shell usable and
+/// reports WebView2 as unavailable.
+fn start_session(hwnd: HWND, state: &Rc<RefCell<AppState>>, apartment: Rc<StaApartment>) {
+    let portable = Rc::clone(&state.borrow().portable);
+    // Until the session is stored, a reentrant UIA Select must not
+    // report success against a controller it cannot reach.
+    state.borrow_mut().webview_checked_out = true;
+    let observer: Rc<dyn Fn(PageToHost)> = input::page_observer(state);
+    let mut session = WebViewSession::new(
+        Rc::clone(&apartment),
+        hwnd,
+        webview_folder(),
+        Rc::downgrade(&observer),
+    );
+    let (tabs, active) = {
+        let app = portable.borrow();
+        (
+            app.tabs()
+                .tabs()
+                .iter()
+                .map(|tab| (tab.id(), tab.title().to_owned()))
+                .collect::<Vec<_>>(),
+            app.active_tab(),
+        )
+    };
+    let mut startup_error = None;
+    // Placeholders that could not join the session (or be shown):
+    // as startup tabs they resolve as failed, never stay pending.
+    let mut failed_placeholders = Vec::new();
+    for (tab_id, title) in tabs {
+        // Document tabs join the session when their render arrives.
+        if state.borrow().renders.is_pending(tab_id.get()) {
+            continue;
+        }
+        // Startup placeholders without documents: plain text only,
+        // through the sealed sanitized constructor.
+        let document = text_document(
+            tab_id.get(),
+            &title,
+            &format!("{title}: Marknexia native document viewport."),
+        );
+        let added = document.and_then(|document| {
+            session
+                .add_document(document)
+                .map_err(|error| format!("{error:?}"))
+        });
+        if let Err(error) = added {
+            startup_error = Some(format!("WebView2 document: {error}"));
+            failed_placeholders.push(tab_id.get());
+        }
+    }
+    let mut shown = None;
+    if let Some(active) = active {
+        if session.select_tab(active.get()).is_ok() {
+            shown = Some(active.get());
+        } else if !state.borrow().renders.is_pending(active.get()) {
+            // A placeholder that cannot be shown; a document tab
+            // whose render is pending is expected to be unselectable.
+            failed_placeholders.push(active.get());
+        }
+    }
+    {
+        let mut state = state.borrow_mut();
+        for tab_id in failed_placeholders {
+            let signal = state.startup.failed(tab_id);
+            state.apply_startup(signal);
+        }
+    }
+    match session.start() {
+        Ok(()) => {
+            let mut state = state.borrow_mut();
+            state.webview_checked_out = false;
+            state.webview_active = shown;
+            state.webview = Some(session);
+            state.apartment = Some(apartment);
+            state.page_observer = Some(observer);
+            state.shell_error = startup_error;
+        }
+        Err(error) => {
+            let _ = session.close();
+            drop(session);
+            let mut state = state.borrow_mut();
+            state.webview_checked_out = false;
+            // The STA stays entered without WebView2: the Open dialog
+            // and UIA still need COM on this thread.
+            state.apartment = Some(apartment);
+            state.shell_error = Some(format!("WebView2 unavailable: {error:?}"));
+            let signal = state.startup.webview_unavailable();
+            state.apply_startup(signal);
+        }
+    }
 }
 
 /// A plain-text document (placeholder or error) through the sealed
@@ -969,6 +1024,12 @@ unsafe extern "system" fn window_proc(
     // chrome: control notifications, owner-drawn chrome, chrome actions.
     if message != WM_NCCREATE
         && let Some(result) = chrome::handle_message(hwnd, message, wparam, lparam)
+    {
+        return result;
+    }
+    // runtime: the install button, the offline link and setup wake-ups.
+    if message != WM_NCCREATE
+        && let Some(result) = runtime::handle_message(hwnd, message, wparam, lparam)
     {
         return result;
     }
@@ -1738,6 +1799,8 @@ fn reflow(hwnd: HWND, dpi: u32) {
     }
     // chrome: toolbar, sidebar and diagnostics bar placement.
     chrome::layout_children(hwnd, &layout);
+    // runtime: the missing-runtime state fills the document area.
+    runtime::layout(&state, layout.webview, actual_dpi);
 }
 
 fn move_child(hwnd: HWND, b: PixelRect) {
@@ -2206,6 +2269,8 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
         state.uia_selection.take();
         // chrome: cancel repository work.
         state.chrome.shutdown();
+        // runtime: stop setup notifications and a running download.
+        state.runtime.shutdown();
         (
             state.webview.take(),
             state.accessibility.take(),

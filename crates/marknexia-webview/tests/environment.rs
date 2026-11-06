@@ -133,6 +133,42 @@ fn process_failure_classification_preserves_recovery_relevant_kinds() {
     );
 }
 
+/// Runs in a child process (below) with `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`
+/// set; without the variable it does nothing.
+#[test]
+#[ignore = "child process of native_loader_reports_missing_for_a_nonexistent_browser_folder"]
+fn browser_folder_override_child() {
+    if std::env::var_os("MARKNEXIA_TEST_BROWSER_FOLDER_CHILD").is_none() {
+        return;
+    }
+    assert_eq!(EvergreenRuntime::detect(), Ok(RuntimeStatus::Missing));
+}
+
+/// The loader honors `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`: a folder that
+/// does not exist reads as a missing runtime (the native shell gate relies
+/// on this). The installed runtime is not touched.
+#[test]
+#[ignore = "native host with the WebView2 loader"]
+fn native_loader_reports_missing_for_a_nonexistent_browser_folder() {
+    let folder = std::env::temp_dir().join(format!(
+        "marknexia-no-webview2-{}-does-not-exist",
+        std::process::id()
+    ));
+    assert!(!folder.exists());
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "browser_folder_override_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("MARKNEXIA_TEST_BROWSER_FOLDER_CHILD", "1")
+        .env("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &folder)
+        .status()
+        .expect("run child");
+    assert!(status.success(), "child reported {status}");
+}
+
 #[test]
 #[ignore = "native feasibility host must have Evergreen installed"]
 fn native_loader_detects_installed_evergreen_without_downloading() {
