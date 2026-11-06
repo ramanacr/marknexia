@@ -83,6 +83,11 @@ pub struct ScanLimits {
     /// one more would be read. This bounds the work in large trees that hold
     /// few supported files.
     pub max_entries: usize,
+    /// Bytes of path text the scan keeps: result file paths, folder names
+    /// waiting to be visited and the paths of entered folders. The count
+    /// only grows. The scan stops when one more path would pass the limit.
+    /// Unsupported files and skipped entries keep no path.
+    pub max_path_bytes: usize,
 }
 
 impl Default for ScanLimits {
@@ -91,22 +96,34 @@ impl Default for ScanLimits {
             max_depth: 64,
             max_files: 100_000,
             max_entries: 1_000_000,
+            max_path_bytes: 64 * 1024 * 1024,
         }
     }
 }
 
-/// Which limits stopped or shortened a scan. The result is still valid; the
-/// shell should tell the user that the tree is incomplete.
+/// Which limits shortened a scan. The result is still valid; when
+/// [`LimitsHit::any`] is true the shell should tell the user that the tree
+/// may be incomplete.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LimitsHit {
+    /// A folder at [`ScanLimits::max_depth`] had subfolders that were not
+    /// entered. They may hold no supported files, so the result *may* be
+    /// incomplete; it is not known to be.
     pub depth: bool,
+    /// [`ScanLimits::max_files`] stopped the scan.
     pub files: bool,
+    /// [`ScanLimits::max_entries`] stopped the scan.
     pub entries: bool,
+    /// [`ScanLimits::max_path_bytes`] stopped the scan.
+    pub bytes: bool,
+    /// An entry was skipped because its full path is longer than the gate's
+    /// 32 KiB (UTF-8) limit.
+    pub path_length: bool,
 }
 
 impl LimitsHit {
     pub fn any(&self) -> bool {
-        self.depth || self.files || self.entries
+        self.depth || self.files || self.entries || self.bytes || self.path_length
     }
 }
 
@@ -265,7 +282,12 @@ fn normalize_root_text(text: &str) -> String {
     }
 }
 
+/// The root gate: [`GatedPath`], and no `/` in a verbatim `\\?\` path, where
+/// Windows would read it as part of a name rather than as a separator.
 fn gate_root(root: &str) -> Result<(PathBuf, GatedPath), ScanError> {
+    if root.starts_with(r"\\?\") && root.contains('/') {
+        return Err(ScanError::InvalidRoot(PathError::InvalidComponent));
+    }
     let gated = GatedPath::new(root).map_err(ScanError::InvalidRoot)?;
     Ok((PathBuf::from(normalize_root_text(root)), gated))
 }
@@ -274,12 +296,6 @@ fn last_name(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned)
-}
-
-struct Entry {
-    name: String,
-    path: PathBuf,
-    is_dir: bool,
 }
 
 #[cfg(windows)]
@@ -300,6 +316,18 @@ fn hidden_and_reparse(metadata: &fs::Metadata, name: &str) -> (bool, bool) {
     (name.starts_with('.'), metadata.file_type().is_symlink())
 }
 
+fn is_supported_file(name: &str) -> bool {
+    has_extension(name, &MARKDOWN_EXTENSIONS) || has_extension(name, &ASSET_EXTENSIONS)
+}
+
+/// What one folder listing keeps: supported files with their full paths,
+/// and subfolder names only (their paths are built when they are entered).
+#[derive(Default)]
+struct Listed {
+    files: Vec<(String, PathBuf)>,
+    folders: Vec<String>,
+}
+
 /// The walk state shared by both scans.
 struct Walk<'a> {
     root: &'a GatedPath,
@@ -307,6 +335,7 @@ struct Walk<'a> {
     cancel: &'a dyn Fn() -> bool,
     entries_read: usize,
     files: usize,
+    bytes: usize,
     hit: LimitsHit,
     stopped: bool,
 }
@@ -323,6 +352,7 @@ impl<'a> Walk<'a> {
             cancel,
             entries_read: 0,
             files: 0,
+            bytes: 0,
             hit: LimitsHit::default(),
             stopped: false,
         }
@@ -347,20 +377,56 @@ impl<'a> Walk<'a> {
         true
     }
 
-    /// The listed entries of `dir` in enumeration order, without reparse
-    /// points, without hidden entries unless `show_hidden`, and without
-    /// names that fail the gate or leave the root. Access denied gives an
-    /// empty list (.NET catches `UnauthorizedAccessException`).
-    fn read(&mut self, dir: &Path, show_hidden: bool) -> Result<Vec<Entry>, ScanError> {
+    /// Charges `count` bytes of path text that the scan keeps, or stops the
+    /// walk at the byte limit. The count only grows.
+    fn take_bytes(&mut self, count: usize) -> bool {
+        match self.bytes.checked_add(count) {
+            Some(total) if total <= self.limits.max_path_bytes => {
+                self.bytes = total;
+                true
+            }
+            _ => {
+                self.hit.bytes = true;
+                self.stopped = true;
+                false
+            }
+        }
+    }
+
+    /// True when `path` passes the gate and lies within the root. A path that
+    /// fails the gate only for its length sets `LimitsHit::path_length`.
+    fn admits(&mut self, path: &Path) -> bool {
+        match path.to_str().map(GatedPath::new) {
+            Some(Ok(child)) => child.is_within(self.root),
+            Some(Err(PathError::TooLong)) => {
+                self.hit.path_length = true;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The kept entries of `dir`, in listing order: supported files and
+    /// folders not in `ignored`, without reparse points, without hidden
+    /// entries unless `show_hidden`, and without names that fail the gate or
+    /// leave the root. Entries are classified before any path is built.
+    /// Access denied gives an empty listing (.NET catches
+    /// `UnauthorizedAccessException`).
+    fn read(
+        &mut self,
+        dir: &Path,
+        ignored: &[&str],
+        show_hidden: bool,
+    ) -> Result<Listed, ScanError> {
         self.check_cancel()?;
         let listing = match fs::read_dir(dir) {
             Ok(listing) => listing,
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                return Ok(Vec::new());
+                return Ok(Listed::default());
             }
             Err(error) => return Err(ScanError::Io(error.kind())),
         };
-        let mut entries = Vec::new();
+        let mut listed = Listed::default();
         for item in listing {
             self.check_cancel()?;
             if self.entries_read >= self.limits.max_entries {
@@ -372,7 +438,7 @@ impl<'a> Walk<'a> {
             let item = match item {
                 Ok(item) => item,
                 Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                    return Ok(Vec::new());
+                    return Ok(Listed::default());
                 }
                 Err(error) => return Err(ScanError::Io(error.kind())),
             };
@@ -390,21 +456,32 @@ impl<'a> Walk<'a> {
             if reparse || (hidden && !show_hidden) {
                 continue;
             }
-            let path = dir.join(&name);
-            let inside = path
-                .to_str()
-                .and_then(|text| GatedPath::new(text).ok())
-                .is_some_and(|child| child.is_within(self.root));
-            if !inside {
+            let is_dir = metadata.is_dir();
+            let wanted = if is_dir {
+                !is_ignored(&name, ignored)
+            } else {
+                is_supported_file(&name)
+            };
+            if !wanted {
                 continue;
             }
-            entries.push(Entry {
-                name,
-                path,
-                is_dir: metadata.is_dir(),
-            });
+            let path = dir.join(&name);
+            if !self.admits(&path) {
+                continue;
+            }
+            if is_dir {
+                if !self.take_bytes(name.len()) {
+                    break;
+                }
+                listed.folders.push(name);
+            } else {
+                if !self.take_file() || !self.take_bytes(path.as_os_str().len()) {
+                    break;
+                }
+                listed.files.push((name, path));
+            }
         }
-        Ok(entries)
+        Ok(listed)
     }
 }
 
@@ -413,8 +490,8 @@ struct Frame {
     path: PathBuf,
     depth: usize,
     children: Vec<RepositoryTreeNode>,
-    /// Subfolders still to visit, in reverse visiting order.
-    pending: Vec<Entry>,
+    /// Subfolder names still to visit, in reverse visiting order.
+    pending: Vec<String>,
 }
 
 /// Folders first, then names by .NET `StringComparer.OrdinalIgnoreCase`;
@@ -432,36 +509,26 @@ impl Walk<'_> {
         path: PathBuf,
         depth: usize,
     ) -> Result<Frame, ScanError> {
-        let entries = self.read(&path, false)?;
-        let mut children = Vec::new();
-        let mut folders = Vec::new();
-        for entry in entries {
-            if entry.is_dir {
-                if !is_ignored(&entry.name, &TREE_IGNORED_DIRECTORIES) {
-                    folders.push(entry);
-                }
-            } else if has_extension(&entry.name, &MARKDOWN_EXTENSIONS)
-                || has_extension(&entry.name, &ASSET_EXTENSIONS)
-            {
-                if !self.take_file() {
-                    break;
-                }
-                children.push(RepositoryTreeNode {
-                    display_name: entry.name,
-                    full_path: entry.path,
-                    is_folder: false,
-                    children: Vec::new(),
-                });
-            }
-        }
-        folders.sort_by_cached_key(|entry| ordinal_ignore_case_key(&entry.name));
-        folders.reverse();
+        let listed = self.read(&path, &TREE_IGNORED_DIRECTORIES, false)?;
+        let children = listed
+            .files
+            .into_iter()
+            .map(|(name, path)| RepositoryTreeNode {
+                display_name: name,
+                full_path: path,
+                is_folder: false,
+                children: Vec::new(),
+            })
+            .collect();
+        let mut pending = listed.folders;
+        pending.sort_by_cached_key(|name| ordinal_ignore_case_key(name));
+        pending.reverse();
         Ok(Frame {
             name,
             path,
             depth,
             children,
-            pending: folders,
+            pending,
         })
     }
 }
@@ -507,14 +574,18 @@ pub fn build_repository_tree(
             unreachable!("the root frame is popped last");
         };
         if !walk.stopped
-            && let Some(folder) = top.pending.pop()
+            && let Some(name) = top.pending.pop()
         {
             let depth = top.depth + 1;
             if depth > walk.limits.max_depth {
                 walk.hit.depth = true;
                 continue;
             }
-            let frame = walk.open_frame(folder.name, folder.path, depth)?;
+            let path = top.path.join(&name);
+            if !walk.take_bytes(path.as_os_str().len()) {
+                continue;
+            }
+            let frame = walk.open_frame(name, path, depth)?;
             stack.push(frame);
             continue;
         }
@@ -565,32 +636,37 @@ pub fn enumerate_workspace_files(
     }
     let mut walk = Walk::new(&gated, limits, cancel);
     let mut files = Vec::new();
-    let mut stack = vec![(root_path, 0_usize)];
-    while let Some((dir, depth)) = stack.pop() {
+    // Each frame: the folder path, its depth and its subfolder names still
+    // to visit, in reverse listing order.
+    let mut stack: Vec<(PathBuf, usize, Vec<String>)> = Vec::new();
+    let mut next = Some((root_path, 0_usize));
+    loop {
+        if let Some((dir, depth)) = next.take() {
+            let listed = walk.read(&dir, &WORKSPACE_IGNORED_DIRECTORIES, show_hidden)?;
+            files.extend(listed.files.into_iter().map(|(_, path)| path));
+            let mut pending = listed.folders;
+            pending.reverse();
+            stack.push((dir, depth, pending));
+        }
+        walk.check_cancel()?;
         if walk.stopped {
             break;
         }
-        let entries = walk.read(&dir, show_hidden)?;
-        let mut folders = Vec::new();
-        for entry in entries {
-            if entry.is_dir {
-                if !is_ignored(&entry.name, &WORKSPACE_IGNORED_DIRECTORIES) {
-                    folders.push(entry.path);
-                }
-            } else if has_extension(&entry.name, &MARKDOWN_EXTENSIONS)
-                || has_extension(&entry.name, &ASSET_EXTENSIONS)
-            {
-                if !walk.take_file() {
-                    break;
-                }
-                files.push(entry.path);
-            }
-        }
-        if depth + 1 > walk.limits.max_depth {
-            walk.hit.depth |= !folders.is_empty();
+        let Some((dir, depth, pending)) = stack.last_mut() else {
+            break;
+        };
+        let Some(name) = pending.pop() else {
+            stack.pop();
+            continue;
+        };
+        if *depth + 1 > walk.limits.max_depth {
+            walk.hit.depth = true;
             continue;
         }
-        stack.extend(folders.into_iter().rev().map(|path| (path, depth + 1)));
+        let path = dir.join(&name);
+        if walk.take_bytes(path.as_os_str().len()) {
+            next = Some((path, *depth + 1));
+        }
     }
     walk.check_cancel()?;
     Ok(WorkspaceFiles {
@@ -619,53 +695,72 @@ fn is_listed_directory(metadata: &fs::Metadata) -> bool {
     metadata.is_dir()
 }
 
+fn is_solution_name(name: &str) -> bool {
+    [".sln", ".slnx"].iter().any(|suffix| {
+        name.len() >= suffix.len()
+            && name.is_char_boundary(name.len() - suffix.len())
+            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    })
+}
+
 /// True when `dir` holds a file matching `*.sln` or `*.slnx` (.NET
 /// `Directory.EnumerateFiles`, which includes hidden files and file links).
-/// At most `max_entries` entries are read.
-fn has_solution_marker(dir: &Path, max_entries: usize) -> bool {
-    let Ok(listing) = fs::read_dir(dir) else {
-        return false;
+/// At most `max_entries` entries are read. Access denied means no marker
+/// (RS-5); any other listing error is returned, as .NET throws it.
+fn has_solution_marker(dir: &Path, max_entries: usize) -> Result<bool, ScanError> {
+    let listing = match fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
+        Err(error) => return Err(ScanError::Io(error.kind())),
     };
-    listing.take(max_entries).flatten().any(|item| {
-        let name = item.file_name();
-        let name = name.to_string_lossy();
-        let is_solution = [".sln", ".slnx"].iter().any(|suffix| {
-            name.len() >= suffix.len()
-                && name.is_char_boundary(name.len() - suffix.len())
-                && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        });
-        is_solution
+    for item in listing.take(max_entries) {
+        let item = match item {
+            Ok(item) => item,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
+            Err(error) => return Err(ScanError::Io(error.kind())),
+        };
+        if is_solution_name(&item.file_name().to_string_lossy())
             && item
                 .metadata()
                 .is_ok_and(|metadata| !is_listed_directory(&metadata))
-    })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// .NET `RepositoryService.DetectRepositoryRoot`: from the file's folder (or
 /// the folder itself) upwards, the first folder that holds `.git` (folder or
-/// file) or a `*.sln` / `*.slnx` file. `None` when the path fails the gate
-/// or no folder qualifies. Blocking I/O: call it on a worker thread.
-pub fn detect_repository_root(file_path: &str) -> Option<PathBuf> {
-    if file_path.trim().is_empty() || GatedPath::new(file_path).is_err() {
-        return None;
+/// file) or a `*.sln` / `*.slnx` file. `Ok(None)` when the path fails the
+/// gate or no folder qualifies. A folder that cannot be listed because access
+/// is denied has no solution marker and the search goes on (RS-5); any other
+/// listing error is returned as [`ScanError::Io`], as .NET throws it.
+/// Blocking I/O: call it on a worker thread.
+pub fn detect_repository_root(file_path: &str) -> Result<Option<PathBuf>, ScanError> {
+    if file_path.trim().is_empty() || gate_root(file_path).is_err() {
+        return Ok(None);
     }
     let path = PathBuf::from(normalize_root_text(file_path));
     let mut current = if fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
-        path.parent()?.to_path_buf()
+        match path.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return Ok(None),
+        }
     } else {
         path
     };
     let max_entries = ScanLimits::default().max_entries;
     while fs::metadata(&current).is_ok_and(|metadata| metadata.is_dir()) {
-        if has_git_marker(&current) || has_solution_marker(&current, max_entries) {
-            return Some(current);
+        if has_git_marker(&current) || has_solution_marker(&current, max_entries)? {
+            return Ok(Some(current));
         }
         match current.parent() {
             Some(parent) if parent != current => current = parent.to_path_buf(),
             _ => break,
         }
     }
-    None
+    Ok(None)
 }
 
 /// .NET `RepositoryService.CreateContext`: `None` when the root fails the

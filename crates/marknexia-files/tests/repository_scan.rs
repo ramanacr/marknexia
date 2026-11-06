@@ -122,6 +122,13 @@ impl Drop for TempTree {
     }
 }
 
+/// Writes a skip reason to the real stderr, past the test harness capture,
+/// so a skipped case is visible in a normal `cargo test` run.
+fn skip(reason: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "SKIPPED: {reason}");
+}
+
 fn never() -> bool {
     false
 }
@@ -269,7 +276,7 @@ fn case_sensitive_folders_list_both_case_variants() {
         .output()
         .is_ok_and(|output| output.status.success());
     if !enabled {
-        eprintln!("skipped: per-directory case sensitivity is not available here");
+        skip("per-directory case sensitivity is not available here");
         return;
     }
     tree.file("cs/a.md");
@@ -332,7 +339,7 @@ fn junctions_and_links_are_never_followed() {
     let cycle = tree.junction("inner/cycle", &tree.root.clone());
     let inward = tree.junction("inward", &tree.path("inner"));
     if !(escape && cycle && inward) {
-        eprintln!("skipped: mklink /J is not available here");
+        skip("junction test: mklink /J is not available here");
         return;
     }
     // The links resolve: an escape would be visible if the scan followed it.
@@ -344,7 +351,7 @@ fn junctions_and_links_are_never_followed() {
         .files;
     assert_eq!(relative_files(&tree.root, &files), ["inner/kept.md"]);
     if !file_link {
-        eprintln!("note: file symbolic links need Developer Mode; that case was not run");
+        skip("file symbolic link case: mklink needs Developer Mode or elevation");
     }
 
     // A root that is itself a junction is scanned (the user chose it), and
@@ -443,7 +450,11 @@ fn many_files_are_sorted_and_bounded_by_count_and_entries() {
     };
     let capped = build_repository_tree(&tree.text(), &limits, &never).unwrap();
     assert!(capped.limits_hit.entries);
-    assert!(flatten(&capped.root).len() <= 10);
+    // The root lists f0000.md to f2499.md before `sub`: exactly 10 files.
+    let lines = flatten(&capped.root);
+    assert_eq!(lines.len(), 10);
+    assert_eq!(lines[0], "f0000.md");
+    assert_eq!(lines[9], "f0009.md");
 }
 
 #[test]
@@ -559,7 +570,7 @@ fn a_unc_root_scans_like_a_drive_root() {
     let (drive, rest) = local.split_at(2);
     let unc = format!(r"\\localhost\{}${}", &drive[..1], rest);
     if fs::metadata(&unc).is_err() {
-        eprintln!("skipped: {unc} is not reachable here");
+        skip(&format!("UNC test: {unc} is not reachable here"));
         return;
     }
     let result = build_repository_tree(&unc, &ScanLimits::default(), &never).unwrap();
@@ -613,42 +624,34 @@ fn workspace_files_are_listed_in_dotnet_preorder() {
 
 #[test]
 fn repository_roots_and_contexts_match_the_dotnet_markers() {
+    let detect = |path: &str| detect_repository_root(path).unwrap();
     let tree = TempTree::new("detect");
     tree.dir("git/.git");
     let doc = tree.file("git/a/b/doc.md");
-    assert_eq!(
-        detect_repository_root(doc.to_str().unwrap()),
-        Some(tree.path("git"))
-    );
+    assert_eq!(detect(doc.to_str().unwrap()), Some(tree.path("git")));
     // A folder path starts the search at that folder.
     assert_eq!(
-        detect_repository_root(tree.path("git/a").to_str().unwrap()),
+        detect(tree.path("git/a").to_str().unwrap()),
         Some(tree.path("git"))
     );
     tree.file("worktree/.git");
     let doc = tree.file("worktree/doc.md");
-    assert_eq!(
-        detect_repository_root(doc.to_str().unwrap()),
-        Some(tree.path("worktree"))
-    );
+    assert_eq!(detect(doc.to_str().unwrap()), Some(tree.path("worktree")));
     tree.file("solution/Product.SLNX");
     let doc = tree.file("solution/docs/doc.md");
-    assert_eq!(
-        detect_repository_root(doc.to_str().unwrap()),
-        Some(tree.path("solution"))
-    );
+    assert_eq!(detect(doc.to_str().unwrap()), Some(tree.path("solution")));
     // A folder named like a solution is not a marker.
     tree.dir("plain/fake.sln");
     let doc = tree.file("plain/doc.md");
-    let found = detect_repository_root(doc.to_str().unwrap());
+    let found = detect(doc.to_str().unwrap());
     assert!(
         found
             .as_ref()
             .is_none_or(|found| !found.starts_with(&tree.root)),
         "{found:?}"
     );
-    assert_eq!(detect_repository_root(""), None);
-    assert_eq!(detect_repository_root(r"\\.\pipe\x"), None);
+    assert_eq!(detect(""), None);
+    assert_eq!(detect(r"\\.\pipe\x"), None);
 
     let git = create_context(tree.path("git").to_str().unwrap(), true).unwrap();
     assert_eq!(git.kind, RepositoryKind::GitRepository);
@@ -659,4 +662,197 @@ fn repository_roots_and_contexts_match_the_dotnet_markers() {
     assert_eq!(folder.root, tree.path("plain"));
     assert!(create_context(tree.path("missing").to_str().unwrap(), true).is_none());
     assert!(create_context("", true).is_none());
+}
+
+/// Denies "list folder" to Everyone on one test folder; the drop restores it.
+#[cfg(windows)]
+struct DenyListing {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl DenyListing {
+    /// `None` (with a SKIPPED line) when the deny ACE cannot be set or does
+    /// not stop listing here (for example under backup privileges).
+    fn new(path: PathBuf) -> Option<Self> {
+        let denied = Command::new("icacls")
+            .arg(&path)
+            .args(["/deny", "*S-1-1-0:(RD)"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let guard = Self { path };
+        if !denied {
+            skip("access-denied case: icacls /deny failed");
+            return None;
+        }
+        if fs::read_dir(&guard.path).is_ok() {
+            skip("access-denied case: listing is still allowed for this account");
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DenyListing {
+    fn drop(&mut self) {
+        let _ = Command::new("icacls")
+            .arg(&self.path)
+            .args(["/remove:d", "*S-1-1-0"])
+            .output();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn an_access_denied_folder_gives_an_empty_listing() {
+    let tree = TempTree::new("denied");
+    tree.file("open/a.md");
+    tree.file("locked/inside.md");
+    let Some(_deny) = DenyListing::new(tree.path("locked")) else {
+        return;
+    };
+    assert_eq!(tree_lines(&tree.text()), ["open/", "open/a.md"]);
+    let files = enumerate_workspace_files(&tree.text(), true, &ScanLimits::default(), &never)
+        .unwrap()
+        .files;
+    assert_eq!(relative_files(&tree.root, &files), ["open/a.md"]);
+}
+
+/// RS-5: access denied while looking for `*.sln` means "no marker", and the
+/// search goes on upwards (.NET would throw).
+#[cfg(windows)]
+#[test]
+fn root_detection_continues_past_an_access_denied_folder() {
+    let tree = TempTree::new("rs5");
+    tree.file("outer/Product.sln");
+    let doc = tree.file("outer/locked/doc.md");
+    let Some(_deny) = DenyListing::new(tree.path("outer/locked")) else {
+        return;
+    };
+    assert_eq!(
+        detect_repository_root(doc.to_str().unwrap()),
+        Ok(Some(tree.path("outer")))
+    );
+}
+
+/// A folder that disappears between its listing and its scan fails the
+/// whole scan with `ScanError::Io`, as the .NET `IOException` does.
+#[test]
+fn a_folder_removed_during_the_scan_is_an_io_error() {
+    for workspace in [false, true] {
+        let tree = TempTree::new("io");
+        tree.file("doomed/a.md");
+        let doomed = tree.path("doomed");
+        let polls = AtomicUsize::new(0);
+        // Poll 0 is the scan start, poll 1 the root listing, poll 2 the
+        // first root entry (`doomed`, already listed): remove it then.
+        let cancel = || {
+            if polls.fetch_add(1, Ordering::Relaxed) >= 2 && doomed.exists() {
+                fs::remove_dir_all(&doomed).unwrap();
+            }
+            false
+        };
+        let result = if workspace {
+            enumerate_workspace_files(&tree.text(), false, &ScanLimits::default(), &cancel)
+                .map(drop)
+        } else {
+            build_repository_tree(&tree.text(), &ScanLimits::default(), &cancel).map(drop)
+        };
+        assert_eq!(
+            result,
+            Err(ScanError::Io(std::io::ErrorKind::NotFound)),
+            "workspace: {workspace}"
+        );
+    }
+}
+
+/// RS-3: names that the document gate refuses are skipped; a refused folder
+/// drops its whole subtree. The names are created through `\\?\` paths.
+#[cfg(windows)]
+#[test]
+fn names_refused_by_the_gate_are_skipped() {
+    let tree = TempTree::new("rs3");
+    tree.file("keep.md");
+    let verbatim = |name: &str| PathBuf::from(format!(r"\\?\{}\{name}", tree.text()));
+    fs::write(verbatim("CON.md"), b"# x\n").unwrap();
+    fs::write(verbatim("nul.png"), b"x").unwrap();
+    fs::write(verbatim("trail.md."), b"# x\n").unwrap();
+    fs::write(verbatim("space.md "), b"# x\n").unwrap();
+    fs::create_dir(verbatim("dirdot.")).unwrap();
+    fs::write(verbatim(r"dirdot.\inside.md"), b"# x\n").unwrap();
+    assert!(verbatim("CON.md").is_file());
+    assert_eq!(tree_lines(&tree.text()), ["keep.md"]);
+    let files = enumerate_workspace_files(&tree.text(), true, &ScanLimits::default(), &never)
+        .unwrap()
+        .files;
+    assert_eq!(relative_files(&tree.root, &files), ["keep.md"]);
+    for name in [
+        "CON.md",
+        "nul.png",
+        "trail.md.",
+        "space.md ",
+        r"dirdot.\inside.md",
+    ] {
+        fs::remove_file(verbatim(name)).unwrap();
+    }
+    fs::remove_dir(verbatim("dirdot.")).unwrap();
+}
+
+/// A path longer than the gate's 32 KiB (UTF-8) limit is skipped and
+/// reported through `LimitsHit::path_length`, not dropped silently. Each
+/// name is 200 CJK characters: 600 UTF-8 bytes but 200 UTF-16 units, so
+/// Windows (32,767 UTF-16 units) can still hold the path.
+#[test]
+fn paths_over_the_gate_length_are_reported() {
+    let tree = TempTree::new("long");
+    tree.file("near.md");
+    let name = "語".repeat(200);
+    let mut relative = String::new();
+    for _ in 0..56 {
+        relative.push_str(&name);
+        relative.push('/');
+    }
+    let deep = tree.file(&format!("{relative}far.md"));
+    assert!(deep.as_os_str().len() > 32 * 1024);
+    let limits = ScanLimits {
+        max_depth: 100,
+        ..ScanLimits::default()
+    };
+    let result = build_repository_tree(&tree.text(), &limits, &never).unwrap();
+    assert!(result.limits_hit.path_length);
+    assert!(result.limits_hit.any());
+    let lines = flatten(&result.root);
+    assert_eq!(lines.last().unwrap(), "near.md");
+    assert!(!lines.iter().any(|line| line.ends_with("far.md")));
+    let files = enumerate_workspace_files(&tree.text(), false, &limits, &never).unwrap();
+    assert!(files.limits_hit.path_length);
+    assert_eq!(relative_files(&tree.root, &files.files), ["near.md"]);
+}
+
+#[test]
+fn the_path_byte_budget_bounds_what_the_scan_keeps() {
+    let tree = TempTree::new("bytes");
+    for index in 0..10 {
+        tree.file(&format!("f{index}.md"));
+    }
+    let one = tree.path("f0.md").as_os_str().len();
+    let limits = ScanLimits {
+        max_path_bytes: 3 * one,
+        ..ScanLimits::default()
+    };
+    let result = build_repository_tree(&tree.text(), &limits, &never).unwrap();
+    assert!(result.limits_hit.bytes);
+    assert_eq!(flatten(&result.root), ["f0.md", "f1.md", "f2.md"]);
+    let files = enumerate_workspace_files(&tree.text(), false, &limits, &never).unwrap();
+    assert!(files.limits_hit.bytes);
+    assert_eq!(files.files.len(), 3);
+}
+
+#[test]
+fn verbatim_roots_with_forward_slashes_are_refused() {
+    assert_eq!(
+        build_repository_tree(r"\\?\C:/Repo", &ScanLimits::default(), &never),
+        Err(ScanError::InvalidRoot(PathError::InvalidComponent))
+    );
 }
