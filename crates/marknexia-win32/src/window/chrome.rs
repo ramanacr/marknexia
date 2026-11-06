@@ -35,6 +35,19 @@ use marknexia_files::{
     settings_store::SettingsStore,
 };
 use marknexia_webview::host::ShellAccelerator;
+use windows::Win32::{
+    System::{
+        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        Variant::VARIANT,
+    },
+    UI::{
+        Accessibility::{
+            CAccPropServices, IAccPropServices, PROPID_ACC_NAME, PROPID_ACC_ROLE,
+            ROLE_SYSTEM_STATICTEXT,
+        },
+        WindowsAndMessaging::{CHILDID_SELF, OBJID_CLIENT},
+    },
+};
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
@@ -328,6 +341,8 @@ pub(super) struct ChromeState {
     recent_fill: bool,
     shown_recent: Vec<String>,
     fonts: Option<Fonts>,
+    /// Dynamic MSAA/UIA annotations (accessible names and roles).
+    names: Option<IAccPropServices>,
 }
 
 impl ChromeState {
@@ -371,6 +386,7 @@ impl ChromeState {
             recent_fill: false,
             shown_recent: Vec::new(),
             fonts: None,
+            names: None,
         }
     }
 
@@ -422,6 +438,22 @@ impl ChromeState {
     /// closes (WM_DESTROY).
     pub(super) fn shutdown(&mut self) {
         self.link.alive.store(false, Ordering::Release);
+        // Annotations are cleared while the controls still exist; oleacc
+        // keeps them per HWND otherwise.
+        if let (Some(names), Some(controls)) = (self.names.take(), self.controls) {
+            for window in all_windows(&controls) {
+                // SAFETY: plain COM call on the UI thread; no callback into
+                // the shell.
+                let _ = unsafe {
+                    names.ClearHwndProps(
+                        window,
+                        OBJID_CLIENT.0 as u32,
+                        CHILDID_SELF,
+                        &[PROPID_ACC_NAME, PROPID_ACC_ROLE],
+                    )
+                };
+            }
+        }
         for cancel in [self.tree_cancel.take(), self.root_cancel.take()]
             .into_iter()
             .flatten()
@@ -688,6 +720,7 @@ pub(super) fn install(
 /// After startup documents were queued: without them, restore the saved
 /// repository (.NET `RestoreSavedRepositoryRootAsync`); then show state.
 pub(super) fn after_startup(hwnd: HWND, state: &Rc<RefCell<AppState>>, document_mode: bool) {
+    annotate_controls(state);
     {
         let mut state = state.borrow_mut();
         let chrome = &mut state.chrome;
@@ -1888,6 +1921,69 @@ fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
 /// The tree root and its children, copied for filling the control.
 type TreeSnapshot = (TreeNode, Vec<(usize, TreeNode)>);
 
+/// Gives the chrome controls their accessible names. List boxes, tree
+/// views, combo boxes and tab controls take their MSAA/UIA name from a
+/// preceding label, not their window text, so the names are set as
+/// dynamic annotations (`IAccPropServices`). The diagnostics message is an
+/// owner-drawn static, which oleacc would report as a graphic: its role is
+/// set to static text. Runs after the STA is entered; without COM the
+/// controls keep the platform defaults.
+fn annotate_controls(state: &Rc<RefCell<AppState>>) {
+    let (controls, selector) = {
+        let state = state.borrow();
+        (state.chrome.controls, state.controls.map(|c| c.sidebar))
+    };
+    let Some(controls) = controls else {
+        return;
+    };
+    // SAFETY: in-process COM object created on the UI thread's STA.
+    let Ok(names) = (unsafe {
+        CoCreateInstance::<_, IAccPropServices>(&CAccPropServices, None, CLSCTX_INPROC_SERVER)
+    }) else {
+        return;
+    };
+    let mut named = vec![
+        (controls.sidebar.outline, SidebarMode::Outline.list_name()),
+        (controls.sidebar.tree, SidebarMode::Repository.list_name()),
+        (controls.sidebar.recent, SidebarMode::Recent.list_name()),
+        (controls.sidebar.splitter, "Resize sidebar"),
+        (controls.toolbar.theme, "Theme"),
+    ];
+    if let Some(selector) = selector {
+        named.push((selector, "Sidebar view"));
+    }
+    for (window, name) in named {
+        set_accessible_name(&names, window, name);
+    }
+    let role = VARIANT::from(ROLE_SYSTEM_STATICTEXT as i32);
+    // SAFETY: as above; the VARIANT outlives the call.
+    let _ = unsafe {
+        names.SetHwndProp(
+            controls.diagnostics.text,
+            OBJID_CLIENT.0 as u32,
+            CHILDID_SELF,
+            PROPID_ACC_ROLE,
+            &role,
+        )
+    };
+    state.borrow_mut().chrome.names = Some(names);
+}
+
+fn set_accessible_name(names: &IAccPropServices, window: HWND, name: &str) {
+    let text = wide(name);
+    // SAFETY: the buffer is NUL-terminated and outlives the call (oleacc
+    // copies it); no callback into the shell.
+    let _ = unsafe {
+        names.SetHwndPropStr(
+            window,
+            OBJID_CLIENT.0 as u32,
+            CHILDID_SELF,
+            PROPID_ACC_NAME,
+            PCWSTR::from_raw(text.as_ptr()),
+        )
+    };
+}
+
 /// Brings every chrome control in line with the state. Lists are refilled
 /// only when their content changed.
 fn sync_ui(hwnd: HWND) {
@@ -1913,6 +2009,7 @@ fn sync_ui(hwnd: HWND) {
         header: &'static str,
         diagnostic: Option<String>,
         announce: Option<String>,
+        names: Option<IAccPropServices>,
         tree_generation: u32,
         relayout: bool,
     }
@@ -1997,6 +2094,7 @@ fn sync_ui(hwnd: HWND) {
             header,
             diagnostic,
             announce,
+            names: chrome.names.clone(),
             tree_generation: chrome.tree_shown,
             relayout: open != chrome.diagnostics_laid_out,
         }
@@ -2049,6 +2147,13 @@ fn sync_ui(hwnd: HWND) {
         controls.diagnostics.text,
         snapshot.diagnostic.as_deref().unwrap_or(""),
     );
+    if let Some(names) = snapshot.names.as_ref() {
+        set_accessible_name(
+            names,
+            controls.diagnostics.text,
+            snapshot.diagnostic.as_deref().unwrap_or(""),
+        );
+    }
     // SAFETY: repaint request for a child of this thread.
     let _ = unsafe { InvalidateRect(Some(controls.diagnostics.text), None, true) };
     if snapshot.relayout {
