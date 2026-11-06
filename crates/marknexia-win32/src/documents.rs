@@ -224,7 +224,9 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 /// UNC share paths, as .NET allows; device namespaces, pipes, mailslots,
 /// `IPC$`, explicit WebDAV forms, `.`/`..` components, reserved device
 /// names, alternate data streams, wildcard and control characters are
-/// refused). The explicit WebDAV refusal is partial: when SMB fails, the
+/// refused). .NET would pass the explicit WebDAV forms (`@SSL` / `@port`
+/// servers, the `DavWWWRoot` share) to the WebDAV redirector; refusing them
+/// is a deliberate decision. The refusal is partial: when SMB fails, the
 /// WebClient service may still send an ordinary share over WebDAV.
 ///
 /// Opening a UNC path contacts the remote server (SMB, or WebDAV through
