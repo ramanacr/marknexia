@@ -1,0 +1,86 @@
+# Fixture for tests/perf/rust_sbom.tests.ps1 (Cargo.lock format, version 4).
+# The checksums are fixture values, not real crate digests.
+version = 4
+
+[[package]]
+name = "alpha"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[[package]]
+name = "beta"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2222222222222222222222222222222222222222222222222222222222222222"
+
+[[package]]
+name = "both"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3333333333333333333333333333333333333333333333333333333333333333"
+
+[[package]]
+name = "builder"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4444444444444444444444444444444444444444444444444444444444444444"
+dependencies = [
+ "gamma",
+]
+
+[[package]]
+name = "derive-macro"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5555555555555555555555555555555555555555555555555555555555555555"
+dependencies = [
+ "gamma",
+]
+
+[[package]]
+name = "devonly"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6666666666666666666666666666666666666666666666666666666666666666"
+dependencies = [
+ "hidden",
+]
+
+[[package]]
+name = "gamma"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7777777777777777777777777777777777777777777777777777777777777777"
+
+[[package]]
+name = "hidden"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8888888888888888888888888888888888888888888888888888888888888888"
+
+[[package]]
+name = "marknexia-core"
+version = "0.1.0"
+dependencies = [
+ "beta",
+ "builder",
+]
+
+[[package]]
+name = "marknexia-update"
+version = "0.1.0"
+dependencies = [
+ "hidden",
+]
+
+[[package]]
+name = "marknexia-win32"
+version = "0.1.0"
+dependencies = [
+ "alpha",
+ "both",
+ "derive-macro",
+ "devonly",
+ "marknexia-core",
+]
