@@ -21,8 +21,9 @@ pub fn decode<const N: usize>(text: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut bytes = [0_u8; N];
-    for (slot, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
-        *slot = (digit(pair[0])? << 4) | digit(pair[1])?;
+    let (pairs, _) = digits.as_chunks::<2>();
+    for (slot, [high, low]) in bytes.iter_mut().zip(pairs) {
+        *slot = (digit(*high)? << 4) | digit(*low)?;
     }
     Some(bytes)
 }

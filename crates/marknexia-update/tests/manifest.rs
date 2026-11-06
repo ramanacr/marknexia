@@ -16,6 +16,8 @@ use support::*;
 
 const ARTIFACT: &[u8] = b"TEST artifact bytes";
 
+type Mutation = Box<dyn Fn(&mut ManifestDocument)>;
+
 fn expect<'a>(current: &'a Version, hosts: &'a [String]) -> Expectations<'a> {
     Expectations {
         current_version: current,
@@ -42,6 +44,23 @@ fn the_committed_test_key_is_derived_from_the_published_test_seed() {
     );
     assert!(KeySet::test_only().contains(TEST_KEY_ID));
     assert!(KeySet::test_only().contains_test_key());
+    // A manifest signed with the TEST seed verifies against the embedded
+    // TEST key set (the verifier works; the config refuses this key).
+    let mut document = document("1.2.0", ARTIFACT);
+    document.key_id = TEST_KEY_ID.to_owned();
+    let bytes = document.to_canonical_json();
+    let signature = sign(&bytes, TEST_SEED, TEST_KEY_ID);
+    let current = Version::parse("1.0.0").unwrap();
+    let hosts = hosts();
+    assert!(
+        verify(
+            &bytes,
+            &signature,
+            &KeySet::test_only(),
+            &expect(&current, &hosts)
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -69,7 +88,7 @@ fn a_valid_signed_manifest_is_accepted_with_every_field() {
 fn a_bad_signature_is_rejected() {
     let document = document("1.2.0", ARTIFACT);
     let bytes = document.to_canonical_json();
-    let mut signature = key_pair(TEST_SEED).sk.sign(&bytes, None);
+    let mut signature = key_pair(SIGNING_TEST_SEED).sk.sign(&bytes, None);
     signature[0] ^= 1;
     let envelope = SignatureDocument::new(KEY_ID, &signature).to_canonical_json();
     let current = Version::parse("1.0.0").unwrap();
@@ -113,7 +132,7 @@ fn a_signature_from_the_wrong_key_is_rejected() {
     assert_eq!(
         verify(
             &bytes,
-            &sign(&bytes, TEST_SEED, KEY_ID),
+            &sign(&bytes, SIGNING_TEST_SEED, KEY_ID),
             &KeySet::new(),
             &expect(&current, &hosts)
         ),
@@ -129,7 +148,7 @@ fn a_signature_from_the_wrong_key_is_rejected() {
     assert_eq!(
         verify(
             &bytes,
-            &sign(&bytes, TEST_SEED, KEY_ID),
+            &sign(&bytes, SIGNING_TEST_SEED, KEY_ID),
             &keys,
             &expect(&current, &hosts)
         ),
@@ -143,7 +162,7 @@ fn any_field_changed_after_signing_is_rejected() {
     let (_, signature) = signed(&original);
     let current = Version::parse("1.0.0").unwrap();
     let hosts = hosts();
-    let mutations: Vec<Box<dyn Fn(&mut ManifestDocument)>> = vec![
+    let mutations: Vec<Mutation> = vec![
         Box::new(|d| d.version = "9.9.9".to_owned()),
         Box::new(|d| d.architecture = "ARM64".to_owned()),
         Box::new(|d| d.url = d.url.replace("/releases/", "/evil/")),
@@ -234,7 +253,7 @@ fn noncanonical_duplicate_or_unknown_json_is_rejected_even_when_signed() {
     for (text, expected) in variants {
         let bytes = text.into_bytes();
         // Validly signed by the trusted key: the format alone must refuse.
-        let signature = sign(&bytes, TEST_SEED, KEY_ID);
+        let signature = sign(&bytes, SIGNING_TEST_SEED, KEY_ID);
         assert_eq!(
             verify(&bytes, &signature, &keys(), &expect(&current, &hosts)),
             Err(expected),
@@ -250,7 +269,7 @@ fn signature_documents_are_strict() {
     let bytes = document.to_canonical_json();
     let current = Version::parse("1.0.0").unwrap();
     let hosts = hosts();
-    let signature = key_pair(TEST_SEED).sk.sign(&bytes, None);
+    let signature = key_pair(SIGNING_TEST_SEED).sk.sign(&bytes, None);
     let mut envelope = SignatureDocument::new(KEY_ID, &signature);
     envelope.algorithm = "ed25519ph".to_owned();
     assert_eq!(
@@ -357,7 +376,7 @@ fn a_wrong_architecture_or_too_new_os_is_rejected() {
 #[test]
 fn url_and_artifact_identity_are_bound() {
     let base = document("1.2.0", ARTIFACT);
-    let cases: Vec<(Box<dyn Fn(&mut ManifestDocument)>, ManifestError)> = vec![
+    let cases: Vec<(Mutation, ManifestError)> = vec![
         (
             Box::new(|d| d.url = d.url.replace("https://", "http://")),
             ManifestError::Url(UrlError::Malformed),

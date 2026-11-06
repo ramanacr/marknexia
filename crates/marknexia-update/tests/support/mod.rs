@@ -24,6 +24,8 @@ use marknexia_update::{
 /// The TEST signing seed (public on purpose; see `keys::TEST_PUBLIC_KEY_HEX`).
 pub const TEST_SEED: [u8; 32] = *b"marknexia-update-TEST-ONLY-seed!";
 /// A second, unrelated TEST seed ("wrong key" cases).
+/// The seed the tests sign with, as an ordinary (non-TEST-id) key.
+pub const SIGNING_TEST_SEED: [u8; 32] = *b"marknexia-update-SIGNING-TEST-k!";
 pub const OTHER_TEST_SEED: [u8; 32] = *b"marknexia-update-OTHER-TEST-key!";
 pub const KEY_ID: &str = "test-release-key";
 pub const HOST: &str = "updates.example.test";
@@ -32,11 +34,11 @@ pub fn key_pair(seed: [u8; 32]) -> KeyPair {
     KeyPair::from_seed(Seed::new(seed))
 }
 
-/// A key set holding the TEST seed's public key under [`KEY_ID`] (not the
+/// A key set holding the signing seed's public key under [`KEY_ID`] (not the
 /// committed TEST key id, so the verifier treats it as an ordinary key).
 pub fn keys() -> KeySet {
     let mut keys = KeySet::new();
-    let public: [u8; 32] = *key_pair(TEST_SEED).pk;
+    let public: [u8; 32] = *key_pair(SIGNING_TEST_SEED).pk;
     keys.insert(KEY_ID, public).expect("valid key");
     keys
 }
@@ -77,7 +79,7 @@ pub fn sign(bytes: &[u8], seed: [u8; 32], key_id: &str) -> Vec<u8> {
 
 pub fn signed(document: &ManifestDocument) -> (Vec<u8>, Vec<u8>) {
     let bytes = document.to_canonical_json();
-    let signature = sign(&bytes, TEST_SEED, KEY_ID);
+    let signature = sign(&bytes, SIGNING_TEST_SEED, KEY_ID);
     (bytes, signature)
 }
 
@@ -306,12 +308,17 @@ pub fn nonce(byte: u8) -> Nonce {
     Nonce::from_bytes([byte; 32])
 }
 
+/// Runs on each fake-clock pause.
+pub type PauseHook = RefCell<Option<Box<dyn FnMut(Duration)>>>;
+/// Runs when the fake launcher starts a child.
+pub type LaunchHook = RefCell<Option<Box<dyn FnMut(&Path, &Nonce, u32)>>>;
+
 /// A fake clock: each pause advances by `step`.
 pub struct FakeClock {
     pub now: Cell<Duration>,
     pub step: Duration,
     /// Runs on every pause (simulates the child acting).
-    pub on_pause: RefCell<Option<Box<dyn FnMut(Duration)>>>,
+    pub on_pause: PauseHook,
 }
 
 impl FakeClock {
@@ -367,7 +374,7 @@ pub struct FakeLauncher {
     pub exit: std::rc::Rc<Cell<Option<Option<i32>>>>,
     pub terminated: std::rc::Rc<Cell<bool>>,
     pub launched: RefCell<Vec<(PathBuf, String)>>,
-    pub on_launch: RefCell<Option<Box<dyn FnMut(&Path, &Nonce, u32)>>>,
+    pub on_launch: LaunchHook,
 }
 
 impl FakeLauncher {
