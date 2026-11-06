@@ -565,3 +565,604 @@ fn enter_on_a_heading_jumps_and_alt_left_goes_back() {
     });
     assert!(!is_enabled(&back));
 }
+
+// ---------------------------------------------------------------------------
+// CHROME-2 and CHROME-3 ports: name parity, brand, tooltips, compact layout,
+// Help items, row buttons and the dark menu bar.
+// ---------------------------------------------------------------------------
+
+use windows::Win32::{
+    Foundation::{LPARAM, RECT, WPARAM},
+    System::{
+        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        Memory::{GlobalLock, GlobalUnlock},
+    },
+    UI::{
+        Accessibility::{
+            UIA_ImageControlTypeId, UIA_ProcessIdPropertyId, UIA_TextControlTypeId,
+            UIA_WindowControlTypeId,
+        },
+        WindowsAndMessaging::{
+            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowTextW, PostMessageW,
+            SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageTimeoutW,
+            SetWindowPos, WM_CLOSE, WM_COMMAND,
+        },
+    },
+};
+
+const MENU_TROUBLESHOOTING: usize = 2133;
+const MENU_SBOM: usize = 2134;
+const TTM_GETTOOLCOUNT: u32 = 0x040D;
+
+impl Launched {
+    fn dpi(&self) -> f64 {
+        f64::from(unsafe { GetDpiForWindow(self.hwnd) })
+    }
+
+    /// A menu command, posted as the menu bar would send it (no input).
+    fn post_command(&self, id: usize) {
+        unsafe { PostMessageW(Some(self.hwnd), WM_COMMAND, WPARAM(id), LPARAM(0)) }
+            .expect("post WM_COMMAND");
+    }
+
+    /// The diagnostics message once its accessible name starts with
+    /// `prefix`.
+    fn wait_diagnostic(&self, prefix: &str) -> String {
+        self.until(&format!("the diagnostic {prefix:?}"), || {
+            self.find_id("2020")
+                .map(|text| name(&text))
+                .filter(|text| text.starts_with(prefix))
+        })
+    }
+
+    /// A top-level window of the shell process named `title` (a dialog).
+    fn find_dialog(&self, title: &str) -> Option<IUIAutomationElement> {
+        let root = unsafe { self.automation.GetRootElement() }.ok()?;
+        let by_name = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_NamePropertyId, &VARIANT::from(BSTR::from(title)))
+        }
+        .ok()?;
+        let by_process = unsafe {
+            self.automation.CreatePropertyCondition(
+                UIA_ProcessIdPropertyId,
+                &VARIANT::from(self.shell.id() as i32),
+            )
+        }
+        .ok()?;
+        let condition =
+            unsafe { self.automation.CreateAndCondition(&by_name, &by_process) }.ok()?;
+        unsafe { root.FindFirst(TreeScope_Children, &condition) }.ok()
+    }
+
+    /// The control with AutomationId `id` inside `scope`.
+    fn find_id_in(&self, scope: &IUIAutomationElement, id: &str) -> Option<IUIAutomationElement> {
+        let condition = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_AutomationIdPropertyId, &VARIANT::from(BSTR::from(id)))
+        }
+        .ok()?;
+        unsafe { scope.FindFirst(TreeScope_Descendants, &condition) }.ok()
+    }
+
+    fn resize(&self, width_dip: f64, height_dip: f64) {
+        let scale = self.dpi() / 96.0;
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                (width_dip * scale) as i32,
+                (height_dip * scale) as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .expect("resize the shell window");
+    }
+}
+
+fn width_of(element: &IUIAutomationElement) -> f64 {
+    let rect = unsafe { element.CurrentBoundingRectangle() }.expect("BoundingRectangle");
+    f64::from(rect.right - rect.left)
+}
+
+/// The clipboard's Unicode text, read from this test process.
+fn clipboard_text() -> Option<String> {
+    let mut opened = false;
+    for _ in 0..20 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            opened = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !opened {
+        return None;
+    }
+    let text = unsafe {
+        GetClipboardData(13).ok().and_then(|handle| {
+            let memory = windows::Win32::Foundation::HGLOBAL(handle.0);
+            let pointer = GlobalLock(memory).cast::<u16>();
+            if pointer.is_null() {
+                return None;
+            }
+            let mut length = 0;
+            while *pointer.add(length) != 0 {
+                length += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
+            let _ = GlobalUnlock(memory);
+            Some(text)
+        })
+    };
+    let _ = unsafe { CloseClipboard() };
+    text
+}
+
+/// Top-level windows of `class` (with their owner, for tooltips).
+fn top_level_windows(class: &str) -> Vec<HWND> {
+    struct Search {
+        class: Vec<u16>,
+        found: Vec<HWND>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
+        let search = unsafe { &mut *(data.0 as *mut Search) };
+        let mut name = [0_u16; 64];
+        let length = unsafe { GetClassNameW(hwnd, &mut name) };
+        if usize::try_from(length).is_ok_and(|length| name[..length] == search.class[..]) {
+            search.found.push(hwnd);
+        }
+        true.into()
+    }
+    let mut search = Search {
+        class: class.encode_utf16().collect(),
+        found: Vec::new(),
+    };
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut search as *mut Search as isize)) };
+    search.found
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut text = [0_u16; 260];
+    let length = unsafe { GetWindowTextW(hwnd, &mut text) };
+    String::from_utf16_lossy(&text[..usize::try_from(length).unwrap_or(0)])
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn the_brand_tooltips_and_open_button_follow_dotnet() {
+    let features = fixture("features.md");
+    let shell = launch(&[features.as_os_str()], None);
+    let minimum = shell.minimum_pixels();
+    // .NET `OpenFileButton` name.
+    let open = shell.wait_id("1001", UIA_ButtonControlTypeId, "Open Markdown file");
+    assert_target(&open, minimum, true);
+    // .NET `BrandIcon` (an image named "Marknexia") and `BrandDetails`.
+    let icon = shell.wait_id("2030", UIA_ImageControlTypeId, "Marknexia");
+    assert!(is_onscreen(&icon));
+    let product = shell.wait_id("2031", UIA_TextControlTypeId, "Marknexia");
+    assert!(is_onscreen(&product));
+    let tagline = shell.wait_id("2032", UIA_TextControlTypeId, "Read. Explore. Understand.");
+    assert!(is_onscreen(&tagline));
+    // One tooltip window owned by the shell: six toolbar buttons, the
+    // resize handle and the two row buttons.
+    let tooltips: Vec<HWND> = top_level_windows("tooltips_class32")
+        .into_iter()
+        .filter(|tip| unsafe { GetWindow(*tip, GW_OWNER) }.is_ok_and(|owner| owner == shell.hwnd))
+        .collect();
+    assert_eq!(tooltips.len(), 1, "one tooltip window for the chrome");
+    let mut count = 0_usize;
+    unsafe {
+        SendMessageTimeoutW(
+            tooltips[0],
+            TTM_GETTOOLCOUNT,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            5000,
+            Some(&mut count),
+        )
+    };
+    assert_eq!(count, 9, "tools registered with the tooltip");
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn the_compact_layout_collapses_labels_and_closes_the_pane() {
+    let features = fixture("features.md");
+    let shell = launch(&[features.as_os_str()], None);
+    let minimum = shell.minimum_pixels();
+    let scale = shell.dpi() / 96.0;
+    shell.resize(1100.0, 760.0);
+    let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
+    shell.until("the outline on screen in the wide layout", || {
+        is_onscreen(&outline).then_some(())
+    });
+    let folder = shell.wait_id("2005", UIA_ButtonControlTypeId, "Open repository folder");
+    let theme = shell.wait_id("2007", UIA_ComboBoxControlTypeId, "Theme");
+    assert!((width_of(&folder) - 96.0 * scale).abs() <= 2.0);
+    assert!((width_of(&theme) - 110.0 * scale).abs() <= 2.0);
+
+    // Below 720 DIPs: .NET `CompactWindow`.
+    shell.resize(600.0, 700.0);
+    shell.until("the pane to close in the compact layout", || {
+        (!is_onscreen(&outline)).then_some(())
+    });
+    shell.until("the brand details to collapse", || {
+        shell
+            .find_id("2031")
+            .is_none_or(|details| !is_onscreen(&details))
+            .then_some(())
+    });
+    shell.until("the Folder label to collapse", || {
+        ((width_of(&folder) - 44.0 * scale).abs() <= 2.0).then_some(())
+    });
+    assert!(
+        (width_of(&theme) - 86.0 * scale).abs() <= 2.0,
+        "compact theme width"
+    );
+    let open = shell.wait_id("1001", UIA_ButtonControlTypeId, "Open Markdown file");
+    assert_target(&open, minimum, true);
+    // The brand image stays.
+    assert!(is_onscreen(&shell.wait_id(
+        "2030",
+        UIA_ImageControlTypeId,
+        "Marknexia"
+    )));
+
+    // The toggle opens the 240-DIP pane (and saves IsSidebarOpen).
+    invoke(&shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar"));
+    shell.until("the pane to open in the compact layout", || {
+        is_onscreen(&outline).then_some(())
+    });
+    assert!(
+        width_of(&outline) <= 240.0 * scale + 2.0,
+        "compact pane length"
+    );
+    shell.until("IsSidebarOpen=true in the settings file", || {
+        read_settings(&shell.shell)
+            .filter(|settings| settings.is_sidebar_open)
+            .map(drop)
+    });
+    invoke(&shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar"));
+    shell.until("the pane to close again", || {
+        (!is_onscreen(&outline)).then_some(())
+    });
+
+    // Back above 720 DIPs: .NET `WideWindow` opens the pane.
+    shell.resize(1100.0, 760.0);
+    shell.until("the pane to open in the wide layout", || {
+        is_onscreen(&outline).then_some(())
+    });
+    shell.until("the Folder label to return", || {
+        ((width_of(&folder) - 96.0 * scale).abs() <= 2.0).then_some(())
+    });
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
+    let shell = launch(&[], None);
+    let help = shell.until("the Help menu", || {
+        shell.find(
+            windows::Win32::UI::Accessibility::UIA_MenuItemControlTypeId,
+            "Help",
+        )
+    });
+    assert!(
+        shell.activate(),
+        "the shell must own the foreground to open its menu"
+    );
+    let expand: IUIAutomationExpandCollapsePattern =
+        unsafe { help.GetCurrentPattern(UIA_ExpandCollapsePatternId) }
+            .expect("ExpandCollapse pattern")
+            .cast()
+            .expect("ExpandCollapse interface");
+    unsafe { expand.Expand() }.expect("Expand Help");
+    let root = unsafe { shell.automation.GetRootElement() }.expect("desktop root");
+    let items = shell.until("the Help items", || {
+        let names: Vec<String> = shell
+            .find_all(
+                &root,
+                windows::Win32::UI::Accessibility::UIA_MenuItemControlTypeId,
+                false,
+            )
+            .iter()
+            .filter(|item| {
+                unsafe { item.CurrentProcessId() }.is_ok_and(|id| id as u32 == shell.shell.id())
+            })
+            .map(name)
+            .collect();
+        names
+            .iter()
+            .any(|item| item == "About Marknexia")
+            .then_some(names)
+    });
+    let _ = unsafe { expand.Collapse() };
+    for wanted in [
+        "Keyboard shortcuts",
+        "Troubleshooting and diagnostics",
+        "Software components SBOM",
+        "About Marknexia",
+    ] {
+        assert!(
+            items.iter().any(|item| item == wanted),
+            "{wanted} in {items:?}"
+        );
+    }
+    // The updater waits for owner gate G2.
+    assert!(
+        !items.iter().any(|item| item.contains("update")),
+        "{items:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn troubleshooting_copies_the_dotnet_diagnostics() {
+    let shell = launch(&[], None);
+    shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    shell.post_command(MENU_TROUBLESHOOTING);
+    let dialog = shell.until("the troubleshooting dialog", || {
+        shell.find_dialog("Marknexia troubleshooting")
+    });
+    assert_eq!(
+        unsafe { dialog.CurrentControlType() }.unwrap(),
+        UIA_WindowControlTypeId
+    );
+    let minimum = shell.minimum_pixels();
+    let mut copy = None;
+    for (id, wanted) in [
+        ("1", "Copy diagnostics"),
+        ("100", "Open data folder"),
+        ("2", "Close"),
+    ] {
+        let button = shell.until(&format!("dialog button {wanted:?}"), || {
+            shell
+                .find_id_in(&dialog, id)
+                .filter(|button| name(button) == wanted)
+        });
+        assert_target(&button, minimum, false);
+        if id == "1" {
+            copy = Some(button);
+        }
+    }
+    invoke(&copy.unwrap());
+    shell.wait_diagnostic("Informational: Diagnostics copied.");
+    let copied = clipboard_text().expect("clipboard text");
+    let lines: Vec<&str> = copied.split("\r\n").collect();
+    assert_eq!(lines[0], "Marknexia diagnostics");
+    for (line, prefix) in lines[1..].iter().zip([
+        "Version: ",
+        "OS: Microsoft Windows NT ",
+        "Architecture: ",
+        "App path: ",
+        "Local data: ",
+        "WebView2 data: ",
+        "SBOM present: ",
+        "Remote images enabled: False",
+    ]) {
+        assert!(line.starts_with(prefix), "{line:?} starts with {prefix:?}");
+    }
+    assert_eq!(lines.len(), 9);
+}
+
+/// Removes the test SBOM it wrote beside the shell executable.
+struct SbomFile(PathBuf);
+
+impl Drop for SbomFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn the_sbom_item_warns_when_missing_and_copies_the_inventory() {
+    let executable = PathBuf::from(std::env::var_os("MARKNEXIA_SHELL_EXE").expect("exe"));
+    let path = executable.with_file_name("marknexia-sbom.spdx.json");
+    let existing = path.exists();
+    if !existing {
+        // .NET: "missing" while no inventory ships beside the executable.
+        let shell = launch(&[], None);
+        shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+        shell.post_command(MENU_SBOM);
+        shell.wait_diagnostic(
+            "Warning: The software components inventory is missing. Reinstall Marknexia from its release package.",
+        );
+    }
+    let json = "{\"spdxVersion\":\"SPDX-2.3\",\"packages\":[{\"name\":\"zeta\",\"versionInfo\":\"2\"},{\"name\":\"Alpha\",\"versionInfo\":\"1.0\"}]}";
+    let _cleanup = (!existing).then(|| {
+        std::fs::write(&path, json).expect("write the test SBOM");
+        SbomFile(path.clone())
+    });
+    let expected = std::fs::read_to_string(&path).expect("read the SBOM");
+    let shell = launch(&[], None);
+    shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    shell.post_command(MENU_SBOM);
+    let dialog = shell.until("the software components dialog", || {
+        shell.find_dialog("Marknexia software components")
+    });
+    let list = shell.until("the component list", || {
+        shell
+            .find_id_in(&dialog, "101")
+            .filter(|list| name(list) == "Software components and versions")
+    });
+    let entries: Vec<String> = shell
+        .find_all(&list, UIA_ListItemControlTypeId, true)
+        .iter()
+        .map(name)
+        .collect();
+    if !existing {
+        assert_eq!(entries, ["Alpha  1.0", "zeta  2"]);
+    }
+    assert!(!entries.is_empty());
+    let minimum = shell.minimum_pixels();
+    let copy = shell.until("Copy SBOM", || {
+        shell
+            .find_id_in(&dialog, "1")
+            .filter(|button| name(button) == "Copy SBOM")
+    });
+    assert_target(&copy, minimum, false);
+    assert_target(
+        &shell
+            .find_id_in(&dialog, "2")
+            .filter(|button| name(button) == "Close")
+            .expect("Close"),
+        minimum,
+        false,
+    );
+    invoke(&copy);
+    shell.wait_diagnostic("Informational: Software components inventory copied.");
+    assert_eq!(
+        clipboard_text().as_deref(),
+        Some(expected.trim_start_matches('\u{feff}'))
+    );
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn copy_heading_anchor_copies_only_the_anchor() {
+    let features = fixture("features.md");
+    let shell = launch(&[features.as_os_str()], None);
+    let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
+    let items = shell.until("outline items", || {
+        let items = shell.find_all(&outline, UIA_ListItemControlTypeId, true);
+        (items.len() > 2).then_some(items)
+    });
+    let pattern: IUIAutomationSelectionItemPattern =
+        unsafe { items[2].GetCurrentPattern(UIA_SelectionItemPatternId) }
+            .expect("SelectionItem pattern")
+            .cast()
+            .expect("SelectionItem interface");
+    unsafe { pattern.Select() }.expect("Select");
+    let copy = shell.wait_id("2018", UIA_ButtonControlTypeId, "Copy heading anchor");
+    shell.until("Copy heading anchor to be enabled", || {
+        is_enabled(&copy).then_some(())
+    });
+    assert!(is_onscreen(&copy));
+    assert_target(&copy, shell.minimum_pixels(), true);
+    invoke(&copy);
+    let notice = shell.wait_diagnostic("Informational: Copied #");
+    let anchor = notice
+        .strip_prefix("Informational: Copied ")
+        .expect("the anchor in the notice");
+    assert!(anchor.len() > 1 && !anchor.contains(char::is_whitespace));
+    assert_eq!(clipboard_text().as_deref(), Some(anchor));
+    // The repository view's button is hidden with its view.
+    assert!(
+        shell
+            .find_id("2019")
+            .is_none_or(|reveal| !is_onscreen(&reveal))
+    );
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn reveal_in_file_explorer_selects_the_file_in_its_folder() {
+    let repository = TempFolder::new("reveal");
+    std::fs::write(repository.0.join("README.md"), "# Reveal readme\n").unwrap();
+    let settings = format!(
+        "{{\"RepositoryRoot\": {}, \"SidebarMode\": 1}}",
+        json_string(&repository.0.to_string_lossy())
+    );
+    let shell = launch(&[], Some(settings.as_bytes()));
+    let tree = shell.wait_id("2012", UIA_TreeControlTypeId, "Repository files");
+    let root_name = repository
+        .0
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let root = shell.until("the repository root item", || {
+        shell
+            .find_all(&tree, UIA_TreeItemControlTypeId, true)
+            .into_iter()
+            .find(|item| name(item) == root_name)
+    });
+    let readme = shell.until("README.md in the tree", || {
+        shell
+            .find_all(&root, UIA_TreeItemControlTypeId, true)
+            .into_iter()
+            .find(|item| name(item) == "README.md")
+    });
+    let select: IUIAutomationSelectionItemPattern =
+        unsafe { readme.GetCurrentPattern(UIA_SelectionItemPatternId) }
+            .expect("SelectionItem pattern")
+            .cast()
+            .expect("SelectionItem interface");
+    unsafe { select.Select() }.expect("Select README.md");
+    let reveal = shell.wait_id("2019", UIA_ButtonControlTypeId, "Reveal in File Explorer");
+    shell.until("Reveal to be enabled", || is_enabled(&reveal).then_some(()));
+    assert_target(&reveal, shell.minimum_pixels(), true);
+    let before = top_level_windows("CabinetWClass");
+    invoke(&reveal);
+    let opened = shell.until("a File Explorer window for the repository", || {
+        top_level_windows("CabinetWClass")
+            .into_iter()
+            .find(|window| !before.contains(window) && window_title(*window) == root_name)
+    });
+    let _ = unsafe { PostMessageW(Some(opened), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    assert!(
+        shell
+            .find_id("2020")
+            .is_none_or(|text| !name(&text).contains("Could not open File Explorer"))
+    );
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn the_dark_menu_bar_is_dark_and_keeps_its_names() {
+    use windows::Win32::{
+        Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
+        UI::WindowsAndMessaging::{GetMenuBarInfo, MENUBARINFO, OBJID_MENU},
+    };
+    // Theme 2 is Dark (.NET `AppTheme`).
+    let shell = launch(&[], Some(b"{\"Theme\": 2}"));
+    shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    let menus: Vec<String> = shell.until("the menu bar items", || {
+        let names: Vec<String> = shell
+            .find_all(&shell.root, UIA_MenuBarControlTypeId, false)
+            .iter()
+            .flat_map(|bar| {
+                shell
+                    .find_all(
+                        bar,
+                        windows::Win32::UI::Accessibility::UIA_MenuItemControlTypeId,
+                        true,
+                    )
+                    .into_iter()
+                    .map(|item| name(&item))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        (names.len() >= 4).then_some(names)
+    });
+    for menu in ["File", "View", "Settings", "Help"] {
+        assert!(menus.iter().any(|item| item == menu), "{menu} in {menus:?}");
+    }
+    assert!(
+        shell.activate(),
+        "the shell must be visible to sample the bar"
+    );
+    let mut info = MENUBARINFO {
+        cbSize: std::mem::size_of::<MENUBARINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMenuBarInfo(shell.hwnd, OBJID_MENU, 0, &mut info) }.expect("GetMenuBarInfo");
+    let bar: RECT = info.rcBar;
+    // The empty bar right of the items shows the bar background.
+    let pixel = shell.until("a painted menu bar", || {
+        let dc = unsafe { GetDC(None) };
+        let color = unsafe { GetPixel(dc, bar.right - 8, (bar.top + bar.bottom) / 2) }.0;
+        unsafe { ReleaseDC(None, dc) };
+        (color != 0xFFFF_FFFF).then_some(color)
+    });
+    let channels = [pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF];
+    eprintln!("menu bar background: #{:06X}", pixel);
+    assert!(
+        channels.iter().all(|channel| *channel < 0x60),
+        "dark menu bar background, got {channels:?}"
+    );
+}
