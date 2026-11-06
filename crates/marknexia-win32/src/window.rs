@@ -305,6 +305,8 @@ pub fn run() -> Result<(), WindowError> {
             }
         }
         poll_webview(hwnd);
+        // Work that arrived while an outer frame held the state (input).
+        input::run_deferred(hwnd);
         // Results that arrived while an outer call held the session.
         apply_deferred_render_results(hwnd);
     }
@@ -666,6 +668,11 @@ fn apply_render_results(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
+    if !crate::reentry::is_free(&state) {
+        // Dispatched by a nested pump while an outer frame holds the state.
+        input::defer_render_results();
+        return;
+    }
     if state.borrow().webview_checked_out {
         // An outer call holds the WebView session. The message loop applies
         // the results once that call returns; nothing is re-posted.
@@ -900,8 +907,14 @@ fn show_open_dialog(owner: HWND) -> Result<Vec<PathBuf>, Error> {
 /// displayed.
 fn refresh_status(state: &Rc<RefCell<AppState>>) {
     let (status, text) = {
-        let state = state.borrow();
-        let app = state.portable.borrow();
+        // Reentrant callers (UIA, nested pumps) skip the refresh while an
+        // outer frame holds the state; the next refresh shows it.
+        let Ok(state) = state.try_borrow() else {
+            return;
+        };
+        let Ok(app) = state.portable.try_borrow() else {
+            return;
+        };
         let active = app.active_tab();
         let title = active.and_then(|tab| {
             app.tabs()
@@ -1079,7 +1092,9 @@ unsafe extern "system" fn tab_proc(
             let Some(state) = (unsafe { app_state_handle(parent) }) else {
                 return LRESULT(0);
             };
-            let provider = state.borrow().accessibility.clone();
+            // UIA sends WM_GETOBJECT synchronously, also into nested pumps.
+            let provider =
+                crate::reentry::read(&state, |state| state.accessibility.clone()).flatten();
             provider.as_ref().map_or(LRESULT(0), |provider| unsafe {
                 provider.return_provider(wparam, lparam)
             })
@@ -1120,6 +1135,19 @@ fn paint_tabs(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(parent) }) else {
         return;
     };
+    let free = crate::reentry::is_free(&state)
+        && crate::reentry::read(&state, |state| crate::reentry::is_free(&state.portable))
+            .unwrap_or(false);
+    if !free {
+        // Painted while an outer frame holds the state: validate the update
+        // region only; the next tab refresh repaints the strip.
+        let mut paint = PAINTSTRUCT::default();
+        unsafe {
+            let _ = BeginPaint(hwnd, &mut paint);
+            let _ = EndPaint(hwnd, &paint);
+        }
+        return;
+    }
     let (tabs, selected, focus_visible, colors, dpi, theme) = {
         let state = state.borrow();
         let app = state.portable.borrow();
@@ -1205,6 +1233,11 @@ fn native_color(spec: ColorSpec) -> COLORREF {
 }
 
 fn route_native_key(hwnd: HWND, key: u16) -> bool {
+    // A key dispatched by a nested modal loop while an outer frame holds
+    // the state is left to default processing.
+    if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !crate::reentry::is_free(&state)) {
+        return false;
+    }
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     if !ctrl && !shift && matches!(key, 0x25 | 0x27) {
@@ -1369,9 +1402,10 @@ fn select_tab_id(hwnd: HWND, raw_id: u64, pointer_input: bool) -> bool {
 /// raises the UIA selection event after the paint so clients observe
 /// agreement.
 fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
-    let (a11y, controls) = {
-        let state = state.borrow();
-        (state.accessibility.clone(), state.controls)
+    let Some((a11y, controls)) =
+        crate::reentry::read(state, |state| (state.accessibility.clone(), state.controls))
+    else {
+        return;
     };
     if let Some(c) = controls {
         unsafe {
@@ -1384,7 +1418,7 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     }
     if newly_selected.is_some() {
         // A notice concerned the previous view.
-        state.borrow_mut().notice = None;
+        let _ = crate::reentry::write(state, |state| state.notice = None);
         // .NET `DocumentTabs_SelectionChanged` → `RefreshSearchForActiveTab`.
         input::refresh_find(state);
     }
@@ -1582,6 +1616,12 @@ fn reflow(hwnd: HWND, dpi: u32) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
+    // WM_SIZE and WM_DPICHANGED can be sent while an outer frame holds the
+    // state: lay out from the message loop instead.
+    if !crate::reentry::is_free(&state) {
+        input::defer_reflow(dpi);
+        return;
+    }
     let (portable, controls) = {
         let state = state.borrow();
         (Rc::clone(&state.portable), state.controls)
@@ -1671,6 +1711,11 @@ fn update_theme(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
+    // Setting broadcasts are sent synchronously, also into nested pumps.
+    if !crate::reentry::is_free(&state) {
+        input::defer_theme();
+        return;
+    }
     let (preference, controls) = {
         let state = state.borrow();
         (state.portable.borrow().theme(), state.controls)
@@ -1945,7 +1990,13 @@ fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return false;
     };
-    let portable = Rc::clone(&state.borrow().portable);
+    // UIA can call in while an outer frame holds the state (a nested pump):
+    // refuse (UIA_E_INVALIDOPERATION) instead of panicking.
+    let Some(portable) = crate::reentry::read(&state, |state| Rc::clone(&state.portable))
+        .filter(|portable| crate::reentry::is_free(portable) && crate::reentry::is_free(&state))
+    else {
+        return false;
+    };
     let already_active = portable.borrow().active_tab() == Some(id);
     if already_active {
         return true;
@@ -1975,6 +2026,11 @@ fn apply_automation_selection(hwnd: HWND, raw_id: u64) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
+    if !crate::reentry::is_free(&state) {
+        // Dispatched by a nested pump: run it from the message loop.
+        input::defer_selection(raw_id);
+        return;
+    }
     let portable = Rc::clone(&state.borrow().portable);
     let active = portable.borrow().active_tab();
     // A later selection superseded this one; it posted its own switch.

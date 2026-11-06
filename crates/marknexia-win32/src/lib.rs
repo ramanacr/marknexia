@@ -8,6 +8,7 @@ pub mod dragdrop;
 pub mod find;
 pub mod keyboard;
 pub mod layout;
+pub mod reentry;
 pub mod single_instance;
 pub mod tabs;
 pub mod theme;

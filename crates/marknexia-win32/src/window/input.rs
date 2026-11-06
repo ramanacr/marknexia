@@ -10,6 +10,13 @@
 //! call that can re-enter the window procedure (WebView2 COM, `SetFocus`,
 //! `SetWindowTextW` on the find box, capture changes), and WebView2 is
 //! called only from top-level dispatch, never inside a UIA call.
+//!
+//! Every entry point (window message, command, key, UIA close, drop
+//! callback, poll hook) first checks that no outer frame holds an
+//! `AppState` borrow (`crate::reentry::is_free`). While one does, the work
+//! is queued in a thread-local list outside the state and runs from
+//! `after_poll`, at the top of the message loop. A reentrant path never
+//! panics.
 
 use std::{
     collections::VecDeque,
@@ -32,6 +39,7 @@ use crate::{
         route_find_key,
     },
     layout::Dip,
+    reentry::{self, Deferred},
     single_instance::{
         self, KEY_VARIABLE,
         native::{ActivationQueue, ActivationServer, Claim, PrimaryInstance, ShellStartupProbe},
@@ -46,8 +54,112 @@ const WM_CLOSE_TAB_REQUEST: u32 = WM_APP + 0x101;
 const WM_DROPS_CLASSIFIED: u32 = WM_APP + 0x102;
 /// Posted by an activation resolution thread: resolved paths are queued.
 const WM_ACTIVATION_RESOLVED: u32 = WM_APP + 0x103;
-/// Posted when a UIA close was deferred: retry once the outer call returns.
+/// Posted when work was deferred: run it once the outer call returns.
 const WM_DEFERRED_CLOSE: u32 = WM_APP + 0x104;
+/// Deferred work kept at once; more is dropped (it is user input that
+/// arrived while the shell was busy).
+const MAX_DEFERRED: usize = 64;
+
+/// Work that arrived while an outer frame held an `AppState` borrow.
+#[derive(Debug)]
+enum Work {
+    Message(u32, WPARAM),
+    Command(WPARAM),
+    Find(FindCommand),
+    RefreshFind,
+    Invalidate(u64),
+    Close(TabId),
+    Drop(String),
+    /// `WM_APPLY_WEBVIEW_SELECTION` dispatched inside a nested pump.
+    Selection(u64),
+    Reflow(u32),
+    RenderResults,
+    Theme,
+}
+
+thread_local! {
+    static DEFERRED: Deferred<Work> = const { Deferred::new(MAX_DEFERRED) };
+    /// Copies kept outside the state, readable while it is borrowed.
+    static TOKEN: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static FIND_EDIT: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// `window.rs`: a WebView selection switch that must wait for the loop.
+pub(super) fn defer_selection(raw: u64) {
+    defer(Work::Selection(raw));
+}
+
+/// `window.rs`: a layout requested while an outer frame held the state.
+pub(super) fn defer_reflow(dpi: u32) {
+    defer(Work::Reflow(dpi));
+}
+
+/// `window.rs`: render results posted while an outer frame held the state.
+pub(super) fn defer_render_results() {
+    defer(Work::RenderResults);
+}
+
+/// `window.rs`: a theme change received while an outer frame held the state.
+pub(super) fn defer_theme() {
+    defer(Work::Theme);
+}
+
+fn defer(work: Work) {
+    DEFERRED.with(|deferred| {
+        let _ = deferred.push(work);
+    });
+}
+
+/// True while an outer frame holds an `AppState` borrow.
+fn busy(state: &Rc<RefCell<AppState>>) -> bool {
+    !reentry::is_free(state)
+}
+
+/// Runs deferred work; called with no borrow held (top of the loop). Work
+/// that still cannot run (the state is busy again, or the WebView session
+/// is checked out) is queued again by its handler.
+pub(super) fn run_deferred(hwnd: HWND) {
+    // Still inside the outer frame (a wake-up dispatched by a nested pump):
+    // leave the work for `after_poll` instead of re-queueing it in a loop.
+    if handle(hwnd).is_none_or(|state| busy(&state)) {
+        return;
+    }
+    let work = DEFERRED.with(Deferred::take);
+    for item in work {
+        match item {
+            Work::Message(message, wparam) => {
+                let token = TOKEN.with(std::cell::Cell::get);
+                let _ = on_message(hwnd, message, wparam, LPARAM(token));
+            }
+            Work::Command(wparam) => {
+                let _ = on_command(hwnd, wparam);
+            }
+            Work::Find(command) => run_find_entry(hwnd, command),
+            Work::RefreshFind => {
+                if let Some(state) = handle(hwnd) {
+                    refresh_find(&state);
+                }
+            }
+            Work::Invalidate(tab) => {
+                if let Some(state) = handle(hwnd) {
+                    document_replaced(&state, tab);
+                }
+            }
+            Work::Close(tab) => {
+                let _ = close_requested(hwnd, tab, false);
+            }
+            Work::Drop(path) => on_dropped_path(hwnd, path),
+            Work::Selection(raw) => apply_automation_selection(hwnd, raw),
+            Work::Reflow(dpi) => reflow(hwnd, dpi),
+            Work::RenderResults => apply_render_results(hwnd),
+            Work::Theme => {
+                update_theme(hwnd);
+                // SAFETY: plain DPI query on this thread's window.
+                reflow(hwnd, unsafe { GetDpiForWindow(hwnd) }.max(96));
+            }
+        }
+    }
+}
 /// The find box's control ID (`initialize` creates it).
 const FIND_EDIT_ID: usize = 1004;
 const EM_SETSEL: u32 = 0x00B1;
@@ -87,9 +199,6 @@ pub(super) struct InputState {
     message_token: isize,
     /// Activation paths resolved off the UI thread.
     resolved: Arc<std::sync::Mutex<VecDeque<String>>>,
-    /// UIA close requests that arrived while an outer call held the WebView
-    /// session; they run once it is checked back in.
-    deferred_closes: Vec<TabId>,
     /// The OLE drop target; revoked at shutdown, before the window goes.
     drop_target: Option<dragdrop::native::DropRegistration>,
 }
@@ -167,6 +276,8 @@ pub(super) fn initialize(
         }
         .is_ok()
     });
+    TOKEN.with(|cell| cell.set(token));
+    FIND_EDIT.with(|cell| cell.set(controls.edit.0 as isize));
     let mut state = state.borrow_mut();
     state.input.message_token = token;
     state.input.drop_target = drop_target;
@@ -245,12 +356,15 @@ const SINGLE_INSTANCE_UNAVAILABLE: &str =
 /// `close_state` hook: stops the activation server first, so a new launch
 /// becomes the first instance instead of handing off to this one.
 pub(super) fn shutdown(state: &Rc<RefCell<AppState>>) {
-    let (server, drop_target) = {
-        let mut state = state.borrow_mut();
+    // Never panics: while an outer frame holds the state the server and the
+    // drop target stay until the process exits.
+    let Some((server, drop_target)) = reentry::write(state, |state| {
         (
             state.input.activation_server.take(),
             state.input.drop_target.take(),
         )
+    }) else {
+        return;
     };
     drop(server);
     // RevokeDragDrop and OleUninitialize, while the window still exists.
@@ -279,11 +393,20 @@ pub(super) fn handles(message: u32) -> bool {
 /// queues. File drops arrive through OLE (`IDropTarget`), never through
 /// `WM_DROPFILES`, which is not enabled.
 pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let token = TOKEN.with(std::cell::Cell::get);
+    if token == 0 || lparam.0 != token {
+        return LRESULT(0);
+    }
+    if message == WM_DEFERRED_CLOSE {
+        // The wake-up for deferred work.
+        run_deferred(hwnd);
+        return LRESULT(0);
+    }
     let Some(state) = handle(hwnd) else {
         return LRESULT(0);
     };
-    let token = state.borrow().input.message_token;
-    if token == 0 || lparam.0 != token {
+    if busy(&state) {
+        defer(Work::Message(message, wparam));
         return LRESULT(0);
     }
     match message {
@@ -291,37 +414,36 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
         WM_ACTIVATION_RESOLVED => on_activation_resolved(hwnd),
         WM_CLOSE_TAB_REQUEST => {
             if let Some(tab) = tab_by_raw(&state, wparam.0 as u64) {
-                if state.borrow().webview_checked_out {
-                    // Retried when the outer call has returned (and by
-                    // `after_poll`); the wake-up carries the token.
-                    state.borrow_mut().input.deferred_closes.push(tab);
-                    post_to_window(hwnd.0 as isize, WM_DEFERRED_CLOSE, token);
-                } else {
-                    let _ = close_tab(hwnd, tab);
-                }
+                let _ = close_requested(hwnd, tab, true);
             }
         }
         WM_DROPS_CLASSIFIED => on_drops_classified(hwnd),
-        WM_DEFERRED_CLOSE => run_deferred_closes(hwnd),
         _ => {}
     }
     LRESULT(0)
 }
 
-/// Runs UIA close requests deferred while the session was checked out.
-fn run_deferred_closes(hwnd: HWND) {
+/// A UIA close: runs now, or is deferred while an outer frame holds the
+/// state or the WebView session. `wake` posts the tokened wake-up, so the
+/// close runs as soon as the outer call returns (`after_poll` retries it
+/// too). Returns true once the close ran or was queued.
+fn close_requested(hwnd: HWND, tab: TabId, wake: bool) -> bool {
     let Some(state) = handle(hwnd) else {
-        return;
+        return false;
     };
-    if state.borrow().webview_checked_out {
-        return;
-    }
-    let closes = std::mem::take(&mut state.borrow_mut().input.deferred_closes);
-    for tab in closes {
-        if tab_by_raw(&state, tab.get()).is_some() {
-            let _ = close_tab(hwnd, tab);
+    let checked_out = reentry::read(&state, |state| state.webview_checked_out);
+    if checked_out != Some(false) {
+        defer(Work::Close(tab));
+        if wake {
+            post_to_window(
+                hwnd.0 as isize,
+                WM_DEFERRED_CLOSE,
+                TOKEN.with(std::cell::Cell::get),
+            );
         }
+        return true;
     }
+    tab_by_raw(&state, tab.get()).is_some() && close_tab(hwnd, tab)
 }
 
 /// `WM_COMMAND` from the find box (`EN_CHANGE`) and the find buttons
@@ -329,6 +451,21 @@ fn run_deferred_closes(hwnd: HWND) {
 pub(super) fn on_command(hwnd: HWND, wparam: WPARAM) -> bool {
     let id = wparam.0 & 0xffff;
     let code = ((wparam.0 >> 16) & 0xffff) as u32;
+    let ours = matches!(
+        (id as isize, code),
+        (
+            find_native::PREVIOUS_ID | find_native::NEXT_ID | find_native::CLOSE_ID,
+            0
+        )
+    ) || ((id == super::chrome::ID_FIND || id == super::chrome::MENU_FIND) && code == 0)
+        || (id == FIND_EDIT_ID && code == find_native::EN_CHANGE);
+    if !ours {
+        return false;
+    }
+    if handle(hwnd).is_some_and(|state| busy(&state)) {
+        defer(Work::Command(wparam));
+        return true;
+    }
     let command = match (id as isize, code) {
         (find_native::PREVIOUS_ID, 0) => FindCommand::Previous,
         (find_native::NEXT_ID, 0) => FindCommand::Next,
@@ -366,18 +503,19 @@ fn find_bar_visible(state: &Rc<RefCell<AppState>>) -> bool {
 pub(super) fn route_key(hwnd: HWND, target: HWND, key: u16) -> bool {
     // SAFETY: reads this thread's keyboard state.
     let down = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
-    let Some((_, controls)) = find_context(hwnd) else {
+    let edit = FIND_EDIT.with(std::cell::Cell::get);
+    if edit == 0 {
         return false;
-    };
+    }
     let command = route_find_key(
         key,
         down(VK_CONTROL.0),
         down(VK_SHIFT.0),
         down(VK_MENU.0),
-        target == controls.edit,
+        target.0 as isize == edit,
     );
     command.is_some_and(|command| {
-        run_find_command(hwnd, command);
+        run_find_entry(hwnd, command);
         true
     })
 }
@@ -386,10 +524,19 @@ pub(super) fn route_key(hwnd: HWND, target: HWND, key: u16) -> bool {
 pub(super) fn route_accelerator(hwnd: HWND, key: u16, ctrl: bool, shift: bool, alt: bool) -> bool {
     match route_find_key(key, ctrl, shift, alt, false) {
         Some(command) => {
-            run_find_command(hwnd, command);
+            run_find_entry(hwnd, command);
             true
         }
         None => false,
+    }
+}
+
+/// A find command from a key or the WebView: deferred while busy.
+fn run_find_entry(hwnd: HWND, command: FindCommand) {
+    match handle(hwnd) {
+        Some(state) if busy(&state) => defer(Work::Find(command)),
+        Some(_) => run_find_command(hwnd, command),
+        None => {}
     }
 }
 
@@ -540,6 +687,10 @@ fn on_find_text_changed(hwnd: HWND) {
 
 /// .NET `RefreshSearchForActiveTab`, on tab selection changes.
 pub(super) fn refresh_find(state: &Rc<RefCell<AppState>>) {
+    if busy(state) {
+        defer(Work::RefreshFind);
+        return;
+    }
     let Some(controls) = state.borrow().input.find_controls else {
         return;
     };
@@ -559,14 +710,20 @@ pub(super) fn refresh_find(state: &Rc<RefCell<AppState>>) {
 
 /// A new document joined `tab` (.NET `NavigationStarting`).
 pub(super) fn document_replaced(state: &Rc<RefCell<AppState>>, tab: u64) {
-    state.borrow_mut().input.find.invalidate(tab);
+    if reentry::write(state, |state| state.input.find.invalidate(tab)).is_none() {
+        defer(Work::Invalidate(tab));
+    }
 }
 
 /// `poll_webview` hook, after the session is restored: applies queued page
 /// messages and marks loaded documents ready (.NET `NavigationCompleted`,
 /// which re-runs the active tab's search when the bar is visible).
 pub(super) fn after_poll(hwnd: HWND) {
-    run_deferred_closes(hwnd);
+    // Runs at the top of the message loop, where no borrow should be held;
+    // if one is, everything waits for the next turn.
+    if handle(hwnd).is_none_or(|state| busy(&state)) {
+        return;
+    }
     let Some((state, controls)) = find_context(hwnd) else {
         return;
     };
@@ -677,7 +834,7 @@ pub(super) fn draw_find_button(hwnd: HWND, item: &DRAWITEMSTRUCT) -> bool {
 
 /// `reflow` hook: lays out the find bar inside the shell layout's rect.
 pub(super) fn layout_find_bar(state: &Rc<RefCell<AppState>>, bar: PixelRect, dpi: u32) {
-    let controls = state.borrow().input.find_controls;
+    let controls = reentry::read(state, |state| state.input.find_controls).flatten();
     if let Some(controls) = controls {
         controls.layout(bar, dpi);
     }
@@ -694,6 +851,11 @@ pub(super) fn close_tab(hwnd: HWND, tab: TabId) -> bool {
     let Some(state) = handle(hwnd) else {
         return false;
     };
+    if busy(&state) {
+        // Runs from the message loop once the outer frame returns.
+        defer(Work::Close(tab));
+        return true;
+    }
     // An outer call holds the session: the document cannot be removed now.
     if state.borrow().webview_checked_out || tab_by_raw(&state, tab.get()).is_none() {
         return false;
@@ -787,10 +949,12 @@ fn strip(strip: HWND) -> Option<Strip> {
     })
 }
 
+/// `None` also while an outer frame holds the state: pointer input that
+/// arrives then is ignored.
 fn strip_context(strip: HWND) -> Option<(HWND, Rc<RefCell<AppState>>, i32, i32)> {
     // SAFETY: `strip` is this thread's tab strip.
     let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
-    let state = handle(parent)?;
+    let state = handle(parent).filter(|state| !busy(state))?;
     let mut client = RECT::default();
     unsafe { GetClientRect(strip, &mut client) }.ok()?;
     Some((
@@ -1016,7 +1180,7 @@ pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: C
 /// true when it did.
 pub(super) fn select_open_document(hwnd: HWND, state: &Rc<RefCell<AppState>>, path: &Path) -> bool {
     // The chrome records every tab's location when its render starts.
-    let existing = state.borrow().chrome.tab_for_path(path);
+    let existing = reentry::read(state, |state| state.chrome.tab_for_path(path)).flatten();
     let Some(existing) = existing.and_then(|raw| tab_by_raw(state, raw)) else {
         return false;
     };
@@ -1034,6 +1198,16 @@ fn on_dropped_path(hwnd: HWND, path: String) {
     let Some(state) = handle(hwnd) else {
         return;
     };
+    if busy(&state) {
+        // OLE can call Drop inside a nested pump.
+        defer(Work::Drop(path));
+        post_to_window(
+            hwnd.0 as isize,
+            WM_DEFERRED_CLOSE,
+            TOKEN.with(std::cell::Cell::get),
+        );
+        return;
+    }
     let path = match dragdrop::gate(&path) {
         Ok(path) => path,
         Err(message) => {
