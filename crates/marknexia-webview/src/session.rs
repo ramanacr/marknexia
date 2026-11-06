@@ -1399,6 +1399,8 @@ mod native_tests {
     /// broker under the page nonce, a valid diagram becomes SVG, an invalid
     /// one shows the in-page error with its message, and a diagram over a
     /// limit stays an accessible source fallback without loading the runtime.
+    /// A page without diagrams cannot load the runtime by script or fetch,
+    /// and an init directive cannot loosen `securityLevel: 'strict'`.
     #[test]
     #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
     fn native_mermaid_runtime_renders_and_falls_back() {
@@ -1432,11 +1434,16 @@ mod native_tests {
             .join("marknexia-webview-native-tests")
             .join(format!("mermaid-{}", std::process::id()));
         let mut session = WebViewSession::new(apartment, parent, folder, Rc::downgrade(&observer));
-        let limits = RenderLimits {
-            max_diagram_source_bytes: 64,
-            ..RenderLimits::default()
-        };
-        let renderer = Renderer::with_engine(marknexia_markdown::PulldownAdapter, limits).unwrap();
+        // Tab 33 renders under a 64-byte source limit; the others under the
+        // .NET defaults.
+        let small = Renderer::with_engine(
+            marknexia_markdown::PulldownAdapter,
+            RenderLimits {
+                max_diagram_source_bytes: 64,
+                ..RenderLimits::default()
+            },
+        )
+        .unwrap();
         let cases = [
             (31_u64, "```mermaid\ngraph TD\nA[Alpha]-->B[Beta]\n```\n"),
             (32, "```mermaid\nthis is not a mermaid diagram\n```\n"),
@@ -1444,17 +1451,32 @@ mod native_tests {
                 33,
                 "```mermaid\ngraph TD\nA[Alpha]-->B[Beta]\nB-->C[Gamma]\nC-->D[Delta]\nD-->E[Epsilon]\n```\n",
             ),
+            // No diagram: the page must not be able to load the runtime.
+            (34, "# Plain\n\nNo diagrams here.\n"),
+            // A directive asking for `loose` and click bindings: the bridge's
+            // `securityLevel: 'strict'` must hold and the SVG stay inert.
+            (
+                35,
+                "```mermaid\n%%{init: {'securityLevel': 'loose'}}%%\ngraph TD\nA[Alpha]-->B[Beta]\nclick A callback \"Tooltip\"\nclick B href \"javascript:alert(2)\"\n```\n",
+            ),
         ];
         for (tab_id, source) in cases {
             let seed = u8::try_from(tab_id).unwrap();
             let identity = PageIdentity::new([seed; 16], [seed ^ 0x5A; 16]).unwrap();
-            let rendered = renderer
-                .render(source, &RenderContext::new(AppTheme::Light, identity))
-                .unwrap();
+            let context = RenderContext::new(AppTheme::Light, identity);
+            let rendered = if tab_id == 33 {
+                small.render(source, &context)
+            } else {
+                Renderer::new().render(source, &context)
+            }
+            .unwrap();
             let document =
                 HostDocument::from_rendered(tab_id, 1, "diagram.md", rendered, &identity, false)
                     .unwrap();
-            assert_eq!(document.loads_mermaid_runtime(), tab_id != 33);
+            assert_eq!(
+                document.loads_mermaid_runtime(),
+                matches!(tab_id, 31 | 32 | 35)
+            );
             session.add_document(document).unwrap();
         }
         session.select_tab(31).unwrap();
@@ -1466,16 +1488,62 @@ mod native_tests {
   const error = q('mermaid-1-error');
   const message = q('mermaid-1-error-msg');
   const fallback = document.querySelector('.marknexia-diagram-fallback');
+  const svg = render ? render.querySelector('svg') : null;
+  const unsafe = [];
+  if (svg) {
+    for (const element of [svg, ...svg.querySelectorAll('*')]) {
+      for (const attribute of element.attributes) {
+        if (/^on/i.test(attribute.name) || /javascript:/i.test(attribute.value)) {
+          unsafe.push(element.tagName + ' ' + attribute.name + '=' + attribute.value);
+        }
+      }
+    }
+  }
+  const config = typeof mermaid === 'undefined' ? null
+    : (typeof mermaid.getConfig === 'function' ? mermaid.getConfig() : mermaid.mermaidAPI.getConfig());
   return {
     runtime: typeof mermaid,
-    svg: !!(render && render.querySelector('svg')),
+    securityLevel: config ? config.securityLevel : null,
+    svg: !!svg,
     svgText: render ? render.textContent : null,
+    unsafe,
     error: error ? error.style.display : null,
     message: message ? message.textContent : null,
     fallbackRole: fallback ? fallback.getAttribute('role') : null,
-    fallbackText: fallback ? fallback.textContent : null
+    fallbackText: fallback ? fallback.textContent : null,
+    injected: window.__marknexiaInjected || null
   };
 })())"#;
+        // Run in the diagram-free page: a `<script src>` and a `fetch` for
+        // the runtime URI. CSP allows the script host, so the script request
+        // reaches the broker, which must refuse it; `connect-src 'none'`
+        // blocks the fetch before it leaves the page.
+        const INJECT: &str = r#"(() => {
+  window.__marknexiaInjected = { script: 'pending', fetch: 'pending' };
+  const script = document.createElement('script');
+  script.src = 'https://marknexia.assets/mermaid.min.js';
+  script.onload = () => { window.__marknexiaInjected.script = 'loaded'; };
+  script.onerror = () => { window.__marknexiaInjected.script = 'error'; };
+  document.head.appendChild(script);
+  fetch('https://marknexia.assets/mermaid.min.js').then(
+    response => { window.__marknexiaInjected.fetch = 'status ' + response.status; },
+    () => { window.__marknexiaInjected.fetch = 'rejected'; });
+  return 'injected';
+})()"#;
+        let evaluate = |session: &mut WebViewSession, tab_id: u64, script: &str| {
+            let result = Rc::new(RefCell::new(None));
+            session
+                .host(tab_id)
+                .unwrap()
+                .evaluate_for_test(script, Rc::clone(&result))
+                .unwrap();
+            pump_until(session, Duration::from_secs(10), |_| {
+                result.borrow().is_some()
+            });
+            let json = result.borrow_mut().take().unwrap();
+            assert_ne!(json, "error", "ExecuteScript failed in tab {tab_id}");
+            json
+        };
         let mut outcomes = std::collections::BTreeMap::new();
         for (tab_id, _) in cases {
             session.select_tab(tab_id).unwrap();
@@ -1484,23 +1552,21 @@ mod native_tests {
                     .host(tab_id)
                     .is_some_and(crate::host::WebViewHost::document_loaded)
             });
+            if tab_id == 34 {
+                assert_eq!(evaluate(&mut session, tab_id, INJECT), "\"injected\"");
+            }
             let deadline = Instant::now() + Duration::from_secs(30);
             let outcome = loop {
-                let result = Rc::new(RefCell::new(None));
-                session
-                    .host(tab_id)
-                    .unwrap()
-                    .evaluate_for_test(PROBE, Rc::clone(&result))
-                    .unwrap();
-                pump_until(&mut session, Duration::from_secs(10), |_| {
-                    result.borrow().is_some()
-                });
-                let json = result.borrow_mut().take().unwrap();
+                let json = evaluate(&mut session, tab_id, PROBE);
                 let text: String = serde_json::from_str(&json).unwrap();
                 let value: serde_json::Value = serde_json::from_str(&text).unwrap();
                 let settled = match tab_id {
-                    31 => value["svg"] == true,
+                    31 | 35 => value["svg"] == true || value["error"] == "block",
                     32 => value["error"] == "block",
+                    34 => {
+                        value["injected"]["script"] != "pending"
+                            && value["injected"]["fetch"] != "pending"
+                    }
                     _ => true,
                 };
                 if settled || Instant::now() > deadline {
@@ -1520,6 +1586,7 @@ mod native_tests {
             "{labels}"
         );
         assert_eq!(valid["error"], "none");
+        assert_eq!(valid["securityLevel"], "strict");
 
         let invalid = &outcomes[&32];
         assert_eq!(invalid["runtime"], "object");
@@ -1543,6 +1610,32 @@ mod native_tests {
             fallback.contains("A[Alpha]--&gt;B[Beta]") || fallback.contains("A[Alpha]-->B[Beta]")
         );
 
+        let plain = &outcomes[&34];
+        assert_eq!(
+            plain["runtime"], "undefined",
+            "the injected runtime never ran"
+        );
+        assert_eq!(
+            plain["injected"]["script"], "error",
+            "the broker refused the injected script request"
+        );
+        assert_eq!(
+            plain["injected"]["fetch"], "rejected",
+            "the page cannot fetch the runtime"
+        );
+
+        let directive = &outcomes[&35];
+        assert_eq!(directive["runtime"], "object");
+        assert_eq!(
+            directive["securityLevel"], "strict",
+            "an init directive cannot loosen the security level"
+        );
+        assert_eq!(directive["svg"], true, "{directive}");
+        assert_eq!(
+            directive["unsafe"],
+            serde_json::json!([]),
+            "no event handler or javascript: URL in the SVG"
+        );
         session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
