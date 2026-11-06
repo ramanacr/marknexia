@@ -336,7 +336,7 @@ pub(super) fn create_menu(parent: HWND) -> Option<HMENU> {
             help,
             MF_STRING,
             MENU_TROUBLESHOOTING,
-            w!("&Troubleshooting && diagnostics"),
+            w!("&Troubleshooting and diagnostics"),
         );
         let _ = AppendMenuW(
             help,

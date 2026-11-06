@@ -149,6 +149,8 @@ impl ShellProcess {
             // The Help > Software components item reads this isolated file
             // (absent unless a test writes it), never the executable folder.
             .env("MARKNEXIA_SBOM_PATH", profile.join("sbom.spdx.json"))
+            // Each Reveal in File Explorer hand-off is recorded here.
+            .env("MARKNEXIA_REVEAL_LOG", profile.join("reveal.log"))
             .env("MARKNEXIA_INSTANCE_KEY", instance_key);
         match browser_folder {
             Some(folder) => {
@@ -176,6 +178,10 @@ impl ShellProcess {
     /// writes it.
     pub fn sbom_path(&self) -> PathBuf {
         self.profile.join("sbom.spdx.json")
+    }
+    /// The File Explorer hand-off record (`MARKNEXIA_REVEAL_LOG`).
+    pub fn reveal_log_path(&self) -> PathBuf {
+        self.profile.join("reveal.log")
     }
 }
 

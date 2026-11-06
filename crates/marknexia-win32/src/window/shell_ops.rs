@@ -96,6 +96,40 @@ impl RevealTarget {
 /// (.NET `RevealFile_Click`). Runs on a worker thread; returns the error
 /// message for the diagnostics bar.
 pub(super) fn reveal(target: &RevealTarget) -> Result<(), String> {
+    let result = open_and_select(target);
+    log_reveal(target, &result);
+    result
+}
+
+/// Native tests record each File Explorer hand-off: the gated path and the
+/// `SHOpenFolderAndSelectItems` result, one line each, because a hosted
+/// runner's shell may open no window. Honored only for an absolute path
+/// that passes `GatedPath`, like `MARKNEXIA_SETTINGS_PATH`.
+const REVEAL_LOG_VARIABLE: &str = "MARKNEXIA_REVEAL_LOG";
+
+fn log_reveal(target: &RevealTarget, result: &Result<(), String>) {
+    use std::io::Write;
+    let Some(log) = std::env::var_os(REVEAL_LOG_VARIABLE)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .filter(|path| GatedPath::new(&path.to_string_lossy()).is_ok())
+    else {
+        return;
+    };
+    let outcome = match result {
+        Ok(()) => "ok".to_owned(),
+        Err(error) => format!("error {error}"),
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(file, "{}\t{outcome}", target.0.display());
+    }
+}
+
+fn open_and_select(target: &RevealTarget) -> Result<(), String> {
     with_apartment(|| {
         let path = HSTRING::from(target.0.as_os_str());
         // SAFETY: the HSTRING outlives the call; the item list is freed

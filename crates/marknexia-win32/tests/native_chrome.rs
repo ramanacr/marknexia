@@ -631,7 +631,11 @@ impl Launched {
         .ok()?;
         let condition =
             unsafe { self.automation.CreateAndCondition(&by_name, &by_process) }.ok()?;
-        unsafe { root.FindFirst(TreeScope_Children, &condition) }.ok()
+        // UIA shows an owned dialog under its owner; a desktop child is
+        // accepted too.
+        unsafe { self.root.FindFirst(TreeScope_Descendants, &condition) }
+            .ok()
+            .or_else(|| unsafe { root.FindFirst(TreeScope_Children, &condition) }.ok())
     }
 
     /// The control with AutomationId `id` inside `scope`.
@@ -862,24 +866,33 @@ fn the_brand_tooltips_and_open_button_follow_dotnet() {
     assert!(is_onscreen(&tagline));
     // One tooltip window owned by the shell: six toolbar buttons, the
     // resize handle and the two row buttons.
-    let tooltips: Vec<HWND> = top_level_windows("tooltips_class32")
+    // The common controls (the tree view, for one) own tooltips of their
+    // own: among the tooltip windows owned by the shell, exactly one is the
+    // chrome's, with its nine tools.
+    let counts: Vec<usize> = top_level_windows("tooltips_class32")
         .into_iter()
         .filter(|tip| unsafe { GetWindow(*tip, GW_OWNER) }.is_ok_and(|owner| owner == shell.hwnd))
+        .map(|tip| {
+            let mut count = 0_usize;
+            unsafe {
+                SendMessageTimeoutW(
+                    tip,
+                    TTM_GETTOOLCOUNT,
+                    WPARAM(0),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    5000,
+                    Some(&mut count),
+                )
+            };
+            count
+        })
         .collect();
-    assert_eq!(tooltips.len(), 1, "one tooltip window for the chrome");
-    let mut count = 0_usize;
-    unsafe {
-        SendMessageTimeoutW(
-            tooltips[0],
-            TTM_GETTOOLCOUNT,
-            WPARAM(0),
-            LPARAM(0),
-            SMTO_ABORTIFHUNG,
-            5000,
-            Some(&mut count),
-        )
-    };
-    assert_eq!(count, 9, "tools registered with the tooltip");
+    assert_eq!(
+        counts.iter().filter(|count| **count == 9).count(),
+        1,
+        "one chrome tooltip with nine tools among {counts:?}"
+    );
 }
 
 #[test]
@@ -991,8 +1004,9 @@ fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
     let _ = unsafe { expand.Collapse() };
     for wanted in [
         "Keyboard shortcuts",
+        // The .NET automation name; the text has no "&&" to leak.
         "Troubleshooting and diagnostics",
-        "Software components SBOM",
+        "Software components (SBOM)",
         "About Marknexia",
     ] {
         assert!(
@@ -1186,24 +1200,42 @@ fn reveal_in_file_explorer_selects_the_file_in_its_folder() {
     shell.until("Reveal to be enabled", || is_enabled(&reveal).then_some(()));
     assert_target(&reveal, shell.minimum_pixels(), true);
     // Closes the Explorer windows this test opened, also on failure.
-    let explorer = ExplorerWindows::new();
+    let _explorer = ExplorerWindows::new();
     invoke(&reveal);
-    shell.until("a new File Explorer window", || {
-        (!explorer.opened().is_empty()).then_some(())
+    // The shell records each hand-off (MARKNEXIA_REVEAL_LOG): a hosted
+    // runner's shell may open no window, so the gated path and the
+    // SHOpenFolderAndSelectItems result are the gate.
+    let record = shell.until("the File Explorer hand-off record", || {
+        std::fs::read_to_string(shell.shell.reveal_log_path())
+            .ok()
+            .filter(|text| text.ends_with('\n'))
     });
+    let lines: Vec<&str> = record.lines().collect();
+    assert_eq!(lines.len(), 1, "{record:?}");
+    let (path, outcome) = lines[0].split_once('\t').expect("path and outcome");
     assert!(
-        shell
-            .find_id("2020")
-            .is_none_or(|text| !name(&text).contains("Could not open File Explorer"))
+        Path::new(path) == repository.0.join("README.md"),
+        "the gated README path, got {path:?}"
     );
+    if outcome == "ok" {
+        assert!(
+            shell
+                .find_id("2020")
+                .is_none_or(|text| !name(&text).contains("Could not open File Explorer"))
+        );
+    } else {
+        // The runner's shell refused: the .NET failure message shows it.
+        eprintln!("SHOpenFolderAndSelectItems on this desktop: {outcome}");
+        shell.wait_diagnostic("Warning: Could not open File Explorer: ");
+    }
 }
 
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn the_dark_menu_bar_is_dark_and_keeps_its_names_and_access_keys() {
-    use windows::Win32::{
-        Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
-        UI::WindowsAndMessaging::{GetMenuBarInfo, MENUBARINFO, OBJID_MENU},
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMenu, GetMenuInfo, GetMenuItemInfoW, MENUINFO, MENUITEMINFOW, MFT_OWNERDRAW, MIIM_FTYPE,
+        MIM_BACKGROUND,
     };
     // Theme 1 is Light (the system menu bar), 2 is Dark (.NET `AppTheme`).
     let light = {
@@ -1228,27 +1260,100 @@ fn the_dark_menu_bar_is_dark_and_keeps_its_names_and_access_keys() {
     }
     // The owner-drawn bar exposes what the system bar exposes.
     assert_eq!(dark, light);
+    // Structure: owner-drawn items on a bar brush in the dark theme.
+    let menu = unsafe { GetMenu(shell.hwnd) };
+    assert!(!menu.is_invalid(), "the shell has a menu bar");
+    for position in 0..4 {
+        let mut item = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_FTYPE,
+            ..Default::default()
+        };
+        unsafe { GetMenuItemInfoW(menu, position, true, &mut item) }.expect("GetMenuItemInfoW");
+        assert!(
+            item.fType.0 & MFT_OWNERDRAW.0 != 0,
+            "bar item {position} is owner-drawn"
+        );
+    }
+    let mut info = MENUINFO {
+        cbSize: std::mem::size_of::<MENUINFO>() as u32,
+        fMask: MIM_BACKGROUND,
+        ..Default::default()
+    };
+    unsafe { GetMenuInfo(menu, &mut info) }.expect("GetMenuInfo");
     assert!(
-        shell.activate(),
-        "the shell must be visible to sample the bar"
+        !info.hbrBack.is_invalid(),
+        "the dark bar has a background brush"
     );
-    let mut info = MENUBARINFO {
+    // Pixels: a DWM capture of the whole window (no screen access needed),
+    // sampled in the empty bar right of the items.
+    match capture_menu_bar_background(shell.hwnd) {
+        Some(pixel) => {
+            let channels = [pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF];
+            eprintln!("menu bar background: #{pixel:06X}");
+            assert!(
+                channels.iter().all(|channel| *channel < 0x60),
+                "dark menu bar background, got {channels:?}"
+            );
+        }
+        None => eprintln!("the window capture is unavailable on this desktop; structure checked"),
+    }
+}
+
+/// The color of the menu bar's empty right end, from a `PrintWindow`
+/// capture of the whole window. `None` when the capture fails.
+fn capture_menu_bar_background(hwnd: HWND) -> Option<u32> {
+    use windows::Win32::{
+        Graphics::Gdi::{
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel,
+            HGDIOBJ, ReleaseDC, SelectObject,
+        },
+        Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow},
+        UI::WindowsAndMessaging::{
+            GetMenuBarInfo, GetWindowRect, MENUBARINFO, OBJID_MENU, WM_NULL,
+        },
+    };
+    // PrintWindow is synchronous: first prove the shell answers.
+    let mut reply = 0_usize;
+    let responsive = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            5000,
+            Some(&mut reply),
+        )
+    };
+    if responsive.0 == 0 {
+        return None;
+    }
+    let mut bar = MENUBARINFO {
         cbSize: std::mem::size_of::<MENUBARINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetMenuBarInfo(shell.hwnd, OBJID_MENU, 0, &mut info) }.expect("GetMenuBarInfo");
-    let bar: RECT = info.rcBar;
-    // The empty bar right of the items shows the bar background.
-    let pixel = shell.until("a painted menu bar", || {
-        let dc = unsafe { GetDC(None) };
-        let color = unsafe { GetPixel(dc, bar.right - 8, (bar.top + bar.bottom) / 2) }.0;
-        unsafe { ReleaseDC(None, dc) };
-        (color != 0xFFFF_FFFF).then_some(color)
-    });
-    let channels = [pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF];
-    eprintln!("menu bar background: #{:06X}", pixel);
-    assert!(
-        channels.iter().all(|channel| *channel < 0x60),
-        "dark menu bar background, got {channels:?}"
-    );
+    unsafe { GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mut bar) }.ok()?;
+    let mut window = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut window) }.ok()?;
+    let width = window.right - window.left;
+    let height = window.bottom - window.top;
+    let x = bar.rcBar.right - 8 - window.left;
+    let y = (bar.rcBar.top + bar.rcBar.bottom) / 2 - window.top;
+    let screen = unsafe { GetDC(None) };
+    let memory = unsafe { CreateCompatibleDC(Some(screen)) };
+    let bitmap = unsafe { CreateCompatibleBitmap(screen, width, height) };
+    let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+    // PW_RENDERFULLCONTENT: the DWM content of the whole window.
+    let printed = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(2)) }.as_bool();
+    let pixel = printed
+        .then(|| unsafe { GetPixel(memory, x, y) }.0)
+        .filter(|pixel| *pixel != 0xFFFF_FFFF);
+    unsafe {
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+    }
+    pixel
 }

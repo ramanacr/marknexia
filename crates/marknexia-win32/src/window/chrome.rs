@@ -530,20 +530,6 @@ impl ChromeState {
         // Annotations are cleared while the controls still exist; oleacc
         // keeps them per HWND otherwise.
         if let (Some(names), Some(controls)) = (self.names.take(), self.controls) {
-            if let Some(menu) = controls.menu {
-                // SAFETY: plain query of the shell's own menu bar.
-                let help = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSubMenu(menu, 3) };
-                for id in [MENU_TROUBLESHOOTING, MENU_SBOM] {
-                    // SAFETY: plain COM call on the UI thread.
-                    let _ = unsafe {
-                        names.ClearHmenuProps(
-                            help,
-                            id as u32,
-                            &[PROPID_ACC_NAME, Name_Property_GUID],
-                        )
-                    };
-                }
-            }
             for window in all_windows(&controls) {
                 // SAFETY: plain COM call on the UI thread; no callback into
                 // the shell.
@@ -2528,32 +2514,6 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
     }
     for (window, name) in named {
         set_accessible_name(&names, window, name);
-    }
-    // Menu items take their name from their text; these two carry the
-    // .NET `AutomationProperties.Name` instead ("&" and "(SBOM)" differ).
-    if let Some(menu) = controls.menu {
-        // SAFETY: plain query of the shell's own menu bar.
-        let help = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSubMenu(menu, 3) };
-        if !help.is_invalid() {
-            for (id, name) in [
-                (MENU_TROUBLESHOOTING, "Troubleshooting and diagnostics"),
-                (MENU_SBOM, "Software components SBOM"),
-            ] {
-                let text = wide(name);
-                for property in [PROPID_ACC_NAME, Name_Property_GUID] {
-                    // SAFETY: the buffer is NUL-terminated and outlives the
-                    // call (oleacc copies it).
-                    let _ = unsafe {
-                        names.SetHmenuPropStr(
-                            help,
-                            id as u32,
-                            property,
-                            PCWSTR::from_raw(text.as_ptr()),
-                        )
-                    };
-                }
-            }
-        }
     }
     for label in [
         controls.sidebar.outline_label,
