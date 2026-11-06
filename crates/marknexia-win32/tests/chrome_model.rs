@@ -7,12 +7,14 @@ use marknexia_core::contracts::DiagnosticSeverity;
 use marknexia_files::repository::{LimitsHit, RepositoryTree, RepositoryTreeNode};
 use marknexia_win32::{
     chrome_model::{
-        ChromeCommand, DiagnosticsBar, OutlineEntry, SidebarMode, SidebarResize, TabLocation,
-        TreeArena, about_text, clamp_sidebar_width, help_text, remote_assets_notice,
-        repository_header, resize_sidebar, route_chrome_key, same_document_path,
+        ChromeCommand, DiagnosticsBar, DiagnosticsFacts, OutlineEntry, SidebarMode, SidebarResize,
+        TabLocation, TreeArena, about_text, anchor_clipboard_text, anchor_copied_notice,
+        clamp_sidebar_width, compact_transition, diagnostics_report, dotnet_architecture,
+        help_text, remote_assets_notice, repository_header, resize_sidebar, reveal_allowed,
+        reveal_failed_notice, route_chrome_key, same_document_path, sbom_components,
         sidebar_resize_key, sidebar_width_dip,
     },
-    layout::{Dip, ShellLayout, ShellLayoutRequest},
+    layout::{Dip, ShellLayout, ShellLayoutRequest, is_compact},
 };
 
 #[test]
@@ -277,4 +279,116 @@ fn layout_uses_the_persisted_sidebar_width_and_carves_the_diagnostics_bar() {
     assert_eq!(hidden.sidebar.width, 0);
     assert_eq!(hidden.splitter.width, 0);
     assert_eq!(hidden.diagnostics.width, 1200);
+}
+
+#[test]
+fn the_anchor_copy_is_only_the_anchor() {
+    assert_eq!(
+        anchor_clipboard_text("gfm-full-features-test"),
+        "#gfm-full-features-test"
+    );
+    assert_eq!(anchor_copied_notice("tables"), "Copied #tables");
+    assert_eq!(
+        reveal_failed_notice("Access is denied."),
+        "Could not open File Explorer: Access is denied."
+    );
+}
+
+#[test]
+fn reveal_passes_the_path_gate_and_stays_in_the_repository() {
+    let root = Path::new(r"C:\repo");
+    assert!(reveal_allowed(
+        Path::new(r"C:\repo\docs\guide.md"),
+        Some(root)
+    ));
+    assert!(reveal_allowed(Path::new(r"C:\repo"), Some(root)));
+    assert!(reveal_allowed(Path::new(r"C:\elsewhere\a.md"), None));
+    assert!(!reveal_allowed(Path::new(r"C:\other\a.md"), Some(root)));
+    assert!(!reveal_allowed(Path::new(r"C:\repo\..\x.md"), Some(root)));
+    assert!(!reveal_allowed(Path::new(r"\\.\pipe\x"), None));
+    assert!(!reveal_allowed(Path::new(r"\\server\IPC$\x"), None));
+    assert!(!reveal_allowed(
+        Path::new(r"C:\repo\a.md:stream"),
+        Some(root)
+    ));
+    assert!(!reveal_allowed(Path::new(r"C:\repo\CON"), Some(root)));
+}
+
+#[test]
+fn sbom_components_list_name_and_version_in_dotnet_order() {
+    let json = r#"{"spdxVersion":"SPDX-2.3","packages":[
+        {"name":"zeta","versionInfo":"1.0"},
+        {"name":"Alpha","versionInfo":"2.1.0"},
+        {"name":"beta","versionInfo":"0.3"},
+        {"name":"no-version"}
+    ]}"#;
+    assert_eq!(
+        sbom_components(json).unwrap(),
+        ["Alpha  2.1.0", "beta  0.3", "no-version", "zeta  1.0"]
+    );
+    for broken in [
+        "",
+        "not json",
+        "{}",
+        r#"{"packages": 3}"#,
+        r#"{"packages": [{"versionInfo": "1"}]}"#,
+        r#"{"packages": [{"name": 7}]}"#,
+    ] {
+        assert!(sbom_components(broken).is_err(), "{broken:?}");
+    }
+    assert_eq!(
+        sbom_components(r#"{"packages": []}"#).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_diagnostics_copy_matches_the_dotnet_lines() {
+    let facts = DiagnosticsFacts {
+        version: "1.0.18".to_owned(),
+        os: "Microsoft Windows NT 10.0.26200.0".to_owned(),
+        architecture: dotnet_architecture("x86_64").to_owned(),
+        app_path: r"C:\Apps\Marknexia\".to_owned(),
+        local_data: r"C:\Users\u\AppData\Local\Marknexia".to_owned(),
+        webview_data: r"C:\Users\u\AppData\Local\Marknexia\WebView2".to_owned(),
+        sbom_present: false,
+        remote_images: true,
+    };
+    assert_eq!(
+        diagnostics_report(&facts),
+        [
+            "Marknexia diagnostics",
+            "Version: 1.0.18",
+            "OS: Microsoft Windows NT 10.0.26200.0",
+            "Architecture: X64",
+            r"App path: C:\Apps\Marknexia\",
+            r"Local data: C:\Users\u\AppData\Local\Marknexia",
+            r"WebView2 data: C:\Users\u\AppData\Local\Marknexia\WebView2",
+            "SBOM present: False",
+            "Remote images enabled: True",
+        ]
+        .join("\r\n")
+    );
+    assert_eq!(dotnet_architecture("aarch64"), "Arm64");
+    assert_eq!(dotnet_architecture("x86"), "X86");
+}
+
+#[test]
+fn the_compact_breakpoint_and_pane_follow_the_dotnet_visual_states() {
+    // 720 DIPs: below is compact, at or above is wide, at every DPI.
+    for dpi in [96, 120, 144, 192] {
+        let breakpoint = Dip::COMPACT_BREAKPOINT.to_pixels(dpi);
+        assert!(!is_compact(breakpoint, dpi), "dpi={dpi}");
+        assert!(is_compact(breakpoint - 1, dpi), "dpi={dpi}");
+    }
+    assert_eq!(Dip::COMPACT_SIDEBAR_WIDTH, Dip(240));
+    // The first layout: compact closes the pane; wide keeps the setting.
+    assert_eq!(compact_transition(None, true), Some(false));
+    assert_eq!(compact_transition(None, false), None);
+    // Crossing the breakpoint: CompactWindow closes, WideWindow opens.
+    assert_eq!(compact_transition(Some(false), true), Some(false));
+    assert_eq!(compact_transition(Some(true), false), Some(true));
+    // Staying on one side changes nothing (the toggle keeps working).
+    assert_eq!(compact_transition(Some(true), true), None);
+    assert_eq!(compact_transition(Some(false), false), None);
 }

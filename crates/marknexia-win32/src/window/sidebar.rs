@@ -33,10 +33,11 @@ use windows::{
 };
 
 use super::{
-    WindowError, app_state_handle,
+    WindowError, app_state_handle, child_style,
     chrome::{
-        self, ID_OUTLINE, ID_OUTLINE_LABEL, ID_RECENT, ID_RECENT_LABEL, ID_SIDEBAR_HEADER,
-        ID_SPLITTER, ID_TREE, ID_TREE_LABEL, SidebarControls, dip, send, set_bounds, wide,
+        self, ID_COPY_ANCHOR, ID_OUTLINE, ID_OUTLINE_LABEL, ID_RECENT, ID_RECENT_LABEL, ID_REVEAL,
+        ID_SIDEBAR_HEADER, ID_SPLITTER, ID_TREE, ID_TREE_LABEL, SidebarControls, dip, send,
+        set_bounds, wide,
     },
     create_child, fill, native_color,
 };
@@ -83,8 +84,10 @@ const TVE_EXPAND: usize = 0x2;
 const TVGN_CARET: usize = 0x9;
 /// `TVHT_ONITEMICON | TVHT_ONITEMLABEL | TVHT_ONITEMSTATEICON`.
 const TVHT_ONITEM: u32 = 0x46;
-/// Height of the heading above the list, in DIPs (text only, not a target).
-const HEADER_HEIGHT: u32 = 28;
+/// Height of the heading row above the list, in DIPs: it holds the
+/// 44-DIP row action button.
+const HEADER_HEIGHT: u32 = 44;
+const BS_OWNERDRAW: u32 = 0x0B;
 
 /// The view selector (.NET `SidebarModeSelector`, a two-tab `TabView`; the
 /// third tab is CHROME-1). It is the `ShellControls::sidebar` control, so F6
@@ -186,6 +189,20 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
         WINDOW_STYLE(list_style),
         ID_RECENT as isize,
     )?;
+    // The .NET row buttons (CHROME-3), one per view: each acts on the
+    // selected row of its list. Shown with their view by `layout`.
+    let action = |name: PCWSTR, id: usize| {
+        create_child(
+            parent,
+            instance,
+            w!("BUTTON"),
+            name,
+            WINDOW_STYLE(child_style(BS_OWNERDRAW).0 & !WS_VISIBLE.0),
+            id as isize,
+        )
+    };
+    let copy_anchor = action(w!("Copy heading anchor"), ID_COPY_ANCHOR)?;
+    let reveal = action(w!("Reveal in File Explorer"), ID_REVEAL)?;
     let splitter = create_child(
         parent,
         instance,
@@ -202,6 +219,8 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
         outline,
         tree,
         recent,
+        copy_anchor,
+        reveal,
         splitter,
     })
 }
@@ -257,15 +276,30 @@ pub(super) fn layout(
         .saturating_sub(selector_height)
         .min(dip(HEADER_HEIGHT, dpi));
     let header_inset = dip(16, dpi).min(width);
+    // The row action button sits at the right end of the heading row.
+    let action = target.min(header_height).min(width);
+    let action_rect = PixelRect {
+        x: sidebar.x.saturating_add(width.saturating_sub(action)),
+        y: sidebar.y.saturating_add(selector_height),
+        width: action,
+        height: action,
+    };
     set_bounds(
         controls.header,
         PixelRect {
             x: sidebar.x.saturating_add(header_inset),
             y: sidebar.y.saturating_add(selector_height),
-            width: width.saturating_sub(header_inset),
+            width: width.saturating_sub(header_inset).saturating_sub(action),
             height: header_height,
         },
     );
+    for (window, view) in [
+        (controls.copy_anchor, SidebarMode::Outline),
+        (controls.reveal, SidebarMode::Repository),
+    ] {
+        set_bounds(window, action_rect);
+        chrome::show(window, view == mode && sidebar.width > 0 && action > 0);
+    }
     let list_top = selector_height.saturating_add(header_height);
     let list = PixelRect {
         x: sidebar.x,

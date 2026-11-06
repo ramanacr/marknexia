@@ -147,6 +147,20 @@ pub fn sidebar_width_dip(width: f64) -> u32 {
     clamp_sidebar_width(width).round() as u32
 }
 
+/// The pane state when the window crosses the 720-DIP breakpoint, from the
+/// .NET visual states: `CompactWindow` sets `IsPaneOpen = False`,
+/// `WideWindow` sets `IsPaneOpen = True`. Neither is saved. `previous` is
+/// `None` before the first layout; a wide first layout keeps the saved
+/// `IsSidebarOpen`. Returns the new visibility, or `None` for no change.
+#[must_use]
+pub fn compact_transition(previous: Option<bool>, compact: bool) -> Option<bool> {
+    match (previous, compact) {
+        (None | Some(false), true) => Some(false),
+        (Some(true), false) => Some(true),
+        (None, false) | (Some(true), true) | (Some(false), false) => None,
+    }
+}
+
 /// One heading of the active document (.NET `OutlineItemViewModel`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutlineEntry {
@@ -179,6 +193,10 @@ pub enum ChromeCommand {
     SetTheme(ThemePreference),
     ShowHelp,
     ShowAbout,
+    /// Help > Troubleshooting & diagnostics (.NET `ShowSelfHelp_Click`).
+    ShowTroubleshooting,
+    /// Help > Software components (SBOM) (.NET `ShowSbom_Click`).
+    ShowSbom,
 }
 
 const VK_LEFT: u16 = 0x25;
@@ -313,6 +331,167 @@ pub fn about_text(version: &str) -> String {
     format!(
         "Marknexia\nRead. Explore. Understand.\nGitHub-style Markdown. Native on Windows.\n\nVersion {version}\nOffline-first rendering \u{2022} Secure local navigation"
     )
+}
+
+/// .NET `CopyAnchor_Click`: the clipboard gets only the anchor, `#slug`.
+#[must_use]
+pub fn anchor_clipboard_text(slug: &str) -> String {
+    format!("#{slug}")
+}
+
+/// .NET `CopyAnchor_Click` confirmation.
+#[must_use]
+pub fn anchor_copied_notice(slug: &str) -> String {
+    format!("Copied #{slug}")
+}
+
+/// Shown when the clipboard could not take the anchor (.NET has no
+/// handler; the exception would end the click).
+pub const ANCHOR_COPY_FAILED: &str = "The heading anchor could not be copied.";
+
+/// .NET `RevealFile_Click` failure text, followed by the error message.
+#[must_use]
+pub fn reveal_failed_notice(error: &str) -> String {
+    format!("Could not open File Explorer: {error}")
+}
+
+/// The path gate for "Reveal in File Explorer": `path` must pass
+/// `GatedPath` (no device, pipe, `.`/`..` or stream forms) and, with a
+/// repository open, lie inside its gated root.
+#[must_use]
+pub fn reveal_allowed(path: &Path, root: Option<&Path>) -> bool {
+    use marknexia_files::path::GatedPath;
+    let Ok(gated) = GatedPath::new(&path.to_string_lossy()) else {
+        return false;
+    };
+    match root {
+        None => true,
+        Some(root) => {
+            GatedPath::new(&root.to_string_lossy()).is_ok_and(|root| gated.is_within(&root))
+        }
+    }
+}
+
+/// The SPDX inventory that .NET ships beside the executable
+/// (`AppContext.BaseDirectory`).
+pub const SBOM_FILE_NAME: &str = "marknexia-sbom.spdx.json";
+/// Larger inventories are refused instead of read into memory.
+pub const SBOM_MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub const SBOM_TITLE: &str = "Marknexia software components";
+pub const SBOM_INTRO: &str = "Software components included in this build. Copy the SPDX inventory for dependency and checksum details.";
+pub const SBOM_LIST_NAME: &str = "Software components and versions";
+pub const SBOM_COPY_BUTTON: &str = "Copy SBOM";
+pub const SBOM_MISSING: &str =
+    "The software components inventory is missing. Reinstall Marknexia from its release package.";
+pub const SBOM_FAILED: &str =
+    "The software components inventory could not be opened or copied. Try reopening Marknexia.";
+pub const SBOM_COPIED: &str = "Software components inventory copied.";
+
+/// The SBOM could not be read as an SPDX document with a package list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SbomError;
+
+/// .NET `ShowSbom_Click`: `"{name}  {versionInfo}"` for each package,
+/// ordered ordinal case-insensitively. A package without `versionInfo`
+/// (optional in SPDX) shows its name only; .NET would fail on it.
+///
+/// # Errors
+///
+/// The text is not JSON, or has no `packages` array of objects with a
+/// string `name`.
+pub fn sbom_components(json: &str) -> Result<Vec<String>, SbomError> {
+    let document: serde_json::Value = serde_json::from_str(json).map_err(|_| SbomError)?;
+    let packages = document
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(SbomError)?;
+    let mut components = packages
+        .iter()
+        .map(|package| {
+            let name = package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SbomError)?;
+            Ok(
+                match package
+                    .get("versionInfo")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(version) => format!("{name}  {version}"),
+                    None => name.to_owned(),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    components.sort_by(|left, right| {
+        left.chars()
+            .map(marknexia_core::text::fold_char)
+            .cmp(right.chars().map(marknexia_core::text::fold_char))
+    });
+    Ok(components)
+}
+
+pub const TROUBLESHOOTING_TITLE: &str = "Marknexia troubleshooting";
+pub const TROUBLESHOOTING_HEADING: &str = "Common fixes";
+pub const TROUBLESHOOTING_TEXT: &str = "If a document looks stale, press F5. If an image is unavailable, confirm its path is relative to the Markdown file and that the file is inside the opened workspace. Remote images are blocked unless enabled in Settings. For startup or rendering problems, reopen the file and use the diagnostics copy below when reporting the issue.";
+pub const TROUBLESHOOTING_DATA_TEXT: &str = "Local data and WebView2 cache are kept under the Marknexia folder. Closing Marknexia before moving or deleting that cache is recommended.";
+pub const COPY_DIAGNOSTICS_BUTTON: &str = "Copy diagnostics";
+pub const OPEN_DATA_FOLDER_BUTTON: &str = "Open data folder";
+pub const DIAGNOSTICS_COPIED: &str = "Diagnostics copied.";
+pub const TROUBLESHOOTING_FAILED: &str =
+    "Troubleshooting information could not be opened. Try reopening Marknexia.";
+
+/// The facts in the .NET troubleshooting copy (`ShowSelfHelp_Click`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticsFacts {
+    pub version: String,
+    /// .NET `Environment.OSVersion.VersionString`.
+    pub os: String,
+    /// .NET `RuntimeInformation.ProcessArchitecture`.
+    pub architecture: String,
+    /// .NET `AppContext.BaseDirectory` (with a trailing separator).
+    pub app_path: String,
+    pub local_data: String,
+    pub webview_data: String,
+    pub sbom_present: bool,
+    pub remote_images: bool,
+}
+
+/// .NET formats `bool` as `True` or `False`.
+fn dotnet_bool(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
+}
+
+/// The text "Copy diagnostics" puts on the clipboard, line for line as .NET.
+#[must_use]
+pub fn diagnostics_report(facts: &DiagnosticsFacts) -> String {
+    [
+        "Marknexia diagnostics".to_owned(),
+        format!("Version: {}", facts.version),
+        format!("OS: {}", facts.os),
+        format!("Architecture: {}", facts.architecture),
+        format!("App path: {}", facts.app_path),
+        format!("Local data: {}", facts.local_data),
+        format!("WebView2 data: {}", facts.webview_data),
+        format!("SBOM present: {}", dotnet_bool(facts.sbom_present)),
+        format!(
+            "Remote images enabled: {}",
+            dotnet_bool(facts.remote_images)
+        ),
+    ]
+    .join("\r\n")
+}
+
+/// .NET `Architecture` names for a Rust `std::env::consts::ARCH` value.
+#[must_use]
+pub fn dotnet_architecture(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "X64",
+        "aarch64" => "Arm64",
+        "x86" => "X86",
+        "arm" => "Arm",
+        other => other,
+    }
 }
 
 /// Ordinal case-insensitive path equality, as .NET compares open tabs.

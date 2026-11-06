@@ -326,6 +326,7 @@ dependencies = [
  "marknexia-rendering",
  "marknexia-security",
  "marknexia-webview",
+ "serde_json",
  "windows",
  "windows-core",
 ]

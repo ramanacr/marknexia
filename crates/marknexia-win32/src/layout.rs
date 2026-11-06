@@ -11,10 +11,22 @@ impl Dip {
     pub const SIDEBAR_WIDTH: Self = Self(280);
     /// The .NET `SidebarResizeHandle` width, inside the sidebar's right edge.
     pub const SPLITTER_WIDTH: Self = Self(6);
+    /// The .NET `WideWindow` trigger (`AdaptiveTrigger MinWindowWidth`):
+    /// narrower windows use the compact layout.
+    pub const COMPACT_BREAKPOINT: Self = Self(720);
+    /// The .NET `CompactWindow` `OpenPaneLength`.
+    pub const COMPACT_SIDEBAR_WIDTH: Self = Self(240);
 
     pub fn to_pixels(self, dpi: u32) -> u32 {
         self.0.saturating_mul(dpi).saturating_add(BASE_DPI - 1) / BASE_DPI
     }
+}
+
+/// True when a client `width` in pixels at `dpi` is below the .NET
+/// 720-DIP breakpoint (the `CompactWindow` visual state).
+pub fn is_compact(width: u32, dpi: u32) -> bool {
+    u64::from(width) * u64::from(BASE_DPI)
+        < u64::from(Dip::COMPACT_BREAKPOINT.0) * u64::from(dpi.max(1))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

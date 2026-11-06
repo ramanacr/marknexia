@@ -51,19 +51,25 @@ use windows::Win32::{
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::Gdi::{DeleteObject, HFONT, HGDIOBJ, InvalidateRect},
+        Graphics::Gdi::{
+            COLOR_WINDOW, DeleteObject, GetSysColorBrush, HDC, HFONT, HGDIOBJ, InvalidateRect,
+            SetBkColor, SetTextColor,
+        },
         UI::{
-            Controls::{DRAWITEMSTRUCT, HTREEITEM, NMHDR, NMTREEVIEWW, SetWindowTheme},
+            Controls::{
+                DRAWITEMSTRUCT, HTREEITEM, MEASUREITEMSTRUCT, NMHDR, NMTREEVIEWW, SetWindowTheme,
+            },
             Input::KeyboardAndMouse::{
                 EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN,
                 VK_SHIFT, VK_SPACE, VK_TAB,
             },
             WindowsAndMessaging::{
-                CheckMenuItem, GetNextDlgTabItem, GetWindowThreadProcessId, HMENU, HWND_TOP,
-                IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW,
-                SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
-                SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND, WM_DRAWITEM,
-                WM_KEYDOWN, WM_NOTIFY, WM_SYSKEYDOWN,
+                CheckMenuItem, DestroyIcon, GetNextDlgTabItem, GetWindowThreadProcessId, HICON,
+                HMENU, HWND_TOP, IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG,
+                PostMessageW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND,
+                WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NOTIFY,
+                WM_SYSKEYDOWN,
             },
         },
     },
@@ -73,16 +79,21 @@ use windows::{
 use super::{
     AppState, ShellControls, WM_OPEN_DIALOG, WindowError, app_state_handle,
     diagnostics::{self, DiagnosticsControls},
-    dialogs, execute_command, move_child, open_document, palette, reflow, refresh_status,
-    restore_session, select_tab_id, settings_bridge, sidebar, start_render, take_session,
+    dialogs, execute_command, menu_theme, move_child, native_color, open_document, palette, reflow,
+    refresh_status, restore_session, select_tab_id, settings_bridge, shell_ops, sidebar,
+    start_render, take_session,
     toolbar::{self, Toolbar},
     update_theme,
 };
 use crate::{
     chrome_model::{
-        ChromeCommand, DiagnosticsBar, OutlineEntry, REPOSITORY_INCOMPLETE_NOTICE, SidebarMode,
-        SidebarResize, TabLocation, TreeArena, TreeNode, clamp_sidebar_width, remote_assets_notice,
-        repository_header, resize_sidebar, route_chrome_key, same_document_path, sidebar_width_dip,
+        ANCHOR_COPY_FAILED, ChromeCommand, DIAGNOSTICS_COPIED, DiagnosticsBar, DiagnosticsFacts,
+        OutlineEntry, REPOSITORY_INCOMPLETE_NOTICE, SBOM_COPIED, SBOM_FAILED, SBOM_FILE_NAME,
+        SBOM_MISSING, SidebarMode, SidebarResize, TROUBLESHOOTING_FAILED, TabLocation, TreeArena,
+        TreeNode, anchor_clipboard_text, anchor_copied_notice, clamp_sidebar_width,
+        compact_transition, diagnostics_report, dotnet_architecture, remote_assets_notice,
+        repository_header, resize_sidebar, reveal_failed_notice, route_chrome_key,
+        same_document_path, sidebar_width_dip,
     },
     documents::{OpenError, check_document_path},
     keyboard::ShellCommand,
@@ -125,6 +136,16 @@ pub(super) const MENU_FIND: usize = 2113;
 pub(super) const MENU_REMOTE_ASSETS: usize = 2121;
 pub(super) const MENU_HELP: usize = 2131;
 pub(super) const MENU_ABOUT: usize = 2132;
+pub(super) const MENU_TROUBLESHOOTING: usize = 2133;
+pub(super) const MENU_SBOM: usize = 2134;
+/// The row buttons (CHROME-3): "Copy heading anchor" for the selected
+/// outline row, "Reveal in File Explorer" for the selected tree row.
+pub(super) const ID_COPY_ANCHOR: usize = 2018;
+pub(super) const ID_REVEAL: usize = 2019;
+/// The brand area (.NET `BrandIcon` and `BrandDetails`).
+pub(super) const ID_BRAND_ICON: usize = 2030;
+pub(super) const ID_BRAND_NAME: usize = 2031;
+pub(super) const ID_BRAND_TAGLINE: usize = 2032;
 /// `ShellControls::sidebar`, the view selector.
 const ID_SELECTOR: usize = 1003;
 
@@ -154,6 +175,10 @@ pub(super) struct SidebarControls {
     pub outline: HWND,
     pub tree: HWND,
     pub recent: HWND,
+    /// "Copy heading anchor" (outline view) and "Reveal in File Explorer"
+    /// (repository view), at the right of the heading row.
+    pub copy_anchor: HWND,
+    pub reveal: HWND,
     pub splitter: HWND,
 }
 
@@ -163,23 +188,48 @@ pub(super) struct ChromeControls {
     pub sidebar: SidebarControls,
     pub diagnostics: DiagnosticsControls,
     pub menu: Option<HMENU>,
+    /// The tooltip window for the toolbar and sidebar buttons.
+    pub tooltip: Option<HWND>,
 }
 
-/// DPI-scaled fonts for chrome controls, deleted on drop.
+/// DPI-scaled GDI objects for chrome controls, deleted on drop.
 struct Fonts {
     dpi: u32,
     text: HFONT,
     glyph: HFONT,
+    /// .NET `BrandDetails`: the name and the tagline.
+    brand_name: HFONT,
+    brand_tagline: HFONT,
+    brand_icon: Option<HICON>,
+}
+
+impl Fonts {
+    fn new(dpi: u32) -> Self {
+        let (brand_name, brand_tagline) = toolbar::brand_fonts(dpi);
+        Self {
+            dpi,
+            text: toolbar::text_font(dpi),
+            glyph: toolbar::glyph_font(dpi),
+            brand_name,
+            brand_tagline,
+            brand_icon: toolbar::brand_icon(dpi),
+        }
+    }
 }
 
 impl Drop for Fonts {
     fn drop(&mut self) {
-        for font in [self.text, self.glyph] {
+        for font in [self.text, self.glyph, self.brand_name, self.brand_tagline] {
             if !font.is_invalid() {
                 // SAFETY: each font was created by this struct and is no
                 // longer selected: controls get the replacement first.
                 let _ = unsafe { DeleteObject(HGDIOBJ(font.0)) };
             }
+        }
+        if let Some(icon) = self.brand_icon.take() {
+            // SAFETY: the icon was created by this struct; the brand image
+            // repaints with the replacement.
+            let _ = unsafe { DestroyIcon(icon) };
         }
     }
 }
@@ -191,7 +241,18 @@ enum ChromeAction {
     OpenRecent(usize),
     Open(PathBuf),
     DismissDiagnostic,
+    /// The "Copy heading anchor" button (.NET `CopyAnchor_Click`).
+    CopyAnchor,
+    /// The "Reveal in File Explorer" button (.NET `RevealFile_Click`).
+    Reveal,
     Sync,
+}
+
+// A troubleshooting or software components dialog is open (.NET
+// `_isSelfHelpDialogOpen`, `_isSbomDialogOpen`): a second request is
+// ignored. Kept outside the state, so the check never borrows it.
+thread_local! {
+    static HELP_DIALOG_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// File-system work done off the UI thread, so an offline UNC path never
@@ -223,6 +284,15 @@ enum WorkerResult {
         root: PathBuf,
         exists: bool,
     },
+    /// The facts for the troubleshooting dialog (the SBOM check touches
+    /// the file system).
+    Troubleshooting(DiagnosticsFacts),
+    /// The SBOM text and its component list, for the dialog.
+    Sbom(Result<(String, Vec<String>), shell_ops::SbomFailure>),
+    /// File Explorer opened, or the error message.
+    Revealed(Result<(), String>),
+    /// The data folder opened, or the error message.
+    DataFolderOpened(Result<(), String>),
 }
 
 // Chrome actions are queued outside `AppState`, so queueing never needs a
@@ -351,6 +421,9 @@ pub(super) struct ChromeState {
     fonts: Option<Fonts>,
     /// Dynamic MSAA/UIA annotations (accessible names and roles).
     names: Option<IAccPropServices>,
+    /// The last layout was below the 720-DIP breakpoint (.NET
+    /// `CompactWindow`); `None` before the first layout after `install`.
+    compact: Option<bool>,
 }
 
 impl ChromeState {
@@ -395,6 +468,7 @@ impl ChromeState {
             shown_recent: Vec::new(),
             fonts: None,
             names: None,
+            compact: None,
         }
     }
 
@@ -412,12 +486,15 @@ impl ChromeState {
         self.allow_remote_assets
     }
 
-    /// Sidebar width and diagnostics state for `ShellLayout`.
+    /// Sidebar width and diagnostics state for `ShellLayout`. The compact
+    /// layout uses the .NET `CompactWindow` pane length (240 DIPs).
     pub(super) fn layout_inputs(&self) -> (Dip, bool) {
-        (
-            Dip(sidebar_width_dip(self.sidebar_width)),
-            self.diagnostics.is_open(),
-        )
+        let width = if self.compact == Some(true) {
+            Dip::COMPACT_SIDEBAR_WIDTH
+        } else {
+            Dip(sidebar_width_dip(self.sidebar_width))
+        };
+        (width, self.diagnostics.is_open())
     }
 
     /// Records the document a render is for. The first render of a path in
@@ -449,6 +526,20 @@ impl ChromeState {
         // Annotations are cleared while the controls still exist; oleacc
         // keeps them per HWND otherwise.
         if let (Some(names), Some(controls)) = (self.names.take(), self.controls) {
+            if let Some(menu) = controls.menu {
+                // SAFETY: plain query of the shell's own menu bar.
+                let help = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSubMenu(menu, 3) };
+                for id in [MENU_TROUBLESHOOTING, MENU_SBOM] {
+                    // SAFETY: plain COM call on the UI thread.
+                    let _ = unsafe {
+                        names.ClearHmenuProps(
+                            help,
+                            id as u32,
+                            &[PROPID_ACC_NAME, Name_Property_GUID],
+                        )
+                    };
+                }
+            }
             for window in all_windows(&controls) {
                 // SAFETY: plain COM call on the UI thread; no callback into
                 // the shell.
@@ -685,6 +776,18 @@ pub(super) fn install(
     let sidebar_controls = sidebar::create(hwnd, instance)?;
     let diagnostics_controls = diagnostics::create(hwnd, instance)?;
     let menu = toolbar::create_menu(hwnd);
+    // .NET `ToolTipService.ToolTip` texts; a missing tooltip window only
+    // loses the tooltips.
+    let tooltip = toolbar::create_tooltips(
+        hwnd,
+        instance,
+        &toolbar,
+        &[
+            (sidebar_controls.splitter, "Drag to resize sidebar"),
+            (sidebar_controls.copy_anchor, "Copy anchor"),
+            (sidebar_controls.reveal, "Reveal in File Explorer"),
+        ],
+    );
     let (store, notice) = match settings_bridge::open() {
         Some((store, notice)) => (Some(store), notice),
         None => (None, None),
@@ -700,19 +803,20 @@ pub(super) fn install(
         app.set_sidebar_visible(settings.is_sidebar_open);
     }
     let mode = SidebarMode::from_setting(settings.sidebar_mode);
-    let fonts = Fonts {
-        dpi,
-        text: toolbar::text_font(dpi),
-        glyph: toolbar::glyph_font(dpi),
-    };
+    let fonts = Fonts::new(dpi);
     let controls = ChromeControls {
         toolbar,
         sidebar: sidebar_controls,
         diagnostics: diagnostics_controls,
         menu,
+        tooltip,
     };
     if let Some(shell) = shell {
-        apply_fonts(&controls, shell, fonts.text);
+        apply_fonts(
+            &controls,
+            shell,
+            (fonts.text, fonts.brand_name, fonts.brand_tagline),
+        );
         order_controls(&controls, shell);
         sidebar::select_mode(shell.sidebar, mode);
     }
@@ -780,6 +884,13 @@ pub(super) fn handle_message(
         // valid for the duration of this message.
         WM_DRAWITEM => unsafe { (lparam.0 as *const DRAWITEMSTRUCT).as_ref() }
             .and_then(|item| on_draw_item(hwnd, item)),
+        // SAFETY: for WM_MEASUREITEM, lParam points to a MEASUREITEMSTRUCT
+        // that is valid and writable for the duration of this message.
+        WM_MEASUREITEM => unsafe { (lparam.0 as *mut MEASUREITEMSTRUCT).as_mut() }
+            .is_some_and(|item| menu_theme::measure(hwnd, item))
+            .then_some(LRESULT(1)),
+        WM_MENUCHAR => menu_theme::menu_char(menu_handle(hwnd), wparam, lparam),
+        WM_CTLCOLORSTATIC => brand_text_color(hwnd, HDC(wparam.0 as *mut c_void), lparam),
         // Dispatched by a nested pump while an outer frame holds the state:
         // run from the message loop instead (input's deferred work).
         WM_CHROME_ACTION | WM_CHROME_WORKER
@@ -798,6 +909,50 @@ pub(super) fn handle_message(
         }
         _ => None,
     }
+}
+
+/// The shell's menu bar, read from the window (no state borrow).
+fn menu_handle(hwnd: HWND) -> Option<HMENU> {
+    // SAFETY: plain query of this thread's window.
+    let menu = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenu(hwnd) };
+    (!menu.is_invalid()).then_some(menu)
+}
+
+/// `WM_CTLCOLORSTATIC` for the brand name and tagline: the shell
+/// background behind them (the dark background, otherwise the system
+/// window color, which is also the high-contrast pair), the name in the
+/// text color and the tagline in the muted one (.NET
+/// `MarknexiaMutedTextBrush`). Other statics keep the shell's handling.
+fn brand_text_color(hwnd: HWND, dc: HDC, lparam: LPARAM) -> Option<LRESULT> {
+    let control = HWND(lparam.0 as *mut c_void);
+    // SAFETY: plain query of a child window of this thread.
+    let id =
+        usize::try_from(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) })
+            .ok()?;
+    if !matches!(id, ID_BRAND_NAME | ID_BRAND_TAGLINE) {
+        return None;
+    }
+    let state = state_of(hwnd)?;
+    let state = state.try_borrow().ok()?;
+    let colors = palette(state.theme);
+    let (background, brush) = match state.brushes.as_ref() {
+        Some(brushes) => (colors.background, brushes.background),
+        // SAFETY: a shared system brush; it is never deleted.
+        None => (ColorSpec::System(SystemColorRole::Window), unsafe {
+            GetSysColorBrush(COLOR_WINDOW)
+        }),
+    };
+    let text = if id == ID_BRAND_NAME {
+        colors.text
+    } else {
+        colors.text_secondary
+    };
+    // SAFETY: the DC belongs to this WM_CTLCOLORSTATIC message.
+    unsafe {
+        SetTextColor(dc, native_color(text));
+        SetBkColor(dc, native_color(background));
+    }
+    Some(LRESULT(brush.0 as isize))
 }
 
 /// Keyboard handling from the message loop, before dispatch: the .NET
@@ -971,12 +1126,36 @@ pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
     }
 }
 
+/// `reflow`, before the layout: applies the .NET `WideWindow` and
+/// `CompactWindow` visual states for a client `width` at `dpi`. Crossing
+/// the 720-DIP breakpoint closes the pane (compact) or opens it (wide),
+/// without saving `IsSidebarOpen`. The caller checked `is_free`.
+pub(super) fn update_compact(state: &Rc<RefCell<AppState>>, width: u32, dpi: u32) {
+    let Ok(mut app) = state.try_borrow_mut() else {
+        return;
+    };
+    // Before `install` the saved pane state is not applied yet.
+    if app.chrome.controls.is_none() || width == 0 {
+        return;
+    }
+    let compact = crate::layout::is_compact(width, dpi);
+    let previous = app.chrome.compact.replace(compact);
+    let Some(visible) = compact_transition(previous, compact) else {
+        return;
+    };
+    let portable = Rc::clone(&app.portable);
+    drop(app);
+    if let Ok(mut portable) = portable.try_borrow_mut() {
+        portable.set_sidebar_visible(visible);
+    }
+}
+
 /// Positions the chrome controls after window.rs placed the shell controls.
 pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    let (shell, dpi, mode, diagnostics_open, refont) = {
+    let (shell, dpi, mode, diagnostics_open, refont, compact, theme) = {
         let Ok(state) = state.try_borrow() else {
             return;
         };
@@ -991,28 +1170,32 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
             state.chrome.mode,
             state.chrome.diagnostics.is_open(),
             refont,
+            state.chrome.compact == Some(true),
+            state.theme,
         )
     };
     let Some(shell) = shell else {
         return;
     };
     if refont {
-        let fonts = Fonts {
-            dpi,
-            text: toolbar::text_font(dpi),
-            glyph: toolbar::glyph_font(dpi),
-        };
-        let text = fonts.text;
-        // The new font is installed before the old one is deleted.
+        let fonts = Fonts::new(dpi);
+        let selected = (fonts.text, fonts.brand_name, fonts.brand_tagline);
+        // The new fonts are installed before the old ones are deleted.
         let previous = {
             let mut state = state.borrow_mut();
             state.chrome.fonts.replace(fonts)
         };
-        with_controls(&state, |controls| apply_fonts(controls, shell, text));
+        with_controls(&state, |controls| {
+            apply_fonts(controls, shell, selected);
+            // The menu font follows the DPI too.
+            if let Some(menu) = controls.menu {
+                menu_theme::apply(hwnd, menu, theme, dpi);
+            }
+        });
         drop(previous);
     }
     with_controls(&state, |controls| {
-        toolbar::layout(controls, shell.command, layout.command_bar, dpi);
+        toolbar::layout(controls, shell.command, layout.command_bar, dpi, compact);
         sidebar::layout(
             shell.sidebar,
             &controls.sidebar,
@@ -1021,6 +1204,16 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
             mode,
             dpi,
         );
+        // The compact pane has the fixed .NET length: no resize handle.
+        if compact {
+            show(controls.sidebar.splitter, false);
+        }
+        // SAFETY: repaint requests for children of this thread; the Open
+        // and Folder faces follow the compact state.
+        unsafe {
+            let _ = InvalidateRect(Some(shell.command), None, true);
+            let _ = InvalidateRect(Some(controls.toolbar.folder), None, true);
+        }
         diagnostics::layout(&controls.diagnostics, layout.diagnostics, dpi);
         let open = diagnostics_open && layout.diagnostics.height > 0;
         show(controls.diagnostics.icon, open);
@@ -1035,9 +1228,18 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
 /// Theme-dependent control styles (dark variants in the dark theme, system
 /// defaults otherwise, so high contrast uses system colors).
 pub(super) fn theme_changed(state: &Rc<RefCell<AppState>>) {
-    let theme = state.borrow().theme;
+    let (theme, dpi, window) = {
+        let state = state.borrow();
+        (state.theme, state.dpi, ACTION_WINDOW.with(Cell::get))
+    };
     let colors = palette(theme);
     with_controls(state, |controls| {
+        // The dark menu bar (owner-drawn items) or the system one.
+        if let Some(menu) = controls.menu
+            && window != 0
+        {
+            menu_theme::apply(HWND(window as *mut c_void), menu, theme, dpi);
+        }
         let dark = theme == EffectiveTheme::Dark;
         let tree = controls.sidebar.tree;
         let explorer = if dark {
@@ -1047,7 +1249,11 @@ pub(super) fn theme_changed(state: &Rc<RefCell<AppState>>) {
         } else {
             PCWSTR::null()
         };
-        for window in [tree, controls.sidebar.outline, controls.sidebar.recent] {
+        // Tooltips follow the theme as the lists do.
+        for window in [tree, controls.sidebar.outline, controls.sidebar.recent]
+            .into_iter()
+            .chain(controls.tooltip)
+        {
             // SAFETY: theme names are static strings.
             let _ = unsafe { SetWindowTheme(window, explorer, PCWSTR::null()) };
         }
@@ -1103,6 +1309,12 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         MENU_REMOTE_ASSETS if clicked => ChromeAction::Command(ChromeCommand::ToggleRemoteAssets),
         MENU_HELP if clicked => ChromeAction::Command(ChromeCommand::ShowHelp),
         MENU_ABOUT if clicked => ChromeAction::Command(ChromeCommand::ShowAbout),
+        MENU_TROUBLESHOOTING if clicked => {
+            ChromeAction::Command(ChromeCommand::ShowTroubleshooting)
+        }
+        MENU_SBOM if clicked => ChromeAction::Command(ChromeCommand::ShowSbom),
+        ID_COPY_ANCHOR if clicked => ChromeAction::CopyAnchor,
+        ID_REVEAL if clicked => ChromeAction::Reveal,
         ID_DIAGNOSTIC_CLOSE if clicked => ChromeAction::DismissDiagnostic,
         ID_THEME if code == CBN_SELCHANGE => {
             let selected = send(HWND(lparam.0 as *mut c_void), CB_GETCURSEL, 0, 0).0;
@@ -1228,14 +1440,26 @@ fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, data: LPARAM) {
 }
 
 fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
+    // The dark menu bar's items (no state borrow).
+    if menu_theme::draw(item) {
+        return Some(LRESULT(1));
+    }
     let id = item.CtlID as usize;
-    let face = toolbar::button_face(id);
-    if !matches!(id, ID_DIAGNOSTIC_ICON | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE) && face.is_none() {
+    if !matches!(
+        id,
+        ID_DIAGNOSTIC_ICON
+            | ID_DIAGNOSTIC_CLOSE
+            | ID_OUTLINE
+            | ID_BRAND_ICON
+            | ID_COPY_ANCHOR
+            | ID_REVEAL
+    ) && toolbar::button_face(id, false).is_none()
+    {
         return None;
     }
     // Copy what painting needs, then release the borrow: painting the
     // outline sends LB_GETTEXT to the list box.
-    let (theme, colors, fonts, dpi, message) = {
+    let (theme, colors, fonts, dpi, message, compact, icon) = {
         let state = state_of(hwnd)?;
         let state = state.try_borrow().ok()?;
         let fonts = state.chrome.fonts.as_ref()?;
@@ -1247,14 +1471,28 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
             (id == ID_DIAGNOSTIC_ICON)
                 .then(|| state.chrome.diagnostics.current().cloned())
                 .flatten(),
+            state.chrome.compact == Some(true),
+            fonts.brand_icon,
         )
     };
+    let face = toolbar::button_face(id, compact);
     match (id, face) {
         (ID_DIAGNOSTIC_ICON, _) => {
             diagnostics::draw_icon(item, theme, colors, message.as_ref(), fonts.0, dpi);
         }
         (ID_DIAGNOSTIC_CLOSE, _) => toolbar::draw_button(item, colors, '\u{E711}', None, fonts),
+        // .NET glyphs: Copy (E8C8) and OpenInNewWindow (E8B7).
+        (ID_COPY_ANCHOR, _) => toolbar::draw_button(item, colors, '\u{E8C8}', None, fonts),
+        (ID_REVEAL, _) => toolbar::draw_button(item, colors, '\u{E8B7}', None, fonts),
         (ID_OUTLINE, _) => sidebar::draw_outline_item(item, colors, fonts.1, dpi),
+        (ID_BRAND_ICON, _) => {
+            let background = if theme == EffectiveTheme::Dark {
+                colors.background
+            } else {
+                ColorSpec::System(SystemColorRole::Window)
+            };
+            toolbar::draw_brand_icon(item, background, icon, dpi);
+        }
         (_, Some((glyph, label))) => toolbar::draw_button(item, colors, glyph, label, fonts),
         _ => return None,
     }
@@ -1307,7 +1545,221 @@ fn run_action(hwnd: HWND, action: ChromeAction) {
             }
             sync_ui(hwnd);
         }
+        ChromeAction::CopyAnchor => copy_anchor(hwnd),
+        ChromeAction::Reveal => reveal_selected(hwnd),
         ChromeAction::Sync => sync_ui(hwnd),
+    }
+}
+
+/// .NET `CopyAnchor_Click` for the selected outline row: the clipboard gets
+/// `#slug` and nothing else; the diagnostics bar confirms it.
+fn copy_anchor(hwnd: HWND) {
+    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
+        return;
+    };
+    let Some(outline) = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.chrome.controls.map(|c| c.sidebar.outline))
+    else {
+        return;
+    };
+    // Control query and clipboard calls run with no borrow held.
+    let Some(index) = sidebar::list_selection(outline) else {
+        return;
+    };
+    let Some(active) = active_tab(&state) else {
+        return;
+    };
+    let slug = state.try_borrow().ok().and_then(|state| {
+        state
+            .chrome
+            .outlines
+            .get(&active)
+            .and_then(|(_, entries)| entries.get(index))
+            .map(|entry| entry.slug.clone())
+    });
+    let Some(slug) = slug else {
+        return;
+    };
+    let copied = shell_ops::copy_text(hwnd, &anchor_clipboard_text(&slug));
+    with_chrome(hwnd, |chrome| match copied {
+        Ok(()) => chrome.diagnostic(anchor_copied_notice(&slug), DiagnosticSeverity::Info),
+        Err(_) => chrome.diagnostic(ANCHOR_COPY_FAILED, DiagnosticSeverity::Warning),
+    });
+}
+
+/// .NET `RevealFile_Click` for the selected tree row: the path passes the
+/// gate and must lie in the repository; File Explorer opens on a worker
+/// with the item selected in its folder.
+fn reveal_selected(hwnd: HWND) {
+    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
+        return;
+    };
+    let Some(tree) = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.chrome.controls.map(|c| c.sidebar.tree))
+    else {
+        return;
+    };
+    let selected = sidebar::tree_selection(tree);
+    let Some((generation, index)) = sidebar::tree_item_index(tree, selected) else {
+        return;
+    };
+    with_chrome(hwnd, |chrome| {
+        if generation != chrome.tree_shown {
+            return;
+        }
+        let Some(path) = chrome.tree.node(index).map(|node| node.path.clone()) else {
+            return;
+        };
+        let Some(target) = shell_ops::RevealTarget::new(&path, chrome.repository_root.as_deref())
+        else {
+            chrome.diagnostic(
+                reveal_failed_notice("The path is not supported."),
+                DiagnosticSeverity::Warning,
+            );
+            return;
+        };
+        let started = chrome.link.spawn("marknexia-reveal", move || {
+            Some(WorkerResult::Revealed(shell_ops::reveal(&target)))
+        });
+        if !started {
+            chrome.diagnostic(
+                reveal_failed_notice("the request could not start."),
+                DiagnosticSeverity::Warning,
+            );
+        }
+    });
+}
+
+/// .NET `ShowSelfHelp_Click`: gathers the facts (the SBOM check on a
+/// worker), then shows the dialog from `apply_worker_results`.
+fn request_troubleshooting(hwnd: HWND) {
+    if HELP_DIALOG_OPEN.with(Cell::get) {
+        return;
+    }
+    with_chrome(hwnd, |chrome| {
+        let remote_images = chrome.allow_remote_assets;
+        let started = chrome.link.spawn("marknexia-troubleshooting", move || {
+            let app = shell_ops::app_folder();
+            let sbom_present = app.as_ref().is_some_and(|folder| {
+                let path = folder.join(SBOM_FILE_NAME);
+                GatedPath::new(&path.to_string_lossy()).is_ok()
+                    && crate::documents::probe_is_file(&path)
+            });
+            let local = shell_ops::data_folder();
+            Some(WorkerResult::Troubleshooting(DiagnosticsFacts {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                os: shell_ops::os_version(),
+                architecture: dotnet_architecture(std::env::consts::ARCH).to_owned(),
+                app_path: app
+                    .as_deref()
+                    .map(shell_ops::with_trailing_separator)
+                    .unwrap_or_default(),
+                local_data: local
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                webview_data: super::webview_folder().display().to_string(),
+                sbom_present,
+                remote_images,
+            }))
+        });
+        if !started {
+            chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning);
+        }
+    });
+}
+
+/// The troubleshooting dialog, with no borrow held (a nested modal loop).
+fn show_troubleshooting(hwnd: HWND, facts: &DiagnosticsFacts) {
+    if HELP_DIALOG_OPEN.with(|open| open.replace(true)) {
+        return;
+    }
+    let choice = dialogs::show_troubleshooting(hwnd);
+    HELP_DIALOG_OPEN.with(|open| open.set(false));
+    match choice {
+        Some(dialogs::Choice::Primary) => {
+            let copied = shell_ops::copy_text(hwnd, &diagnostics_report(facts));
+            with_chrome(hwnd, |chrome| match copied {
+                Ok(()) => chrome.diagnostic(DIAGNOSTICS_COPIED, DiagnosticSeverity::Info),
+                Err(_) => chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning),
+            });
+        }
+        Some(dialogs::Choice::Secondary) => with_chrome(hwnd, |chrome| {
+            let started = shell_ops::data_folder().is_some_and(|folder| {
+                chrome.link.spawn("marknexia-data-folder", move || {
+                    Some(WorkerResult::DataFolderOpened(shell_ops::open_folder(
+                        &folder,
+                    )))
+                })
+            });
+            if !started {
+                chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning);
+            }
+        }),
+        Some(dialogs::Choice::Close) => {}
+        None => with_chrome(hwnd, |chrome| {
+            chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning);
+        }),
+    }
+}
+
+/// .NET `ShowSbom_Click`: reads `marknexia-sbom.spdx.json` beside the
+/// executable on a worker, then shows the dialog.
+fn request_sbom(hwnd: HWND) {
+    if HELP_DIALOG_OPEN.with(Cell::get) {
+        return;
+    }
+    with_chrome(hwnd, |chrome| {
+        let Some(path) = shell_ops::app_folder().map(|folder| folder.join(SBOM_FILE_NAME)) else {
+            chrome.diagnostic(SBOM_MISSING, DiagnosticSeverity::Warning);
+            return;
+        };
+        let started = chrome.link.spawn("marknexia-sbom", move || {
+            Some(WorkerResult::Sbom(shell_ops::read_sbom(&path)))
+        });
+        if !started {
+            chrome.diagnostic(SBOM_FAILED, DiagnosticSeverity::Warning);
+        }
+    });
+}
+
+/// The software components dialog, with no borrow held.
+fn show_sbom(hwnd: HWND, result: Result<(String, Vec<String>), shell_ops::SbomFailure>) {
+    let (json, components) = match result {
+        Ok(found) => found,
+        Err(failure) => {
+            let message = match failure {
+                shell_ops::SbomFailure::Missing => SBOM_MISSING,
+                shell_ops::SbomFailure::Failed => SBOM_FAILED,
+            };
+            with_chrome(hwnd, |chrome| {
+                chrome.diagnostic(message, DiagnosticSeverity::Warning);
+            });
+            return;
+        }
+    };
+    if HELP_DIALOG_OPEN.with(|open| open.replace(true)) {
+        return;
+    }
+    let choice = dialogs::show_sbom(hwnd, &components);
+    HELP_DIALOG_OPEN.with(|open| open.set(false));
+    let outcome = match choice {
+        Some(true) => Some(shell_ops::copy_text(hwnd, &json).is_ok()),
+        Some(false) => None,
+        None => Some(false),
+    };
+    if let Some(copied) = outcome {
+        with_chrome(hwnd, |chrome| {
+            if copied {
+                chrome.diagnostic(SBOM_COPIED, DiagnosticSeverity::Info);
+            } else {
+                chrome.diagnostic(SBOM_FAILED, DiagnosticSeverity::Warning);
+            }
+        });
     }
 }
 
@@ -1339,6 +1791,8 @@ fn run_command(hwnd: HWND, command: ChromeCommand) {
         ChromeCommand::SetTheme(theme) => set_theme(hwnd, theme),
         ChromeCommand::ShowHelp => dialogs::show_help(hwnd),
         ChromeCommand::ShowAbout => dialogs::show_about(hwnd),
+        ChromeCommand::ShowTroubleshooting => request_troubleshooting(hwnd),
+        ChromeCommand::ShowSbom => request_sbom(hwnd),
     }
 }
 
@@ -1362,9 +1816,12 @@ fn with_controls(state: &Rc<RefCell<AppState>>, apply: impl FnOnce(&ChromeContro
     }
 }
 
-fn all_windows(c: &ChromeControls) -> [HWND; 19] {
+fn all_windows(c: &ChromeControls) -> [HWND; 24] {
     [
         c.toolbar.toggle,
+        c.toolbar.brand_icon,
+        c.toolbar.brand_name,
+        c.toolbar.brand_tagline,
         c.toolbar.back,
         c.toolbar.forward,
         c.toolbar.reload,
@@ -1379,6 +1836,8 @@ fn all_windows(c: &ChromeControls) -> [HWND; 19] {
         c.sidebar.outline,
         c.sidebar.tree,
         c.sidebar.recent,
+        c.sidebar.copy_anchor,
+        c.sidebar.reveal,
         c.sidebar.splitter,
         c.diagnostics.icon,
         c.diagnostics.text,
@@ -1386,8 +1845,18 @@ fn all_windows(c: &ChromeControls) -> [HWND; 19] {
     ]
 }
 
-fn apply_fonts(controls: &ChromeControls, shell: ShellControls, font: HFONT) {
+/// The text font for the chrome controls; the brand name and tagline get
+/// their own fonts (`fonts`: text, brand name, brand tagline).
+fn apply_fonts(controls: &ChromeControls, shell: ShellControls, fonts: (HFONT, HFONT, HFONT)) {
+    let (text, name, tagline) = fonts;
     for window in all_windows(controls).into_iter().chain([shell.sidebar]) {
+        let font = if window == controls.toolbar.brand_name {
+            name
+        } else if window == controls.toolbar.brand_tagline {
+            tagline
+        } else {
+            text
+        };
         send(window, WM_SETFONT, font.0 as usize, 1);
     }
 }
@@ -1397,6 +1866,9 @@ fn apply_fonts(controls: &ChromeControls, shell: ShellControls, font: HFONT) {
 fn order_controls(c: &ChromeControls, shell: ShellControls) {
     let order = [
         c.toolbar.toggle,
+        c.toolbar.brand_icon,
+        c.toolbar.brand_name,
+        c.toolbar.brand_tagline,
         c.toolbar.back,
         c.toolbar.forward,
         c.toolbar.reload,
@@ -1412,8 +1884,10 @@ fn order_controls(c: &ChromeControls, shell: ShellControls) {
         // list box or tree view from the static label just before it.
         c.sidebar.outline_label,
         c.sidebar.outline,
+        c.sidebar.copy_anchor,
         c.sidebar.tree_label,
         c.sidebar.tree,
+        c.sidebar.reveal,
         c.sidebar.recent_label,
         c.sidebar.recent,
         c.sidebar.splitter,
@@ -1815,7 +2289,10 @@ pub(super) fn begin_sidebar_drag(hwnd: HWND) {
         let portable = Rc::clone(&state.borrow().portable);
         portable.borrow().sidebar_visible()
     });
-    with_chrome(hwnd, |chrome| chrome.dragging = visible);
+    // The compact pane keeps the .NET length (its handle is hidden).
+    with_chrome(hwnd, |chrome| {
+        chrome.dragging = visible && chrome.compact != Some(true);
+    });
     drag_sidebar(hwnd);
 }
 
@@ -1879,8 +2356,14 @@ pub(super) fn resize_sidebar_by_key(hwnd: HWND, step: SidebarResize) {
         super::input::defer_sidebar_key(step);
         return;
     }
-    let portable = Rc::clone(&state.borrow().portable);
-    if !portable.borrow().sidebar_visible() {
+    let (portable, compact) = {
+        let state = state.borrow();
+        (
+            Rc::clone(&state.portable),
+            state.chrome.compact == Some(true),
+        )
+    };
+    if compact || !portable.borrow().sidebar_visible() {
         return;
     }
     let dpi = {
@@ -1912,6 +2395,15 @@ pub(super) fn apply_worker_results(hwnd: HWND) {
                 readme,
             } => {
                 finish_open_repository(hwnd, &folder, exists, readme);
+                continue;
+            }
+            // The dialogs run nested modal loops: no borrow is held.
+            WorkerResult::Troubleshooting(facts) => {
+                show_troubleshooting(hwnd, &facts);
+                continue;
+            }
+            WorkerResult::Sbom(result) => {
+                show_sbom(hwnd, result);
                 continue;
             }
             result => apply_worker_result(&mut state.borrow_mut().chrome, result),
@@ -1971,10 +2463,20 @@ fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
             chrome.shown_recent = visible;
             chrome.recent_fill = true;
         }
+        WorkerResult::Revealed(Err(error)) => {
+            chrome.diagnostic(reveal_failed_notice(&error), DiagnosticSeverity::Warning)
+        }
+        WorkerResult::DataFolderOpened(Err(_)) => {
+            chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning);
+        }
         WorkerResult::Tree { .. }
         | WorkerResult::Recent { .. }
         | WorkerResult::OpenChecked { .. }
-        | WorkerResult::FolderChecked { .. } => {}
+        | WorkerResult::FolderChecked { .. }
+        | WorkerResult::Troubleshooting(_)
+        | WorkerResult::Sbom(_)
+        | WorkerResult::Revealed(Ok(()))
+        | WorkerResult::DataFolderOpened(Ok(())) => {}
     }
 }
 
@@ -2017,6 +2519,32 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
     }
     for (window, name) in named {
         set_accessible_name(&names, window, name);
+    }
+    // Menu items take their name from their text; these two carry the
+    // .NET `AutomationProperties.Name` instead ("&" and "(SBOM)" differ).
+    if let Some(menu) = controls.menu {
+        // SAFETY: plain query of the shell's own menu bar.
+        let help = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSubMenu(menu, 3) };
+        if !help.is_invalid() {
+            for (id, name) in [
+                (MENU_TROUBLESHOOTING, "Troubleshooting and diagnostics"),
+                (MENU_SBOM, "Software components SBOM"),
+            ] {
+                let text = wide(name);
+                for property in [PROPID_ACC_NAME, Name_Property_GUID] {
+                    // SAFETY: the buffer is NUL-terminated and outlives the
+                    // call (oleacc copies it).
+                    let _ = unsafe {
+                        names.SetHmenuPropStr(
+                            help,
+                            id as u32,
+                            property,
+                            PCWSTR::from_raw(text.as_ptr()),
+                        )
+                    };
+                }
+            }
+        }
     }
     for label in [
         controls.sidebar.outline_label,
@@ -2090,6 +2618,8 @@ fn sync_ui(hwnd: HWND) {
         severity: Option<&'static str>,
         tree_generation: u32,
         relayout: bool,
+        copy_anchor: bool,
+        reveal: bool,
     }
     let open_tabs: BTreeSet<u64> = portable
         .borrow()
@@ -2178,6 +2708,11 @@ fn sync_ui(hwnd: HWND) {
                 .map(crate::chrome_model::DiagnosticMessage::severity_label),
             tree_generation: chrome.tree_shown,
             relayout: open != chrome.diagnostics_laid_out,
+            // The row buttons act on the selected row of a non-empty list.
+            copy_anchor: active
+                .and_then(|tab| chrome.outlines.get(&tab))
+                .is_some_and(|(_, entries)| !entries.is_empty()),
+            reveal: chrome.tree.root().is_some(),
         }
     };
     let Some(controls) = snapshot.controls else {
@@ -2210,6 +2745,8 @@ fn sync_ui(hwnd: HWND) {
         let _ = EnableWindow(controls.toolbar.back, snapshot.back);
         let _ = EnableWindow(controls.toolbar.forward, snapshot.forward);
         let _ = EnableWindow(controls.toolbar.reload, snapshot.reload);
+        let _ = EnableWindow(controls.sidebar.copy_anchor, snapshot.copy_anchor);
+        let _ = EnableWindow(controls.sidebar.reveal, snapshot.reveal);
         if let Some(menu) = controls.menu {
             let check = if snapshot.remote {
                 MF_CHECKED

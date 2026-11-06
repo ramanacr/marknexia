@@ -92,7 +92,9 @@ use crate::{
 mod chrome;
 mod diagnostics;
 mod dialogs;
+mod menu_theme;
 mod settings_bridge;
+mod shell_ops;
 mod sidebar;
 mod toolbar;
 // Find in page, drag and drop, single instance, tab close and reorder.
@@ -363,7 +365,8 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
             hwnd,
             instance,
             w!("BUTTON"),
-            w!("Open Markdown"),
+            // .NET `OpenFileButton` automation name.
+            w!("Open Markdown file"),
             // Owner-drawn: themed push buttons ignore documented dark styles.
             child_style(BS_OWNERDRAW as u32),
             1001,
@@ -1103,7 +1106,7 @@ unsafe extern "system" fn window_proc(
             apply_automation_selection(hwnd, wparam.0 as u64);
             LRESULT(0)
         }
-        // BN_CLICKED (notification code 0) from the Open Markdown button.
+        // BN_CLICKED (notification code 0) from the Open Markdown file button.
         WM_COMMAND if wparam.0 & 0xffff == COMMAND_OPEN_ID && (wparam.0 >> 16) & 0xffff == 0 => {
             // SAFETY: posts to this thread's own live window; no pointers.
             let _ = unsafe { PostMessageW(Some(hwnd), WM_OPEN_DIALOG, WPARAM(0), LPARAM(0)) };
@@ -1736,6 +1739,8 @@ fn reflow(hwnd: HWND, dpi: u32) {
     };
     let actual_dpi = dpi.max(96);
     state.borrow_mut().dpi = actual_dpi;
+    // chrome: the .NET compact layout below 720 DIPs (pane closed).
+    chrome::update_compact(&state, client.right.max(0) as u32, actual_dpi);
     // chrome: persisted sidebar width and the diagnostics bar.
     let (sidebar_width, diagnostics_open) = state.borrow().chrome.layout_inputs();
     let app = portable.borrow();
