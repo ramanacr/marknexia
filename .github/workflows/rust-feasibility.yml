@@ -54,6 +54,7 @@ jobs:
           pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_desktop_perf.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/compare_rust_builds.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
@@ -111,6 +112,33 @@ jobs:
           name: rust-feasibility-${{ matrix.target }}
           path: ${{ runner.temp }}/rust-feasibility-*/**/*.json
           if-no-files-found: error
+      # Evidence only: the ZIP is unsigned, is never attached to a release and
+      # is never published. Archives that contain an executable are built only
+      # here, on the hosted runner, never on a developer machine.
+      - name: Unsigned preview package, SBOM and notices
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $metadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json"
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $target
+          [IO.File]::WriteAllText($metadata, ($json -join "`n"), [Text.UTF8Encoding]::new($false))
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustPortablePackage.ps1 `
+            -Target $target `
+            -FirstRoot (Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release") `
+            -SecondRoot (Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release") `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath $metadata `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview') `
+            -SourceCommit $env:GITHUB_SHA
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-preview/out/
+          if-no-files-found: error
+          retention-days: 14
 
   rust-native-gates:
     name: Native gates (${{ matrix.target }})
