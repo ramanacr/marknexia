@@ -537,12 +537,15 @@ fn guarded_move(process_id: u32, x: i32, y: i32) {
 }
 
 /// Releases the left button when dropped, also after a failed assertion, so
-/// no button stays logically down. A button-up types nothing and is sent
-/// unconditionally, like the modifier release in `support/shell.rs`.
-struct LeftButtonGuard;
+/// no button stays down in the shell. The button-up is sent only while the
+/// shell (`self.0`) still owns the foreground; otherwise nothing is sent.
+struct LeftButtonGuard(u32);
 
 impl Drop for LeftButtonGuard {
     fn drop(&mut self) {
+        if foreground_owner() != self.0 {
+            return;
+        }
         let input = [mouse(MOUSEEVENTF_LEFTUP)];
         let _ = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
     }
@@ -567,7 +570,7 @@ fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
     let id = shell.shell.id();
     guarded_move(id, start, y);
     guarded_send(id, MOUSEEVENTF_LEFTDOWN);
-    let button = LeftButtonGuard;
+    let button = LeftButtonGuard(id);
     for step in 1..=10 {
         guarded_move(id, start + (end - start) * step / 10, y);
         // SetCursorPos moves the cursor; a zero move delivers WM_MOUSEMOVE.
