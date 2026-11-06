@@ -448,7 +448,7 @@ impl HostDocument {
                 .map(|asset| ResponseSpec::ok(asset.kind.content_type(), asset.as_bytes()))
                 .unwrap_or_else(ResponseSpec::forbidden),
             BrokerDecision::BundledRuntime(runtime) => ResponseSpec {
-                shared_body: Some(runtime.shared()),
+                static_body: Some(runtime.bytes()),
                 ..ResponseSpec::ok(runtime.content_type(), runtime.bytes())
             },
             BrokerDecision::Deny { status: 405 } => ResponseSpec::method_not_allowed(),
@@ -492,6 +492,9 @@ pub struct ResponseSpec<'a> {
     /// the native adapter then streams the response from the buffer instead
     /// of copying it into a per-request stream.
     pub shared_body: Option<&'a Arc<Vec<u8>>>,
+    /// The same bytes as `body` when they are embedded in the binary (a
+    /// pinned runtime): the native adapter streams them in place, no copy.
+    pub static_body: Option<&'static [u8]>,
 }
 
 impl<'a> ResponseSpec<'a> {
@@ -502,6 +505,7 @@ impl<'a> ResponseSpec<'a> {
             content_type,
             content_security_policy: DEFAULT_RESPONSE_CSP,
             shared_body: None,
+            static_body: None,
             body,
         }
     }
@@ -513,6 +517,7 @@ impl<'a> ResponseSpec<'a> {
             content_type: "text/plain; charset=utf-8",
             content_security_policy: DEFAULT_RESPONSE_CSP,
             shared_body: None,
+            static_body: None,
             body: b"Forbidden",
         }
     }
@@ -524,6 +529,7 @@ impl<'a> ResponseSpec<'a> {
             content_type: "text/plain; charset=utf-8",
             content_security_policy: DEFAULT_RESPONSE_CSP,
             shared_body: None,
+            static_body: None,
             body: b"Method Not Allowed",
         }
     }

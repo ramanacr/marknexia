@@ -25,16 +25,40 @@ use windows::{
 /// cursor is behind a mutex.
 #[implement(IStream)]
 pub(crate) struct SharedStream {
-    bytes: Arc<Vec<u8>>,
+    bytes: StreamBytes,
     position: Mutex<u64>,
+}
+
+/// The immutable bytes a stream reads: a shared document buffer, or bytes
+/// embedded in the binary (a pinned runtime), read in place without a copy.
+#[derive(Clone)]
+enum StreamBytes {
+    Shared(Arc<Vec<u8>>),
+    Static(&'static [u8]),
+}
+
+impl std::ops::Deref for StreamBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Shared(bytes) => bytes,
+            Self::Static(bytes) => bytes,
+        }
+    }
 }
 
 impl SharedStream {
     pub(crate) fn create(bytes: Arc<Vec<u8>>) -> IStream {
-        Self::at(bytes, 0)
+        Self::at(StreamBytes::Shared(bytes), 0)
     }
 
-    fn at(bytes: Arc<Vec<u8>>, position: u64) -> IStream {
+    /// A stream over bytes embedded in the binary.
+    pub(crate) fn create_static(bytes: &'static [u8]) -> IStream {
+        Self::at(StreamBytes::Static(bytes), 0)
+    }
+
+    fn at(bytes: StreamBytes, position: u64) -> IStream {
         Self {
             bytes,
             position: Mutex::new(position),
@@ -170,7 +194,7 @@ impl IStream_Impl for SharedStream_Impl {
 
     fn Clone(&self) -> windows::core::Result<IStream> {
         let position = *self.position.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(SharedStream::at(Arc::clone(&self.bytes), position))
+        Ok(SharedStream::at(self.bytes.clone(), position))
     }
 }
 
@@ -235,5 +259,22 @@ mod tests {
         assert!(unsafe { stream.Write(out.as_ptr().cast(), 1, None) }.is_err());
         drop(stream);
         assert_eq!(Arc::strong_count(&bytes), 1);
+    }
+
+    #[test]
+    fn reads_embedded_bytes_in_place() {
+        static BYTES: &[u8] = b"embedded runtime bytes";
+        let stream = SharedStream::create_static(BYTES);
+        let mut out = [0_u8; 64];
+        let mut read = 0;
+        // SAFETY: `out` is valid for its length; `read` is a live local.
+        unsafe { stream.Read(out.as_mut_ptr().cast(), out.len() as u32, Some(&mut read)) }
+            .ok()
+            .unwrap();
+        assert_eq!(&out[..read as usize], BYTES);
+        let clone = unsafe { stream.Clone() }.unwrap();
+        let mut stat = STATSTG::default();
+        unsafe { clone.Stat(&mut stat, STATFLAG_NONAME) }.unwrap();
+        assert_eq!(stat.cbSize, BYTES.len() as u64);
     }
 }

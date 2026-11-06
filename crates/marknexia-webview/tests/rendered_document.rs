@@ -236,7 +236,7 @@ fn a_page_with_a_diagram_gets_the_pinned_mermaid_runtime_and_nothing_else() {
             response.status,
             response.content_type,
             response.body.len(),
-            response.shared_body.is_some(),
+            response.static_body.is_some(),
         )
     };
     let served = script(MERMAID_RUNTIME_URI, 9, ResourceKind::Script, "GET");
@@ -257,7 +257,7 @@ fn a_page_with_a_diagram_gets_the_pinned_mermaid_runtime_and_nothing_else() {
     });
     assert_eq!(response.content_security_policy, DEFAULT_RESPONSE_CSP);
     assert_eq!(response.body, BundledRuntime::Mermaid.bytes());
-    // Two responses stream from one shared buffer.
+    // Every response streams the embedded bytes in place, never a copy.
     let again = document.resolve(&BrokerRequest {
         method: "GET",
         uri: MERMAID_RUNTIME_URI,
@@ -265,9 +265,14 @@ fn a_page_with_a_diagram_gets_the_pinned_mermaid_runtime_and_nothing_else() {
         kind: ResourceKind::Script,
     });
     assert!(std::ptr::eq(
-        response.shared_body.unwrap().as_ptr(),
-        again.shared_body.unwrap().as_ptr()
+        response.static_body.unwrap(),
+        BundledRuntime::Mermaid.bytes()
     ));
+    assert!(std::ptr::eq(
+        again.static_body.unwrap(),
+        BundledRuntime::Mermaid.bytes()
+    ));
+    assert!(response.shared_body.is_none());
     assert!(String::from_utf8_lossy(&BundledRuntime::Mermaid.bytes()[..4096]).contains("mermaid"));
     let text = String::from_utf8_lossy(BundledRuntime::Mermaid.bytes());
     assert!(text.contains(&format!("\"{MERMAID_VERSION}\"")));

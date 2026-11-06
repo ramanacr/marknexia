@@ -463,6 +463,11 @@ fn create_response(
 ) -> windows::core::Result<ICoreWebView2WebResourceResponse> {
     // A document streams from its shared buffer (no per-request copy); small
     // fixed bodies (denials, probe assets) are copied into an HGLOBAL.
+    // A pinned runtime is read in place from the binary.
+    if let Some(bytes) = response.static_body {
+        let stream = crate::stream::SharedStream::create_static(bytes);
+        return create_response_from(environment, &stream, response);
+    }
     if let Some(shared) = response.shared_body.filter(|_| !copy_for_measurement()) {
         let stream = crate::stream::SharedStream::create(std::sync::Arc::clone(shared));
         return create_response_from(environment, &stream, response);
