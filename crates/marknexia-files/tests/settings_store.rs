@@ -168,24 +168,51 @@ fn legacy_file_is_backed_up_once_before_the_first_write() {
     assert_eq!(scratch.names(), ["settings.json"]);
     assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
 
+    assert_eq!(store.legacy_backup_path(), None);
     store.add_recent_file("C:\\new.md").unwrap();
-    let backup = store.legacy_backup_path();
+    let backup = store.legacy_backup_path().unwrap().to_path_buf();
+    let backup_name = backup.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        backup_name.starts_with("settings.json.v1.") && backup_name.ends_with(".bak"),
+        "{backup_name}"
+    );
     assert_eq!(fs::read_to_string(&backup).unwrap(), legacy);
     assert_eq!(schema_on_disk(&path), CURRENT_SCHEMA_VERSION);
     assert_eq!(store.current().recent_files, ["C:\\new.md", "C:\\old.md"]);
 
-    // Later writes keep the original backup.
+    // Later writes keep the original backup and add no other.
     store.add_recent_file("C:\\newer.md").unwrap();
     assert_eq!(fs::read_to_string(&backup).unwrap(), legacy);
-    assert_eq!(scratch.names(), ["settings.json", "settings.json.v1.bak"]);
+    assert_eq!(scratch.names(), ["settings.json".to_owned(), backup_name]);
+}
+
+#[test]
+fn an_existing_backup_is_never_overwritten() {
+    let scratch = Scratch::new("old-backup");
+    let path = scratch.settings_path();
+    // A backup from an earlier migration, with the old fixed name too.
+    let earlier = scratch.0.join("settings.json.v1.bak");
+    fs::write(&earlier, "earlier backup").unwrap();
+    fs::write(&path, r#"{"Theme": 1}"#).unwrap();
+
+    let (mut store, _) = SettingsStore::open(&path);
+    store.add_recent_file("C:\\a.md").unwrap();
+
+    assert_eq!(fs::read_to_string(&earlier).unwrap(), "earlier backup");
+    let backup = store.legacy_backup_path().unwrap();
+    assert_ne!(backup, earlier);
+    assert_eq!(fs::read_to_string(backup).unwrap(), r#"{"Theme": 1}"#);
+    assert_eq!(scratch.names().len(), 3);
 }
 
 #[test]
 fn file_rewritten_by_dotnet_is_backed_up_again() {
     let scratch = Scratch::new("rollback");
     let path = scratch.settings_path();
+    fs::write(&path, r#"{"Theme": 1}"#).unwrap();
     let (mut store, _) = SettingsStore::open(&path);
     store.add_recent_file("C:\\a.md").unwrap();
+    let first_backup = store.legacy_backup_path().unwrap().to_path_buf();
 
     // The .NET edition drops SchemaVersion when it saves.
     let dotnet = "{\"Theme\": 2, \"RecentFiles\": [\"C:\\\\a.md\"]}";
@@ -194,10 +221,15 @@ fn file_rewritten_by_dotnet_is_backed_up_again() {
     assert_eq!(notice, None);
     assert_eq!(store.current().theme, ThemePreference::Dark);
     store.add_recent_file("C:\\b.md").unwrap();
+    let second_backup = store.legacy_backup_path().unwrap();
+    assert_ne!(second_backup, first_backup);
+    assert_eq!(fs::read_to_string(second_backup).unwrap(), dotnet);
+    // The first backup survives.
     assert_eq!(
-        fs::read_to_string(store.legacy_backup_path()).unwrap(),
-        dotnet
+        fs::read_to_string(&first_backup).unwrap(),
+        r#"{"Theme": 1}"#
     );
+    assert_eq!(scratch.names().len(), 3);
 }
 
 #[test]
@@ -239,7 +271,114 @@ fn newer_file_written_after_load_stops_the_migration() {
         }))
     ));
     assert_eq!(fs::read_to_string(&path).unwrap(), newer);
-    assert!(!store.legacy_backup_path().exists());
+    assert_eq!(store.legacy_backup_path(), None);
+    assert_eq!(scratch.names(), ["settings.json"]);
+}
+
+#[test]
+fn a_read_only_settings_file_is_not_replaced() {
+    let scratch = Scratch::new("read-only");
+    let path = scratch.settings_path();
+    let (mut store, _) = SettingsStore::open(&path);
+    store.add_recent_file("C:\\a.md").unwrap();
+    let before = fs::read(&path).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions.clone()).unwrap();
+
+    let result = store.add_recent_file("C:\\b.md");
+
+    let after = fs::read(&path).unwrap();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&path, permissions).unwrap();
+    assert!(
+        matches!(result, Err(SettingsSaveError::Write(_))),
+        "{result:?}"
+    );
+    assert_eq!(after, before);
+    // Memory changes as in .NET.
+    assert_eq!(store.current().recent_files, ["C:\\b.md", "C:\\a.md"]);
+    assert_eq!(scratch.names(), ["settings.json"]);
+}
+
+#[test]
+fn corrupt_file_does_not_replace_an_earlier_preserved_file() {
+    let scratch = Scratch::new("corrupt-twice");
+    let path = scratch.settings_path();
+    fs::write(&path, "first corrupt").unwrap();
+    let (_, first) = SettingsStore::open(&path);
+    fs::write(&path, "second corrupt").unwrap();
+    let (_, second) = SettingsStore::open(&path);
+    let preserved = |notice: Option<SettingsNotice>| match notice {
+        Some(SettingsNotice::Corrupt { preserved_as, .. }) => preserved_as,
+        other => panic!("expected a corrupt notice, got {other:?}"),
+    };
+    let first = preserved(first);
+    let second = preserved(second);
+    assert_ne!(first, second);
+    assert_eq!(fs::read_to_string(first).unwrap(), "first corrupt");
+    assert_eq!(fs::read_to_string(second).unwrap(), "second corrupt");
+}
+
+#[cfg(windows)]
+mod sharing {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Opens the file with no sharing, so other opens fail with
+    /// `ERROR_SHARING_VIOLATION` while the handle lives.
+    fn hold_exclusively(path: &Path) -> fs::File {
+        OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_brief_sharing_violation_is_retried() {
+        let scratch = Scratch::new("sharing-brief");
+        let path = scratch.settings_path();
+        fs::write(&path, r#"{"Theme": 2}"#).unwrap();
+        let handle = hold_exclusively(&path);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            drop(handle);
+        });
+
+        let (store, notice) = SettingsStore::open(&path);
+
+        releaser.join().unwrap();
+        assert_eq!(notice, None);
+        assert_eq!(store.current().theme, ThemePreference::Dark);
+        assert_eq!(store.read_only_reason(), None);
+    }
+
+    #[test]
+    fn a_lasting_sharing_violation_is_unreadable_after_the_retries() {
+        let scratch = Scratch::new("sharing-lasting");
+        let path = scratch.settings_path();
+        fs::write(&path, r#"{"Theme": 2}"#).unwrap();
+        let handle = hold_exclusively(&path);
+
+        let started = Instant::now();
+        let (store, notice) = SettingsStore::open(&path);
+        let elapsed = started.elapsed();
+        drop(handle);
+
+        assert!(
+            matches!(notice, Some(SettingsNotice::Unreadable { .. })),
+            "{notice:?}"
+        );
+        assert_eq!(store.read_only_reason(), Some(&ReadOnlyReason::Unreadable));
+        // Four waits of 50 ms between five attempts.
+        assert!(elapsed >= Duration::from_millis(190), "{elapsed:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"Theme": 2}"#);
+    }
 }
 
 #[test]

@@ -48,6 +48,53 @@ fn write_and_replace(
     fs::rename(temporary_path, path)
 }
 
+/// Writes `bytes` to `path` atomically, but only when `path` does not exist.
+///
+/// The bytes go to a flushed temporary file first, which is then hard-linked
+/// to `path`. Creating a hard link fails when the target exists, so an
+/// existing file is never replaced.
+///
+/// # Errors
+///
+/// Returns `AlreadyExists` when `path` exists, or the I/O error of the step
+/// that failed. Nothing is left at `path` after a failure.
+pub fn write_new_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(directory)?;
+    let (temporary_path, mut file) = create_temporary(path)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::hard_link(&temporary_path, path)
+        });
+    let _ = fs::remove_file(&temporary_path);
+    result
+}
+
+/// Moves `from` to `to` without replacing an existing `to`.
+///
+/// `std::fs::rename` always replaces on Windows, so this creates a hard link
+/// (which fails when `to` exists) and then removes `from`. If `from` cannot
+/// be removed, the link is removed again and `from` is unchanged.
+///
+/// # Errors
+///
+/// Returns `AlreadyExists` when `to` exists, or the I/O error of the step
+/// that failed.
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    fs::hard_link(from, to)?;
+    if let Err(error) = fs::remove_file(from) {
+        let _ = fs::remove_file(to);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Creates `<name>.<unique>.tmp` next to `path` with `create_new`, so an
 /// existing file is never reused.
 fn create_temporary(path: &Path) -> io::Result<(PathBuf, File)> {
@@ -111,6 +158,57 @@ mod tests {
         write_atomically(&target, b"second").unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"second");
         assert_eq!(entries(&directory.join("nested")), ["settings.json"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn write_new_never_replaces_an_existing_file() {
+        let directory = scratch("new");
+        let target = directory.join("backup.bak");
+        write_new_atomically(&target, b"first").unwrap();
+        let error = write_new_atomically(&target, b"second").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        assert_eq!(entries(&directory), ["backup.bak"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rename_no_replace_keeps_an_existing_target() {
+        let directory = scratch("move");
+        let source = directory.join("a");
+        let target = directory.join("b");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&target, b"target").unwrap();
+        let error = rename_no_replace(&source, &target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        fs::remove_file(&target).unwrap();
+        rename_no_replace(&source, &target).unwrap();
+        assert_eq!(entries(&directory), ["b"]);
+        assert_eq!(fs::read(&target).unwrap(), b"source");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn replacing_a_read_only_target_fails_and_keeps_it() {
+        let directory = scratch("read-only");
+        let target = directory.join("settings.json");
+        fs::write(&target, b"old").unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions.clone()).unwrap();
+
+        let result = write_atomically(&target, b"new");
+
+        let contents = fs::read(&target).unwrap();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&target, permissions).unwrap();
+        assert!(result.is_err(), "a read-only target must not be replaced");
+        assert_eq!(contents, b"old");
+        assert_eq!(entries(&directory), ["settings.json"]);
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -10,6 +10,11 @@ use marknexia_core::startup::StartupFileProbe;
 /// `Path::is_file` follows symbolic links, so a dangling link is not a file.
 /// .NET `File.Exists` reports a dangling file link as existing; opening it
 /// fails later in both editions.
+///
+/// It keeps the default `expand_short_names` hook, so 8.3 short names (for
+/// example `PROGRA~1`) are not expanded. Expansion needs `GetLongPathNameW`,
+/// that is unsafe Win32 code, and this crate is portable and forbids unsafe
+/// code. The Win32 shell adapter can override the hook (SET-8c).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdStartupProbe;
 

@@ -7,12 +7,16 @@
 //! * Location: `%LOCALAPPDATA%\Marknexia\settings.json`, as in .NET
 //!   ([`default_settings_path`]).
 //! * Missing file: defaults; the first save creates the file.
-//! * Corrupt file: moved aside to `settings.json.corrupt-<id>`; defaults are
-//!   used and [`SettingsNotice::Corrupt`] tells the caller. If the move
-//!   fails, the store becomes read-only so the file is not overwritten.
-//! * Unreadable file (other than not found): defaults, read-only.
+//! * Corrupt file: moved aside to an unused `settings.json.corrupt-<id>`;
+//!   defaults are used and [`SettingsNotice::Corrupt`] tells the caller. The
+//!   move never replaces an existing file. If it fails, the store becomes
+//!   read-only so the file is not overwritten.
+//! * Unreadable file (other than not found): defaults, read-only. A sharing
+//!   or lock violation is retried briefly first, because another process
+//!   may be writing the file.
 //! * Schema version 1 (.NET): read normally. Before the first write, the
-//!   current file is copied to `settings.json.v1.bak`.
+//!   current file is copied to a new `settings.json.v1.<id>.bak`. An
+//!   existing backup is never overwritten.
 //! * Newer schema version: values read leniently, read-only.
 //! * Every write is atomic ([`write_atomically`]).
 //!
@@ -25,19 +29,28 @@
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use marknexia_core::settings::{
     AppSettings, CURRENT_SCHEMA_VERSION, MAX_SETTINGS_BYTES, ParsedSettings, SettingsParseError,
     parse_settings, serialize_settings,
 };
 
-use crate::atomic_write::{unique_suffix, write_atomically};
-use crate::bounded_read::{BoundedReadError, BoundedReader};
+use crate::atomic_write::{
+    rename_no_replace, unique_suffix, write_atomically, write_new_atomically,
+};
 
 pub const SETTINGS_DIRECTORY_NAME: &str = "Marknexia";
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
+
+/// Attempts to open and read the file while another process holds a
+/// conflicting share mode or byte-range lock.
+const SHARING_RETRY_ATTEMPTS: u32 = 5;
+const SHARING_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// Attempts to find an unused name for a corrupt file or a backup.
+const UNIQUE_NAME_ATTEMPTS: u32 = 16;
 
 /// `%LOCALAPPDATA%\Marknexia\settings.json`, the .NET location
 /// (`Environment.SpecialFolder.LocalApplicationData`). `None` when
@@ -148,6 +161,7 @@ pub struct SettingsStore {
     current: AppSettings,
     read_only: Option<ReadOnlyReason>,
     backup_pending: bool,
+    legacy_backup: Option<PathBuf>,
 }
 
 enum ReadOutcome {
@@ -164,6 +178,7 @@ impl SettingsStore {
             current: AppSettings::default(),
             read_only: None,
             backup_pending: false,
+            legacy_backup: None,
         };
         let notice = store.reload();
         (store, notice)
@@ -180,10 +195,11 @@ impl SettingsStore {
         &self.path
     }
 
-    /// `settings.json.v1.bak` next to the settings file.
+    /// The `settings.json.v1.<id>.bak` file that this store wrote before it
+    /// first replaced a schema-1 file, if it wrote one since the last load.
     #[must_use]
-    pub fn legacy_backup_path(&self) -> PathBuf {
-        sibling(&self.path, ".v1.bak")
+    pub fn legacy_backup_path(&self) -> Option<&Path> {
+        self.legacy_backup.as_deref()
     }
 
     #[must_use]
@@ -202,6 +218,7 @@ impl SettingsStore {
         self.current = AppSettings::default();
         self.read_only = None;
         self.backup_pending = false;
+        self.legacy_backup = None;
         match read_settings(&self.path) {
             ReadOutcome::Missing => None,
             ReadOutcome::Unreadable(error) => {
@@ -324,7 +341,12 @@ impl SettingsStore {
                 return Ok(());
             }
         }
-        write_atomically(&self.legacy_backup_path(), &bytes).map_err(SettingsSaveError::Backup)
+        let backup = place_unique(&self.path, |candidate| {
+            write_new_atomically(candidate, &bytes)
+        })
+        .map_err(SettingsSaveError::Backup)?;
+        self.legacy_backup = Some(backup);
+        Ok(())
     }
 }
 
@@ -343,7 +365,23 @@ fn read_settings(path: &Path) -> ReadOutcome {
 }
 
 /// `Ok(None)`: not found. `Ok(Some(Err))`: larger than the limit.
+///
+/// A sharing or lock violation is retried [`SHARING_RETRY_ATTEMPTS`] times,
+/// [`SHARING_RETRY_DELAY`] apart, before it is returned.
 fn read_bytes(path: &Path) -> io::Result<Option<io::Result<Vec<u8>>>> {
+    let mut attempt = 1;
+    loop {
+        match read_bytes_once(path) {
+            Err(error) if is_sharing_violation(&error) && attempt < SHARING_RETRY_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(SHARING_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
+fn read_bytes_once(path: &Path) -> io::Result<Option<io::Result<Vec<u8>>>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -352,29 +390,63 @@ fn read_bytes(path: &Path) -> io::Result<Option<io::Result<Vec<u8>>>> {
     if !file.metadata()?.is_file() {
         return Err(io::Error::other("settings path is not a file"));
     }
-    match BoundedReader::new(MAX_SETTINGS_BYTES).read_from(file) {
-        Ok(bytes) => Ok(Some(Ok(bytes))),
-        Err(BoundedReadError::TooLarge) => Ok(Some(Err(io::Error::new(
+    let limit = u64::try_from(MAX_SETTINGS_BYTES).unwrap_or(u64::MAX);
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SETTINGS_BYTES {
+        return Ok(Some(Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "settings file is too large",
-        )))),
-        Err(BoundedReadError::Io) => Err(io::Error::other("settings file read failed")),
+        ))));
     }
+    Ok(Some(Ok(bytes)))
 }
 
-/// Renames `path` to an unused `<name>.corrupt-<id>` sibling.
+/// Win32 `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33).
+fn is_sharing_violation(error: &io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+/// Moves `path` to an unused `<name>.corrupt-<id>` sibling. An existing
+/// file is never replaced.
 fn move_aside(path: &Path) -> io::Result<PathBuf> {
-    for _ in 0..16 {
-        let candidate = sibling(path, &format!(".corrupt-{}", unique_suffix()));
-        if fs::symlink_metadata(&candidate).is_ok() {
-            continue;
+    move_aside_with(path, || {
+        sibling(path, &format!(".corrupt-{}", unique_suffix()))
+    })
+}
+
+fn move_aside_with(path: &Path, mut next_name: impl FnMut() -> PathBuf) -> io::Result<PathBuf> {
+    for _ in 0..UNIQUE_NAME_ATTEMPTS {
+        let candidate = next_name();
+        match rename_no_replace(path, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
-        fs::rename(path, &candidate)?;
-        return Ok(candidate);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "no unused name for the corrupt settings file",
+    ))
+}
+
+/// Creates a new `<name>.v1.<id>.bak` sibling with `create`, which must fail
+/// with `AlreadyExists` instead of replacing a file.
+fn place_unique(
+    path: &Path,
+    mut create: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    for _ in 0..UNIQUE_NAME_ATTEMPTS {
+        let candidate = sibling(path, &format!(".v1.{}.bak", unique_suffix()));
+        match create(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no unused name for the settings backup",
     ))
 }
 
@@ -385,4 +457,48 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
         .unwrap_or_default();
     name.push(suffix);
     path.with_file_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_aside_skips_a_colliding_name_without_replacing_it() {
+        let directory =
+            std::env::temp_dir().join(format!("marknexia-move-aside-{}", unique_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let taken = directory.join("settings.json.corrupt-taken");
+        let free = directory.join("settings.json.corrupt-free");
+        fs::write(&path, b"corrupt").unwrap();
+        fs::write(&taken, b"earlier corrupt file").unwrap();
+
+        let mut names = [taken.clone(), free.clone()].into_iter();
+        let moved = move_aside_with(&path, || names.next().unwrap()).unwrap();
+
+        assert_eq!(moved, free);
+        assert_eq!(fs::read(&taken).unwrap(), b"earlier corrupt file");
+        assert_eq!(fs::read(&free).unwrap(), b"corrupt");
+        assert!(!path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn move_aside_gives_up_when_every_name_is_taken() {
+        let directory =
+            std::env::temp_dir().join(format!("marknexia-move-aside-{}", unique_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let taken = directory.join("taken");
+        fs::write(&path, b"corrupt").unwrap();
+        fs::write(&taken, b"keep").unwrap();
+
+        let error = move_aside_with(&path, || taken.clone()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt");
+        assert_eq!(fs::read(&taken).unwrap(), b"keep");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
