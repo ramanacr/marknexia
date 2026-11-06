@@ -1,6 +1,6 @@
 # Marknexia Rust/Win32 Production Rewrite Plan
 
-Status: **draft.** Phase 1 is complete (integrated at 816d931; CI run 42154523108 green after one rerun). Phase 1 ran in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
+Status: **draft.** Phase 1 is complete (integrated at 816d931; CI run 42154523108 green after one rerun). Phase 2 is complete (integrated at a7233de; CI run 42215611534 green, all native gates on x64 and ARM64; decision records CHROME-1–15 and shell-input proposed). Phase 1 ran in unattended mode, because it changes no behaviour covered by pending decisions. Later phases wait for their owner gates.
 Inputs: `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md` (architecture), `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md` (decision CONDITIONAL-GO, conditions C1–C6), `artifacts/rust-feasibility/manifest.json` (evidence index).
 Branch base: `ramana_rust_win32_feasibility` at the manifest commit or later.
 
