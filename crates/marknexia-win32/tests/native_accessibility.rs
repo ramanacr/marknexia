@@ -37,20 +37,20 @@ use windows::{
         UI::{
             Accessibility::{
                 CUIAutomation, HCF_HIGHCONTRASTON, HIGHCONTRASTW, IUIAutomation,
-                IUIAutomationElement, IUIAutomationSelectionItemPattern,
-                IUIAutomationStructureChangedEventHandler,
+                IUIAutomationElement, IUIAutomationInvokePattern,
+                IUIAutomationSelectionItemPattern, IUIAutomationStructureChangedEventHandler,
                 IUIAutomationStructureChangedEventHandler_Impl, StructureChangeType,
                 StructureChangeType_ChildRemoved, StructureChangeType_ChildrenInvalidated,
                 TreeScope_Children, TreeScope_Descendants, TreeScope_Subtree,
-                UIA_ControlTypePropertyId, UIA_DocumentControlTypeId, UIA_InvokePatternId,
-                UIA_SelectionItemPatternId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+                UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_DocumentControlTypeId,
+                UIA_InvokePatternId, UIA_SelectionItemPatternId, UIA_TabControlTypeId,
+                UIA_TabItemControlTypeId,
             },
             HiDpi::{
                 AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
                 DPI_AWARENESS_PER_MONITOR_AWARE, GetAwarenessFromDpiAwarenessContext,
                 GetDpiForWindow, GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
             },
-            Input::KeyboardAndMouse::{VK_CONTROL, VK_W},
             WindowsAndMessaging::{
                 FindWindowExW, GetClientRect, SMTO_ABORTIFHUNG, SPI_GETHIGHCONTRAST,
                 SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SystemParametersInfoW,
@@ -77,9 +77,7 @@ const PRINT_CLIENT_FULL_CONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(1 | 2);
 #[path = "support/shell.rs"]
 mod shell_support;
 
-use shell_support::{
-    ShellProcess, activate_attempt, find_shell_window, foreground_owner, send_chord_to,
-};
+use shell_support::{ShellProcess, find_shell_window};
 
 /// Single-threaded COM apartment for the UIA client, released on drop.
 struct Apartment;
@@ -175,7 +173,7 @@ struct Launched {
     automation: IUIAutomation,
     _apartment: Apartment,
     hwnd: HWND,
-    shell: ShellProcess,
+    _shell: ShellProcess,
 }
 
 /// Launches the shell with no document (two placeholder tabs) and binds the
@@ -206,31 +204,13 @@ fn launch_shell() -> Launched {
         automation,
         _apartment: apartment,
         hwnd,
-        shell,
+        _shell: shell,
     }
 }
 
 impl Launched {
     fn tabs(&self) -> Vec<IUIAutomationElement> {
         children(&self.automation, &self.tab_control)
-    }
-
-    fn is_foreground(&self) -> bool {
-        foreground_owner() == self.shell.id()
-    }
-
-    /// Same foreground guard as `automation_smoke.rs`: try to activate the
-    /// shell, and use a synthetic Alt press (which releases the foreground
-    /// lock) only on a GitHub Actions runner, never on a developer desktop.
-    fn activate(&self) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut attempt = 0;
-        while !self.is_foreground() && Instant::now() < deadline {
-            activate_attempt(self.hwnd, attempt);
-            attempt += 1;
-            let _ = unsafe { self.root.SetFocus() };
-            thread::sleep(Duration::from_millis(200));
-        }
     }
 }
 
@@ -365,23 +345,27 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
     .expect("AddStructureChangedEventHandler");
     let _registration = HandlerRegistration(&shell.automation);
 
-    // Prefer a UIA close. The provider exposes SelectionItem only: no Invoke
-    // pattern and no close-button child on any TabItem. Check that, so a
-    // future UIA close affordance makes this test use it.
-    let uia_close = tabs.iter().any(|tab| {
-        unsafe { tab.GetCurrentPattern(UIA_InvokePatternId) }.is_ok_and(|p| !p.as_raw().is_null())
-            || !children(&shell.automation, tab).is_empty()
-    });
-    assert!(
-        !uia_close,
-        "a UIA close affordance now exists; close the tab through it instead of Ctrl+W"
-    );
-    eprintln!("provider exposes no UIA close affordance; closing with Ctrl+W");
-
-    // Fallback: Ctrl+W through SendInput, only after the foreground guard.
-    shell.activate();
-    let _ = unsafe { tabs[0].SetFocus() };
-    thread::sleep(Duration::from_millis(300));
+    // Close through UIA: every TabItem has exactly one child, its close
+    // button, with the Invoke pattern. No synthetic input is needed.
+    let close_buttons: Vec<IUIAutomationElement> = tabs
+        .iter()
+        .map(|tab| {
+            let buttons = children(&shell.automation, tab);
+            assert_eq!(buttons.len(), 1, "one close button per TabItem");
+            let button = buttons.into_iter().next().expect("close button");
+            assert_eq!(
+                unsafe { button.CurrentControlType() }.unwrap(),
+                UIA_ButtonControlTypeId
+            );
+            assert_eq!(name(&button), "Close Tab");
+            button
+        })
+        .collect();
+    let invoke: IUIAutomationInvokePattern =
+        unsafe { close_buttons[0].GetCurrentPattern(UIA_InvokePatternId) }
+            .expect("Invoke pattern")
+            .cast()
+            .expect("Invoke interface");
     // Only events raised by the close below count. Wait until earlier
     // events (selection, focus) have stopped arriving for 500 ms, then drop
     // them.
@@ -398,8 +382,8 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
         }
     }
     events.lock().expect("event list").clear();
-    // Re-checks the foreground immediately before SendInput.
-    send_chord_to(shell.shell.id(), &[VK_CONTROL, VK_W]);
+    // The shell queues the close and runs it on its next message-loop turn.
+    unsafe { invoke.Invoke() }.expect("Invoke on the close button");
 
     let observed = wait_for("a ChildRemoved or ChildrenInvalidated event", || {
         let events = events.lock().ok()?;
@@ -436,6 +420,10 @@ fn closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child() {
     assert!(
         unsafe { tabs[0].CurrentName() }.is_err(),
         "the closed TabItem must report UIA_E_ELEMENTNOTAVAILABLE"
+    );
+    assert!(
+        unsafe { close_buttons[0].CurrentName() }.is_err(),
+        "the closed tab's close button must report UIA_E_ELEMENTNOTAVAILABLE"
     );
 }
 

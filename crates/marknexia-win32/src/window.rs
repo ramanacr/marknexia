@@ -33,7 +33,7 @@ use windows::{
                 DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint,
                 FillRect, FrameRect, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ,
                 InvalidateRect, PAINTSTRUCT, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
-                TextOutW, UpdateWindow,
+                UpdateWindow,
             },
         },
         Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
@@ -60,11 +60,12 @@ use windows::{
                 GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
                 PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
                 SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-                WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
-                WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_NCDESTROY,
-                WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW,
-                WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
+                WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+                WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
+                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -94,6 +95,8 @@ mod dialogs;
 mod settings_bridge;
 mod sidebar;
 mod toolbar;
+// Find in page, drag and drop, single instance, tab close and reorder.
+mod input;
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
@@ -174,6 +177,8 @@ struct AppState {
     rendered_tabs: BTreeSet<u64>,
     /// chrome: toolbar, sidebar, diagnostics bar and settings.
     chrome: chrome::ChromeState,
+    /// Find, drag and drop, activation and tab-pointer state (`input`).
+    input: input::InputState,
 }
 
 impl AppState {
@@ -188,6 +193,7 @@ impl AppState {
             render_results,
             rendered_tabs: BTreeSet::new(),
             chrome: chrome::ChromeState::new(),
+            input: input::InputState::default(),
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -217,6 +223,13 @@ struct CreatePayload {
 }
 
 pub fn run() -> Result<(), WindowError> {
+    // Single instance (.NET `OnLaunched`): a later launch hands its command
+    // line to the running instance and exits.
+    let primary = match input::claim_instance() {
+        crate::single_instance::native::Claim::HandedOff => return Ok(()),
+        crate::single_instance::native::Claim::Primary(primary) => Some(primary),
+        crate::single_instance::native::Claim::Standalone => None,
+    };
     let paths = documents::startup_paths(std::env::args_os().skip(1));
     enable_dpi().map_err(WindowError::Dpi)?;
     let module = unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(WindowError::Module)?;
@@ -268,6 +281,7 @@ pub fn run() -> Result<(), WindowError> {
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(error);
     }
+    input::serve_activations(hwnd, primary);
     let mut msg = MSG::default();
     loop {
         let status = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -279,7 +293,9 @@ pub fn run() -> Result<(), WindowError> {
         if status.0 == 0 {
             break;
         }
-        let handled = msg.message == WM_KEYDOWN && route_native_key(hwnd, msg.wParam.0 as u16);
+        let handled = msg.message == WM_KEYDOWN
+            && (input::route_key(hwnd, msg.hwnd, msg.wParam.0 as u16)
+                || route_native_key(hwnd, msg.wParam.0 as u16));
         // chrome: .NET accelerators, Tab traversal, list activation.
         let handled = handled || chrome::translate_message(hwnd, &msg);
         if !handled {
@@ -370,6 +386,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     };
     // chrome: controls, menu and saved settings, before startup renders.
     chrome::install(hwnd, instance, &state)?;
+    let close_callback = input::initialize(hwnd, instance, &state, controls.find)?;
     // Placeholder tabs only without documents. Document renders start before
     // the window is shown and overlap WebView2 startup.
     // Document mode follows the requested paths, not the tabs that opened:
@@ -407,6 +424,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         let mut state = state.borrow_mut();
         state.startup = StartupTracker::new(document_mode, startup_tabs);
     }
+    input::remember_startup_paths(&state, &startup_documents);
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
     }
@@ -424,6 +442,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         controls.tabs,
         Rc::downgrade(&portable),
         Rc::downgrade(&select_callback),
+        Rc::downgrade(&close_callback),
     );
     {
         let mut state = state.borrow_mut();
@@ -444,7 +463,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
             // report success against a controller it cannot reach.
             state.borrow_mut().webview_checked_out = true;
             let apartment = Rc::new(apartment);
-            let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+            let observer: Rc<dyn Fn(PageToHost)> = input::page_observer(&state);
             let mut session = WebViewSession::new(
                 Rc::clone(&apartment),
                 hwnd,
@@ -711,6 +730,7 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         text_document(tab_id, &title, &message)
     });
     let mut displayed = true;
+    input::document_replaced(state, tab_id);
     let added = match take_session(state) {
         Some(mut session) => {
             // chrome: a reload replaces the tab's earlier document.
@@ -800,6 +820,10 @@ fn open_document(hwnd: HWND, path: PathBuf) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
+    // .NET: an already open document selects its tab.
+    if input::select_open_document(hwnd, &state, &path) {
+        return;
+    }
     let portable = Rc::clone(&state.borrow().portable);
     let opened = portable.borrow_mut().open_tab(documents::tab_title(&path));
     let Ok(tab_id) = opened else {
@@ -807,6 +831,7 @@ fn open_document(hwnd: HWND, path: PathBuf) {
         refresh_status(&state);
         return;
     };
+    input::remember_path(&state, tab_id, &path);
     start_render(hwnd, &state, tab_id.get(), path);
     // The new tab has no document yet: hide the previous controller.
     let _ = select_webview(&state, tab_id.get());
@@ -978,7 +1003,11 @@ unsafe extern "system" fn window_proc(
             // SAFETY: for WM_DRAWITEM, lParam points to a DRAWITEMSTRUCT that
             // is valid for the duration of this message.
             match unsafe { (lparam.0 as *const DRAWITEMSTRUCT).as_ref() } {
-                Some(item) if draw_command_button(hwnd, item) => LRESULT(1),
+                Some(item)
+                    if draw_command_button(hwnd, item) || input::draw_find_button(hwnd, item) =>
+                {
+                    LRESULT(1)
+                }
                 _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
             }
         }
@@ -999,10 +1028,12 @@ unsafe extern "system" fn window_proc(
             let _ = unsafe { PostMessageW(Some(hwnd), WM_OPEN_DIALOG, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
         }
+        WM_COMMAND if input::on_command(hwnd, wparam) => LRESULT(0),
         WM_OPEN_DIALOG => {
             open_from_dialog(hwnd);
             LRESULT(0)
         }
+        message if input::handles(message) => input::on_message(hwnd, message, wparam),
         WM_RENDER_COMPLETE => {
             apply_render_results(hwnd);
             LRESULT(0)
@@ -1055,12 +1086,21 @@ unsafe extern "system" fn tab_proc(
                 provider.return_provider(wparam, lparam)
             })
         }
+        // Select, close-button press, drag reorder (`input`).
         WM_LBUTTONDOWN => {
-            if let Ok(parent) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }
-            {
-                select_tab_at(parent, (lparam.0 as i16) as i32);
-                let _ = unsafe { SetFocus(Some(hwnd)) };
-            }
+            input::on_tab_button_down(hwnd, (lparam.0 as i16) as i32);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            input::on_tab_mouse_move(hwnd, (lparam.0 as i16) as i32);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            input::on_tab_button_up(hwnd, (lparam.0 as i16) as i32);
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            input::on_tab_capture_lost(hwnd);
             LRESULT(0)
         }
         WM_PAINT => {
@@ -1117,21 +1157,14 @@ fn paint_tabs(hwnd: HWND) {
                         colors.surface
                     }),
                 );
-                unsafe {
-                    SetTextColor(
-                        dc,
-                        native_color(if active { colors.accent } else { colors.text }),
-                    );
-                    SetBkMode(dc, TRANSPARENT);
-                }
-                let text: Vec<u16> = title.encode_utf16().collect();
-                let x = rect
-                    .left
-                    .saturating_add((12_u32.saturating_mul(dpi) / 96) as i32);
-                let y = rect
-                    .top
-                    .saturating_add((12_u32.saturating_mul(dpi) / 96) as i32);
-                let _ = unsafe { TextOutW(dc, x, y, &text) };
+                // Title clipped before the close button, then its glyph.
+                input::paint_tab_content(
+                    dc,
+                    &rect,
+                    title,
+                    native_color(if active { colors.accent } else { colors.text }),
+                    dpi,
+                );
                 if active && focus_visible {
                     let _ = unsafe { DrawFocusRect(dc, &rect) };
                 }
@@ -1189,31 +1222,9 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
     let portable = Rc::clone(&state.borrow().portable);
     portable.borrow_mut().note_keyboard_input();
     if command == ShellCommand::CloseTab {
-        let Some(active) = portable.borrow().active_tab() else {
-            return false;
-        };
-        if let Some(mut session) = take_session(&state) {
-            // A tab whose render is still pending has no document yet.
-            let result = if session.has_document(active.get()) {
-                session.remove_document(active.get())
-            } else {
-                Ok(())
-            };
-            restore_session(&state, session);
-            if result.is_err() {
-                return false;
-            }
-        }
-        // Any queued or in-flight render for the closed tab is now stale.
-        {
-            let mut state = state.borrow_mut();
-            state.renders.cancel(active.get());
-            state.rendered_tabs.remove(&active.get());
-            state.tab_errors.remove(&active.get());
-            // Closed before it rendered: no longer a startup candidate.
-            let signal = state.startup.failed(active.get());
-            state.apply_startup(signal);
-        }
+        // The same close as the close button and UIA Invoke.
+        let active = portable.borrow().active_tab();
+        return active.is_some_and(|active| input::close_tab(hwnd, active));
     }
     let previous = portable.borrow().active_tab();
     let applied = portable.borrow_mut().apply_command(command);
@@ -1241,27 +1252,18 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
     // Bind the active tab first: a borrow held in an `if let` scrutinee would
     // span the reentrant WebView COM call below.
     let active = portable.borrow().active_tab();
-    let closed = command == ShellCommand::CloseTab;
     // Commands that keep the active tab (sidebar, find bar) need no switch.
-    let switched = closed || active != previous;
+    let switched = active != previous;
     if switched
         && let Some(active) = active
         && !select_webview(&state, active.get())
     {
         // Keep portable state and the visible controller in agreement.
-        if command != ShellCommand::CloseTab
-            && let Some(previous) = previous
-        {
+        if let Some(previous) = previous {
             let _ = portable.borrow_mut().select_tab(previous);
         }
         refresh_tabs(&state, None);
         return false;
-    }
-    if closed {
-        let a11y = state.borrow().accessibility.clone();
-        if let Some(a11y) = a11y {
-            a11y.notify_children_changed();
-        }
     }
     refresh_tabs(&state, active.filter(|id| Some(*id) != previous));
     true
@@ -1380,6 +1382,8 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     if newly_selected.is_some() {
         // A notice concerned the previous view.
         state.borrow_mut().notice = None;
+        // .NET `DocumentTabs_SelectionChanged` → `RefreshSearchForActiveTab`.
+        input::refresh_find(state);
     }
     refresh_status(state);
     // chrome: outline and history buttons follow the active tab.
@@ -1452,8 +1456,13 @@ fn poll_webview(hwnd: HWND) {
             readiness.controller_ready();
         }
     }
+    // Page messages (find results) and newly loaded documents.
+    input::after_poll(hwnd);
     // Shell chords pressed inside the document run here, outside COM.
     for chord in accelerators {
+        if input::route_accelerator(hwnd, chord.virtual_key, chord.ctrl, chord.shift) {
+            continue;
+        }
         if let Some(command) = route_key(KeyChord::new(
             chord.virtual_key,
             chord.ctrl,
@@ -1622,6 +1631,7 @@ fn reflow(hwnd: HWND, dpi: u32) {
             )
         };
     }
+    input::layout_find_bar(&state, layout.find_bar, actual_dpi);
     if let Some(mut session) = take_session(&state) {
         let b = layout.webview;
         let _ = session.set_viewport(ViewportBounds {
@@ -2068,6 +2078,7 @@ unsafe fn set_user_data(hwnd: HWND, value: isize) -> Result<(), Error> {
 }
 
 fn close_state(state: &Rc<RefCell<AppState>>) {
+    input::shutdown(state);
     let (mut session, mut accessibility, apartment, observer, controls) = {
         let mut state = state.borrow_mut();
         if state.destroyed {

@@ -45,3 +45,27 @@ fn tab_slots_cover_the_strip_without_gaps_and_reject_out_of_range() {
     assert_eq!(tab_slot(100, 0, 0), None);
     assert_eq!(tab_slot(-5, 2, 1), Some((0, 0)));
 }
+
+#[test]
+fn close_buttons_sit_at_the_slot_end_and_hit_testing_agrees() {
+    use marknexia_win32::accessibility::{TabHit, close_button_slot, hit_test_tab, tab_index_at};
+    // A 44 px strip, two 200 px tabs: a 44 px square close button each.
+    assert_eq!(close_button_slot(0, 200, 44), Some((156, 200)));
+    assert_eq!(close_button_slot(200, 400, 44), Some((356, 400)));
+    // Narrow slots: at most half the slot; none when empty.
+    assert_eq!(close_button_slot(0, 60, 44), Some((30, 60)));
+    assert_eq!(close_button_slot(0, 1, 44), None);
+    assert_eq!(close_button_slot(0, 200, 0), None);
+
+    assert_eq!(hit_test_tab(400, 44, 2, 10), Some(TabHit::Body(0)));
+    assert_eq!(hit_test_tab(400, 44, 2, 160), Some(TabHit::Close(0)));
+    assert_eq!(hit_test_tab(400, 44, 2, 200), Some(TabHit::Body(1)));
+    assert_eq!(hit_test_tab(400, 44, 2, 399), Some(TabHit::Close(1)));
+    assert_eq!(hit_test_tab(400, 44, 0, 10), None);
+
+    // Drag destinations clamp to the first and last slot.
+    assert_eq!(tab_index_at(400, 2, -50), Some(0));
+    assert_eq!(tab_index_at(400, 2, 250), Some(1));
+    assert_eq!(tab_index_at(400, 2, 900), Some(1));
+    assert_eq!(tab_index_at(400, 0, 10), None);
+}

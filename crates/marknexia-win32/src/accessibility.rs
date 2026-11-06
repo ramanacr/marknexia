@@ -128,6 +128,54 @@ pub fn tab_slot(total_width: i32, count: usize, index: usize) -> Option<(i32, i3
     Some((left, right))
 }
 
+/// The close button of a tab slot `left..right` in a strip `height` pixels
+/// high: a square of the strip height at the slot's right edge, at most half
+/// the slot width. Painting, hit testing and the UIA close-button bounds all
+/// use this, so they agree. `None` when the slot is too narrow.
+#[must_use]
+pub fn close_button_slot(left: i32, right: i32, height: i32) -> Option<(i32, i32)> {
+    let width = right.saturating_sub(left);
+    let size = height.max(0).min(width / 2);
+    (size > 0).then(|| (right - size, right))
+}
+
+/// Where a point in the tab strip falls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabHit {
+    /// The tab body at this index: selects, or starts a drag.
+    Body(usize),
+    /// The close button of the tab at this index.
+    Close(usize),
+}
+
+/// The tab slot that contains `x`. Points before the first slot map to the
+/// first tab and points after the last slot to the last tab, as pointer
+/// selection and drag reordering need.
+#[must_use]
+pub fn tab_index_at(total_width: i32, count: usize, x: i32) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(
+        (0..count)
+            .find(|index| tab_slot(total_width, count, *index).is_some_and(|(_, right)| x < right))
+            .unwrap_or(count - 1),
+    )
+}
+
+/// Hit-tests a point at `x` (strip coordinates) in a strip `height` high.
+#[must_use]
+pub fn hit_test_tab(total_width: i32, height: i32, count: usize, x: i32) -> Option<TabHit> {
+    let index = tab_index_at(total_width, count, x)?;
+    let (left, right) = tab_slot(total_width, count, index)?;
+    match close_button_slot(left, right, height) {
+        Some((close_left, close_right)) if x >= close_left && x < close_right => {
+            Some(TabHit::Close(index))
+        }
+        _ => Some(TabHit::Body(index)),
+    }
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)] // Server-side UIA vtables and SAFEARRAY ownership stay here.
 #[allow(non_snake_case)] // COM method names follow the UIA ABI.
@@ -149,15 +197,16 @@ pub mod native {
         },
         UI::{
             Accessibility::{
-                IRawElementProviderFragment, IRawElementProviderFragmentRoot,
-                IRawElementProviderSimple, ISelectionItemProvider, ISelectionItemProvider_Impl,
-                ISelectionProvider, ISelectionProvider_Impl, NavigateDirection,
-                NavigateDirection_FirstChild, NavigateDirection_LastChild,
+                IInvokeProvider, IInvokeProvider_Impl, IRawElementProviderFragment,
+                IRawElementProviderFragmentRoot, IRawElementProviderSimple, ISelectionItemProvider,
+                ISelectionItemProvider_Impl, ISelectionProvider, ISelectionProvider_Impl,
+                NavigateDirection, NavigateDirection_FirstChild, NavigateDirection_LastChild,
                 NavigateDirection_NextSibling, NavigateDirection_Parent,
                 NavigateDirection_PreviousSibling, ProviderOptions,
                 ProviderOptions_ServerSideProvider, StructureChangeType_ChildrenInvalidated,
-                UIA_AutomationFocusChangedEventId, UIA_ControlTypePropertyId,
-                UIA_E_ELEMENTNOTAVAILABLE, UIA_HasKeyboardFocusPropertyId,
+                StructureChangeType_ChildrenReordered, UIA_AutomationFocusChangedEventId,
+                UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE,
+                UIA_HasKeyboardFocusPropertyId, UIA_InvokePatternId,
                 UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
                 UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId, UIA_PATTERN_ID,
                 UIA_PROPERTY_ID, UIA_SelectionItem_ElementSelectedEventId,
@@ -174,7 +223,7 @@ pub mod native {
     // crate depends on windows-core directly.
     use windows_core::{BOOL, Error, HRESULT, IUnknown, Interface, Result, implement};
 
-    use super::tab_slot;
+    use super::{close_button_slot, tab_slot};
     use crate::{app::AppState, layout::PixelRect, tabs::TabId};
 
     const S_OK: HRESULT = HRESULT(0);
@@ -264,6 +313,18 @@ pub mod native {
     /// input-synchronous call) and a failed switch reverts the selection.
     pub type SelectTab = dyn Fn(TabId) -> bool;
 
+    /// Shell close for UIA `Invoke` on a tab's close button. Returns true
+    /// once the close is queued: it runs on the next message-loop turn,
+    /// because closing calls WebView2, which rejects COM inside UIA's
+    /// input-synchronous call. The shell then raises the structure event.
+    pub type CloseTab = dyn Fn(TabId) -> bool;
+
+    /// The accessible name of every tab close button (the WinUI
+    /// `TabViewItem` close button name).
+    pub const CLOSE_BUTTON_NAME: &str = "Close Tab";
+    /// Runtime-ID suffix of a tab's close button.
+    const CLOSE_BUTTON_PART: i32 = 1;
+
     struct TabSnapshot {
         id: TabId,
         name: String,
@@ -274,6 +335,7 @@ pub mod native {
         hwnd: HWND,
         app: Weak<RefCell<AppState>>,
         select: Weak<SelectTab>,
+        close: Weak<CloseTab>,
         bounds: Cell<PixelRect>,
         connected: Cell<bool>,
     }
@@ -325,6 +387,23 @@ pub mod native {
             })
         }
 
+        /// The close button of tab `id`, in screen coordinates; empty when
+        /// the slot is too narrow for one.
+        fn close_rect(&self, tabs: &[TabSnapshot], id: TabId) -> Result<UiaRect> {
+            let tab = self.tab_rect(tabs, id)?;
+            let left = tab.left as i32;
+            let right = left + tab.width as i32;
+            Ok(match close_button_slot(left, right, tab.height as i32) {
+                Some((close_left, close_right)) => UiaRect {
+                    left: f64::from(close_left),
+                    top: tab.top,
+                    width: f64::from(close_right - close_left),
+                    height: tab.height,
+                },
+                None => UiaRect::default(),
+            })
+        }
+
         fn has_focus(&self) -> bool {
             let focused = unsafe { GetFocus() };
             focused == self.hwnd
@@ -337,12 +416,18 @@ pub mod native {
     }
 
     impl NativeAccessibility {
-        pub fn new(hwnd: HWND, app: Weak<RefCell<AppState>>, select: Weak<SelectTab>) -> Self {
+        pub fn new(
+            hwnd: HWND,
+            app: Weak<RefCell<AppState>>,
+            select: Weak<SelectTab>,
+            close: Weak<CloseTab>,
+        ) -> Self {
             Self {
                 state: Rc::new(ProviderState {
                     hwnd,
                     app,
                     select,
+                    close,
                     bounds: Cell::new(PixelRect::default()),
                     connected: Cell::new(true),
                 }),
@@ -382,6 +467,24 @@ pub mod native {
                 UiaRaiseStructureChangedEvent(
                     &root,
                     StructureChangeType_ChildrenInvalidated,
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+        }
+
+        /// Tell UIA clients the tab order changed (drag reorder).
+        pub fn notify_children_reordered(&self) {
+            if !self.state.connected.get() || !unsafe { UiaClientsAreListening() }.as_bool() {
+                return;
+            }
+            let Ok(root) = root_simple(&self.state) else {
+                return;
+            };
+            let _ = unsafe {
+                UiaRaiseStructureChangedEvent(
+                    &root,
+                    StructureChangeType_ChildrenReordered,
                     ptr::null_mut(),
                     0,
                 )
@@ -554,6 +657,15 @@ pub mod native {
         provider.cast()
     }
 
+    fn close_fragment(state: &Rc<ProviderState>, id: TabId) -> Result<IRawElementProviderFragment> {
+        let provider: IRawElementProviderFragmentAbi = CloseButtonProvider {
+            state: Rc::downgrade(state),
+            id,
+        }
+        .into();
+        provider.cast()
+    }
+
     // Not agile: providers hold Rc/RefCell state and must stay on the STA.
     #[implement(
         IRawElementProviderSimpleAbi,
@@ -702,9 +814,14 @@ pub mod native {
         ) -> HRESULT {
             let value = self.live().and_then(|state| {
                 let tabs = state.tabs()?;
+                let inside = |r: &UiaRect| {
+                    x >= r.left && x < r.left + r.width && y >= r.top && y < r.top + r.height
+                };
                 for tab in &tabs {
-                    let r = state.tab_rect(&tabs, tab.id)?;
-                    if x >= r.left && x < r.left + r.width && y >= r.top && y < r.top + r.height {
+                    if inside(&state.close_rect(&tabs, tab.id)?) {
+                        return close_fragment(&state, tab.id).map(Some);
+                    }
+                    if inside(&state.tab_rect(&tabs, tab.id)?) {
                         return child_fragment(&state, tab.id).map(Some);
                     }
                 }
@@ -883,6 +1000,10 @@ pub mod native {
                         .and_then(|previous| tabs.get(previous))
                         .map(|tab| child_fragment(&state, tab.id))
                         .transpose(),
+                    // The close button is the tab's only child.
+                    NavigateDirection_FirstChild | NavigateDirection_LastChild => {
+                        close_fragment(&state, self.id).map(Some)
+                    }
                     _ => Ok(None),
                 }
             });
@@ -974,6 +1095,172 @@ pub mod native {
         fn SelectionContainer(&self) -> Result<IRawElementProviderSimple> {
             let (state, _) = self.live()?;
             root_simple(&state)
+        }
+    }
+
+    /// A tab's close button: a `Button` child of the `TabItem` with the
+    /// `Invoke` pattern, so a UIA client can close any tab without keys.
+    #[implement(
+        IRawElementProviderSimpleAbi,
+        IRawElementProviderFragmentAbi,
+        IInvokeProvider,
+        Agile = false
+    )]
+    struct CloseButtonProvider {
+        state: Weak<ProviderState>,
+        id: TabId,
+    }
+
+    impl CloseButtonProvider_Impl {
+        /// Live while its tab is open, like `TabProvider`.
+        fn live(&self) -> Result<(Rc<ProviderState>, Vec<TabSnapshot>)> {
+            let state = self
+                .state
+                .upgrade()
+                .filter(|state| state.connected.get())
+                .ok_or_else(|| Error::from(ELEMENT_NOT_AVAILABLE))?;
+            let tabs = state.tabs()?;
+            if tabs.iter().any(|tab| tab.id == self.id) {
+                Ok((state, tabs))
+            } else {
+                Err(ELEMENT_NOT_AVAILABLE.into())
+            }
+        }
+    }
+
+    impl IRawElementProviderSimpleAbi_Impl for CloseButtonProvider_Impl {
+        unsafe fn ProviderOptions(&self, result: *mut ProviderOptions) -> HRESULT {
+            if result.is_null() {
+                return E_POINTER;
+            }
+            unsafe { result.write(ProviderOptions_ServerSideProvider) };
+            S_OK
+        }
+
+        unsafe fn GetPatternProvider(
+            &self,
+            pattern: UIA_PATTERN_ID,
+            result: *mut *mut c_void,
+        ) -> HRESULT {
+            let value = self.live().and_then(|(state, _)| {
+                if pattern == UIA_InvokePatternId {
+                    let provider: IInvokeProvider = CloseButtonProvider {
+                        state: Rc::downgrade(&state),
+                        id: self.id,
+                    }
+                    .into();
+                    Ok(Some(provider.cast::<IUnknown>()?))
+                } else {
+                    Ok(None)
+                }
+            });
+            unsafe { write_interface(result, value) }
+        }
+
+        unsafe fn GetPropertyValue(
+            &self,
+            property: UIA_PROPERTY_ID,
+            result: *mut VARIANT,
+        ) -> HRESULT {
+            let value = self.live().map(|_| {
+                if property == UIA_NamePropertyId {
+                    VARIANT::from(CLOSE_BUTTON_NAME)
+                } else if property == UIA_ControlTypePropertyId {
+                    VARIANT::from(UIA_ButtonControlTypeId.0)
+                } else if property == UIA_IsControlElementPropertyId
+                    || property == UIA_IsEnabledPropertyId
+                {
+                    VARIANT::from(true)
+                } else if property == UIA_IsKeyboardFocusablePropertyId
+                    || property == UIA_HasKeyboardFocusPropertyId
+                {
+                    // Like the WinUI close button: pointer and UIA only; the
+                    // keyboard closes with Ctrl+W.
+                    VARIANT::from(false)
+                } else {
+                    VARIANT::default()
+                }
+            });
+            unsafe { write_variant(result, value) }
+        }
+
+        unsafe fn HostRawElementProvider(&self, result: *mut *mut c_void) -> HRESULT {
+            let value = self.live().map(|_| None::<IUnknown>);
+            unsafe { write_interface(result, value) }
+        }
+    }
+
+    impl IRawElementProviderFragmentAbi_Impl for CloseButtonProvider_Impl {
+        unsafe fn Navigate(
+            &self,
+            direction: NavigateDirection,
+            result: *mut *mut c_void,
+        ) -> HRESULT {
+            let value = self.live().and_then(|(state, _)| {
+                if direction == NavigateDirection_Parent {
+                    child_fragment(&state, self.id).map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+            unsafe { write_interface(result, value) }
+        }
+
+        unsafe fn GetRuntimeId(&self, result: *mut *mut SAFEARRAY) -> HRESULT {
+            let value = self.live().and_then(|_| {
+                let raw = self.id.get();
+                let values = [
+                    UiaAppendRuntimeId as i32,
+                    (raw & 0xffff_ffff) as u32 as i32,
+                    (raw >> 32) as u32 as i32,
+                    CLOSE_BUTTON_PART,
+                ];
+                build_safearray(VT_I4, &values, |value| ptr::from_ref(value).cast())
+            });
+            unsafe { write_safearray(result, value) }
+        }
+
+        unsafe fn BoundingRectangle(&self, result: *mut UiaRect) -> HRESULT {
+            let value = self
+                .live()
+                .and_then(|(state, tabs)| state.close_rect(&tabs, self.id));
+            unsafe { write_rect(result, value) }
+        }
+
+        unsafe fn GetEmbeddedFragmentRoots(&self, result: *mut *mut SAFEARRAY) -> HRESULT {
+            let value = self.live().map(|_| ptr::null_mut());
+            unsafe { write_safearray(result, value) }
+        }
+
+        unsafe fn SetFocus(&self) -> HRESULT {
+            // Not keyboard focusable.
+            match self.live() {
+                Ok(_) => INVALID_OPERATION,
+                Err(error) => error.code(),
+            }
+        }
+
+        unsafe fn FragmentRoot(&self, result: *mut *mut c_void) -> HRESULT {
+            let value = self
+                .live()
+                .and_then(|(state, _)| root_fragment_root(&state).map(Some));
+            unsafe { write_interface(result, value) }
+        }
+    }
+
+    impl IInvokeProvider_Impl for CloseButtonProvider_Impl {
+        fn Invoke(&self) -> Result<()> {
+            let (state, _) = self.live()?;
+            let close = state
+                .close
+                .upgrade()
+                .ok_or_else(|| Error::from(ELEMENT_NOT_AVAILABLE))?;
+            // No provider borrow is held; the close itself is posted.
+            if close(self.id) {
+                Ok(())
+            } else {
+                Err(INVALID_OPERATION.into())
+            }
         }
     }
 }

@@ -54,9 +54,32 @@ pub struct ShellProcess {
     profile: PathBuf,
 }
 
+/// A launch-unique suffix: this process, a counter and the time.
+fn unique_suffix() -> String {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!(
+        "{}-{}-{nanos}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// A single-instance key no other launch uses (`MARKNEXIA_INSTANCE_KEY`
+/// accepts at most 64 characters).
+pub fn unique_instance_key() -> String {
+    let mut key = format!("mnx-test-{}", unique_suffix());
+    key.truncate(64);
+    key
+}
+
 impl ShellProcess {
+    /// Launches an isolated shell: its own WebView2 profile and its own
+    /// single-instance key, so it never hands off to another running shell.
     pub fn launch(executable: &OsStr, args: &[&OsStr]) -> Self {
-        Self::launch_with_settings(executable, args, None)
+        Self::launch_with_options(executable, args, None, &unique_instance_key())
     }
 
     /// Like [`Self::launch`], with `settings` written to the isolated
@@ -66,15 +89,22 @@ impl ShellProcess {
         args: &[&OsStr],
         settings: Option<&[u8]>,
     ) -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        let profile = std::env::temp_dir().join(format!(
-            "marknexia-native-test-{}-{}-{nanos}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        Self::launch_with_options(executable, args, settings, &unique_instance_key())
+    }
+
+    /// Launches a shell that owns, or hands off to, `instance_key`.
+    pub fn launch_with_key(executable: &OsStr, args: &[&OsStr], instance_key: &str) -> Self {
+        Self::launch_with_options(executable, args, None, instance_key)
+    }
+
+    fn launch_with_options(
+        executable: &OsStr,
+        args: &[&OsStr],
+        settings: Option<&[u8]>,
+        instance_key: &str,
+    ) -> Self {
+        let profile =
+            std::env::temp_dir().join(format!("marknexia-native-test-{}", unique_suffix()));
         let profile = std::path::absolute(&profile).expect("absolute profile path");
         // create_dir, not create_dir_all: the name is unique, so this fails
         // rather than adopt an existing folder that Drop would then delete.
@@ -87,6 +117,7 @@ impl ShellProcess {
             .args(args)
             .env("MARKNEXIA_WEBVIEW2_USER_DATA", &profile)
             .env("MARKNEXIA_SETTINGS_PATH", &settings_path)
+            .env("MARKNEXIA_INSTANCE_KEY", instance_key)
             .spawn()
             .expect("launch shell");
         Self { child, profile }
