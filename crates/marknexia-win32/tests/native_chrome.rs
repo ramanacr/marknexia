@@ -853,16 +853,16 @@ fn the_brand_tooltips_and_open_button_follow_dotnet() {
     assert_target(&open, minimum, true);
     // .NET `BrandDetails`; the brand image is decoration, outside the
     // control view, so "Marknexia" is exposed once.
-    let product = shell.wait_id("2031", UIA_TextControlTypeId, "Marknexia");
+    let product = shell.wait_id("2041", UIA_TextControlTypeId, "Marknexia");
     assert!(
         shell
-            .find_id("2030")
+            .find_id("2040")
             .is_none_or(|icon| !unsafe { icon.CurrentIsControlElement() }
                 .is_ok_and(|control| control.as_bool())),
         "the brand image is not a control element"
     );
     assert!(is_onscreen(&product));
-    let tagline = shell.wait_id("2032", UIA_TextControlTypeId, "Read. Explore. Understand.");
+    let tagline = shell.wait_id("2042", UIA_TextControlTypeId, "Read. Explore. Understand.");
     assert!(is_onscreen(&tagline));
     // One tooltip window owned by the shell: six toolbar buttons, the
     // resize handle and the two row buttons.
@@ -919,7 +919,7 @@ fn the_compact_layout_collapses_labels_and_closes_the_pane() {
     });
     shell.until("the brand details to collapse", || {
         shell
-            .find_id("2031")
+            .find_id("2041")
             .is_none_or(|details| !is_onscreen(&details))
             .then_some(())
     });
@@ -983,7 +983,14 @@ fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
             .expect("ExpandCollapse interface");
     unsafe { expand.Expand() }.expect("Expand Help");
     let root = unsafe { shell.automation.GetRootElement() }.expect("desktop root");
+    // A slow runner may drop the first Expand (the menu loop starts only
+    // once the shell is ready): expand again every two seconds.
+    let mut attempts = 0_u32;
     let items = shell.until("the Help items", || {
+        attempts += 1;
+        if attempts.is_multiple_of(20) {
+            let _ = unsafe { expand.Expand() };
+        }
         let names: Vec<String> = shell
             .find_all(
                 &root,

@@ -142,10 +142,11 @@ pub(super) const MENU_SBOM: usize = 2134;
 /// outline row, "Reveal in File Explorer" for the selected tree row.
 pub(super) const ID_COPY_ANCHOR: usize = 2018;
 pub(super) const ID_REVEAL: usize = 2019;
-/// The brand area (.NET `BrandIcon` and `BrandDetails`).
-pub(super) const ID_BRAND_ICON: usize = 2030;
-pub(super) const ID_BRAND_NAME: usize = 2031;
-pub(super) const ID_BRAND_TAGLINE: usize = 2032;
+/// The brand area (.NET `BrandIcon` and `BrandDetails`). 2030 to 2033
+/// belong to the WebView2 runtime state (`runtime`).
+pub(super) const ID_BRAND_ICON: usize = 2040;
+pub(super) const ID_BRAND_NAME: usize = 2041;
+pub(super) const ID_BRAND_TAGLINE: usize = 2042;
 /// `ShellControls::sidebar`, the view selector.
 const ID_SELECTOR: usize = 1003;
 
@@ -2748,5 +2749,53 @@ fn sync_ui(hwnd: HWND) {
     }
     if let Some(text) = snapshot.announce {
         diagnostics::announce(controls.diagnostics.text, &text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Control ids are AutomationIds and `WM_COMMAND` sources: every
+    /// shell child needs its own (the brand ids once collided with the
+    /// runtime state's 2030 to 2033).
+    #[test]
+    fn shell_control_ids_are_unique() {
+        let mut ids = vec![
+            super::super::COMMAND_OPEN_ID,
+            ID_SELECTOR,
+            ID_TOGGLE_SIDEBAR,
+            ID_BACK,
+            ID_FORWARD,
+            ID_RELOAD,
+            ID_OPEN_FOLDER,
+            ID_THEME_LABEL,
+            ID_THEME,
+            ID_FIND,
+            ID_SIDEBAR_HEADER,
+            ID_OUTLINE,
+            ID_TREE,
+            ID_RECENT,
+            ID_SPLITTER,
+            ID_OUTLINE_LABEL,
+            ID_TREE_LABEL,
+            ID_RECENT_LABEL,
+            ID_COPY_ANCHOR,
+            ID_REVEAL,
+            ID_DIAGNOSTIC_TEXT,
+            ID_DIAGNOSTIC_CLOSE,
+            ID_DIAGNOSTIC_ICON,
+            ID_BRAND_ICON,
+            ID_BRAND_NAME,
+            ID_BRAND_TAGLINE,
+            super::super::runtime::ID_RUNTIME_TEXT,
+            super::super::runtime::ID_RUNTIME_INSTALL,
+            super::super::runtime::ID_RUNTIME_CANCEL,
+            super::super::runtime::ID_RUNTIME_LINK,
+        ];
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate shell control ids");
     }
 }
