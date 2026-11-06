@@ -8,9 +8,10 @@ Runs the WebView2 environment and session native tests, the browser-process
 exit recovery test (terminating only the WebView2 browser process that the
 test itself started), the UI Automation smoke test against the built shell,
 the native accessibility gate (DPI awareness and target size, UIA structure
-events, and the high-contrast palette, read only), and the shell visibility
-contract. Intended for local evidence hosts and for
-CI runners with an interactive desktop, on x64 and native ARM64.
+events, and the high-contrast palette, read only), the WebView2
+missing-runtime state (read only), and the shell visibility contract.
+Intended for local evidence hosts and for CI runners with an interactive
+desktop, on x64 and native ARM64.
 
 Writes a JSON summary to -OutputPath. Exits non-zero if any gate fails.
 #>
@@ -119,6 +120,13 @@ Invoke-Gate 'uia-native-chrome' {
 Invoke-Gate 'uia-native-input' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_input -- --ignored --test-threads=1 --nocapture
+} -Attempts 1
+# The WebView2 missing-runtime state, through UIA only (no keys, no clicks):
+# WEBVIEW2_BROWSER_EXECUTABLE_FOLDER points at a missing folder, so the
+# installed runtime is untouched and Install is never pressed.
+Invoke-Gate 'uia-native-runtime' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_runtime -- --ignored --test-threads=1 --nocapture
 } -Attempts 1
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
