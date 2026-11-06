@@ -212,7 +212,7 @@ impl Writer<'_> {
         if raw {
             self.push(text)
         } else if self.document_start && self.out.is_empty() && text.starts_with('\u{feff}') {
-            self.out.push_str(BOM_REFERENCE);
+            self.push(BOM_REFERENCE)?;
             self.escaped(&text['\u{feff}'.len_utf8()..], false)
         } else {
             self.escaped(text, false)

@@ -543,6 +543,9 @@ rtk git add docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md
 rtk git commit -m "docs: record Rust Win32 feasibility decision"
 ```
 
+#### Task 8 result — 2026-11-06
+
+Decision: **CONDITIONAL-GO**. The report is `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md`; the evidence index is `artifacts/rust-feasibility/manifest.json` (commit, CI run, per-architecture native gates, measurements, fixture digests, decision statuses). Native x64 and ARM64 gates, the .NET release preservation job, policy checks, reproducible builds and 300 s fuzzing pass in one CI run. Conditions C1–C6 in the report (owner approval of proposed compatibility decisions, highlighting language set, interactive evidence hosts, runtime contrast/multi-monitor DPI checks, update-key custody, production-scope features) carry into the production plan; none is a stop condition.
 ## Feasibility Exit Criteria
 
 - Frozen versioned fixtures reproduce current Markdown, headings, navigation, sanitization, rendering, settings, and update/archive behavior.
