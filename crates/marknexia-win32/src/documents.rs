@@ -20,7 +20,7 @@ use marknexia_files::{
     bounded_read::{BoundedReadError, BoundedReader},
     path::GatedPath,
 };
-use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, RenderError, Renderer};
+use marknexia_rendering::{PageIdentity, RenderContext, RenderError, Renderer};
 use marknexia_webview::policy::HostDocument;
 
 use crate::chrome_model::OutlineEntry;
@@ -435,8 +435,12 @@ pub fn build_document_with_outline(
     // The .NET `AllowRemoteAssets` setting selects the sanitizer's
     // `RemoteImagePolicy` (`AllowHttps` or `Blank`).
     context.allow_remote_assets = job.allow_remote_assets;
+    // Closing the tab or starting a newer render for it sets the job's flag;
+    // the render then stops at its next poll (between stages, inside the
+    // sanitizer and inside highlighting) instead of finishing for nothing.
+    let cancelled = || job.cancelled.load(Ordering::Acquire);
     let rendered = renderer
-        .render(&source, &context)
+        .render_cancellable(&source, &context, &cancelled)
         .map_err(OpenError::Render)?;
     drop(source);
     let outline = rendered
@@ -549,10 +553,10 @@ impl StartupTracker {
         Some(signal)
     }
 }
-/// Pending renders by tab. The renderer cannot be cancelled, so a result is
-/// accepted only while its ticket is still the tab's current one: closing the
-/// tab (or starting a newer render for it) makes an in-flight result stale,
-/// and its cancel flag lets a queued job skip the work entirely.
+/// Pending renders by tab. A result is accepted only while its ticket is still
+/// the tab's current one: closing the tab (or starting a newer render for it)
+/// makes an in-flight result stale, and its cancel flag lets a queued job skip
+/// the work entirely and stops a running render at its next poll.
 #[derive(Debug, Default)]
 pub struct RenderTickets {
     next: u64,

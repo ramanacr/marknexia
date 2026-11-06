@@ -490,3 +490,13 @@ fn exactly_one_of_first_render_or_startup_failed_is_signaled() {
     assert_eq!(tracker.webview_unavailable(), Some(StartupFailed));
     assert_eq!(tracker.rendered(1), None);
 }
+
+#[test]
+fn a_cancelled_job_stops_its_render() {
+    let (job, cancelled) = job(9, fixture("features.md"));
+    cancelled.store(true, Ordering::Release);
+    assert!(
+        build_document(&job, fixed_identity)
+            .is_err_and(|error| matches!(error, OpenError::Render(RenderError::Cancelled)))
+    );
+}
