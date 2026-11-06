@@ -132,8 +132,9 @@ impl Queued for Work {
             | Self::Selection(_)
             | Self::AutomationSelect(_)
             | Self::Selected(_)
-            | Self::TabUp(_)
             | Self::CaptureLost(_) => Admission::Critical,
+            // Two clicks need two button-ups.
+            Self::TabUp(_) => Admission::Keep,
             Self::Command(_)
             | Self::Find(_)
             | Self::Drop(_)
@@ -160,6 +161,50 @@ thread_local! {
     static WINDOW: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static TOKEN: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static FIND_EDIT: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static TAB_STRIP: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    /// The tab order as last painted or refreshed, so a click that arrives
+    /// while the state is mutably borrowed still records the tab it hit.
+    static TAB_ORDER: RefCell<Vec<TabId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `window.rs`: the tab order after every tab refresh and paint.
+pub(super) fn snapshot_tabs(tabs: &[TabId]) {
+    TAB_ORDER.with(|order| {
+        if let Ok(mut order) = order.try_borrow_mut() {
+            order.clear();
+            order.extend_from_slice(tabs);
+        }
+    });
+}
+
+/// `window.rs`: the tab strip window, readable while the state is borrowed.
+pub(super) fn tab_strip_window() -> Option<HWND> {
+    let strip = TAB_STRIP.with(std::cell::Cell::get);
+    (strip != 0).then_some(HWND(strip as *mut c_void))
+}
+
+/// True while deferred work is queued. New input then queues behind it, so
+/// it never runs before input that arrived earlier.
+pub(super) fn has_pending() -> bool {
+    DEFERRED.with(|deferred| !deferred.is_empty())
+}
+
+/// `window.rs`, after all the work at the tail of the message loop: if work
+/// is still queued (for example deferred by a pump inside that work, whose
+/// wake-up was consumed there), post exactly one new wake-up so the loop
+/// does not block.
+pub(super) fn rearm_wake() {
+    if has_pending() {
+        WAKE_POSTED.with(|posted| posted.set(false));
+        let (window, token) = (
+            WINDOW.with(std::cell::Cell::get),
+            TOKEN.with(std::cell::Cell::get),
+        );
+        if window != 0 && token != 0 {
+            WAKE_POSTED.with(|posted| posted.set(true));
+            post_to_window(window, WM_INPUT_WAKE, token);
+        }
+    }
 }
 
 /// `window.rs`: a WebView selection switch that must wait for the loop.
@@ -222,13 +267,15 @@ pub(super) fn defer_sidebar_key(step: SidebarResize) {
     defer(Work::SidebarKey(step));
 }
 
-/// True while an outer frame holds the state behind `strip`'s parent.
+/// True while an outer frame holds the state behind `strip`'s parent, or
+/// earlier input is still queued.
 fn strip_busy(strip: HWND) -> bool {
-    // SAFETY: `strip` is this thread's tab strip.
-    unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }
-        .ok()
-        .and_then(handle)
-        .is_some_and(|state| busy(&state))
+    has_pending()
+        // SAFETY: `strip` is this thread's tab strip.
+        || unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }
+            .ok()
+            .and_then(handle)
+            .is_some_and(|state| busy(&state))
 }
 
 /// `window.rs`: a layout requested while an outer frame held the state.
@@ -349,8 +396,11 @@ pub(super) fn run_deferred(hwnd: HWND) {
             Work::SidebarDragEnd => super::chrome::end_sidebar_drag(hwnd),
             Work::SidebarKey(step) => super::chrome::resize_sidebar_by_key(hwnd, step),
             Work::CloseWindow => {
-                // SAFETY: posts to this thread's own window; no pointers.
-                let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                // The state is free here: close now, synchronously, and run
+                // nothing after it (the window is going away).
+                // SAFETY: this thread's own window; no pointers.
+                let _ = unsafe { SendMessageW(hwnd, WM_CLOSE, None, None) };
+                return;
             }
         }
     }
@@ -363,7 +413,9 @@ enum ClickKind {
     Middle,
 }
 
-/// The tab under `x` in `strip` now, if the state can be read.
+/// The tab under `x` in `strip` now: from the state when it can be read,
+/// else from the last painted order (so a click stays pinned to its tab
+/// even while the state is mutably borrowed).
 fn tab_at(strip: HWND, x: i32) -> Option<TabId> {
     // SAFETY: `strip` is this thread's tab strip.
     let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
@@ -375,7 +427,8 @@ fn tab_at(strip: HWND, x: i32) -> Option<TabId> {
             app.tabs().tabs().iter().map(|tab| tab.id()).collect()
         })
     })
-    .flatten()?;
+    .flatten()
+    .or_else(|| TAB_ORDER.with(|order| order.try_borrow().ok().map(|order| order.clone())))?;
     tab_index_at(client.right - client.left, tabs.len(), x).map(|index| tabs[index])
 }
 
@@ -543,6 +596,9 @@ pub(super) fn initialize(
     });
     TOKEN.with(|cell| cell.set(token));
     WINDOW.with(|cell| cell.set(hwnd.0 as isize));
+    if let Some(c) = state.borrow().controls {
+        TAB_STRIP.with(|cell| cell.set(c.tabs.0 as isize));
+    }
     FIND_EDIT.with(|cell| cell.set(controls.edit.0 as isize));
     let mut state = state.borrow_mut();
     state.input.message_token = token;
@@ -697,7 +753,7 @@ fn close_requested(hwnd: HWND, tab: TabId) -> bool {
         return false;
     };
     let checked_out = reentry::read(&state, |state| state.webview_checked_out);
-    if busy(&state) || checked_out != Some(false) {
+    if has_pending() || busy(&state) || checked_out != Some(false) {
         defer(Work::Close(tab));
         return true;
     }
@@ -720,7 +776,7 @@ pub(super) fn on_command(hwnd: HWND, wparam: WPARAM) -> bool {
     if !ours {
         return false;
     }
-    if handle(hwnd).is_some_and(|state| busy(&state)) {
+    if has_pending() || handle(hwnd).is_some_and(|state| busy(&state)) {
         defer(Work::Command(wparam));
         return true;
     }
@@ -792,7 +848,7 @@ pub(super) fn route_accelerator(hwnd: HWND, key: u16, ctrl: bool, shift: bool, a
 /// A find command from a key or the WebView: deferred while busy.
 fn run_find_entry(hwnd: HWND, command: FindCommand) {
     match handle(hwnd) {
-        Some(state) if busy(&state) => defer(Work::Find(command)),
+        Some(state) if has_pending() || busy(&state) => defer(Work::Find(command)),
         Some(_) => run_find_command(hwnd, command),
         None => {}
     }
@@ -1296,7 +1352,9 @@ fn press_tab(strip_window: HWND, x: i32, capture: bool) {
 pub(super) fn on_tab_mouse_move(strip: HWND, x: i32, buttons: usize) {
     /// `MK_LBUTTON`: moves without the button never drag.
     const MK_LBUTTON: usize = 0x0001;
-    if buttons & MK_LBUTTON == 0 {
+    // Ignored while earlier button input is queued: the press it would
+    // move is not recorded yet.
+    if buttons & MK_LBUTTON == 0 || has_pending() {
         return;
     }
     let Some((_, state, width, _)) = strip_context(strip) else {

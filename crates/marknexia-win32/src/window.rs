@@ -309,6 +309,9 @@ pub fn run() -> Result<(), WindowError> {
         input::run_deferred(hwnd);
         // Results that arrived while an outer call held the session.
         apply_deferred_render_results(hwnd);
+        // Work still queued (its wake-up consumed by a pump inside the tail
+        // work) gets exactly one new wake-up, so the loop never blocks.
+        input::rearm_wake();
     }
     Ok(())
 }
@@ -1181,6 +1184,8 @@ fn paint_tabs(hwnd: HWND) {
         )
     };
     let count = tabs.len();
+    // The order a queued click is pinned against (`input`).
+    input::snapshot_tabs(&tabs.iter().map(|(id, _)| *id).collect::<Vec<_>>());
     let mut paint = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut paint) };
     let mut client = RECT::default();
@@ -1263,8 +1268,9 @@ fn route_native_chord(hwnd: HWND, key: u16, ctrl: bool, shift: bool) -> bool {
     };
     if !ctrl && !shift && matches!(key, 0x25 | 0x27) {
         // Left and Right belong to the tab strip only while it has focus.
-        let tab_strip =
-            crate::reentry::read(&state, |state| state.controls.map(|c| c.tabs)).flatten();
+        // The strip handle is a copy outside the state, so this also holds
+        // while the state is mutably borrowed.
+        let tab_strip = input::tab_strip_window();
         if tab_strip.is_none() || Some(unsafe { GetFocus() }) != tab_strip {
             return false;
         }
@@ -1272,7 +1278,7 @@ fn route_native_chord(hwnd: HWND, key: u16, ctrl: bool, shift: bool) -> bool {
     let Some(command) = route_key(KeyChord::new(key, ctrl, shift, false)) else {
         return false;
     };
-    if !crate::reentry::is_free(&state) {
+    if input::has_pending() || !crate::reentry::is_free(&state) {
         input::defer_native_key(key, ctrl, shift);
         return true;
     }
@@ -1435,6 +1441,19 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     else {
         return;
     };
+    let order = crate::reentry::read(state, |state| {
+        crate::reentry::read(&state.portable, |app| {
+            app.tabs()
+                .tabs()
+                .iter()
+                .map(|tab| tab.id())
+                .collect::<Vec<_>>()
+        })
+    })
+    .flatten();
+    if let Some(order) = order {
+        input::snapshot_tabs(&order);
+    }
     if let Some(c) = controls {
         unsafe {
             let _ = InvalidateRect(Some(c.tabs), None, true);

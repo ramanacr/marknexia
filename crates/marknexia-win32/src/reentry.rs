@@ -36,10 +36,14 @@ pub enum Admission {
     /// Idempotent work (a repaint, a layout): an item of the same kind that
     /// is already queued is replaced, so it is queued at most once.
     Coalesce,
-    /// Work that must never be lost (a close, a selection, a button-up): an
-    /// identical item already queued is kept, otherwise it is queued even
-    /// past the limit. Its count is bounded by what it refers to (tabs).
+    /// Work that must never be lost (a close, a selection): it is queued
+    /// even past the limit. An identical item already queued moves to the
+    /// back, so the latest request wins (selections A, B, A end on A). Its
+    /// count is bounded by what it refers to (tabs).
     Critical,
+    /// Work that must never be lost and never merge with an identical item
+    /// (a button-up: two clicks need two). Queued even past the limit.
+    Keep,
     /// Other input: queued while there is room, otherwise dropped (and the
     /// caller logs it).
     Bounded,
@@ -94,10 +98,13 @@ impl<T: Queued> Deferred<T> {
                 }
             }
             Admission::Critical => {
-                if items.iter().any(|queued| queued.same(&item)) {
+                if let Some(index) = items.iter().position(|queued| queued.same(&item)) {
+                    items.remove(index);
+                    items.push_back(item);
                     return Pushed::Coalesced;
                 }
             }
+            Admission::Keep => {}
             Admission::Bounded => {
                 if items.len() >= self.limit {
                     return Pushed::Dropped;
@@ -135,6 +142,8 @@ mod tests {
     #[derive(Debug, PartialEq)]
     enum Item {
         Close(u64),
+        Select(u64),
+        Up(u32),
         Repaint,
         Layout(u32),
         Click(u32),
@@ -143,7 +152,8 @@ mod tests {
     impl Queued for Item {
         fn admission(&self) -> Admission {
             match self {
-                Self::Close(_) => Admission::Critical,
+                Self::Close(_) | Self::Select(_) => Admission::Critical,
+                Self::Up(_) => Admission::Keep,
                 Self::Repaint | Self::Layout(_) => Admission::Coalesce,
                 Self::Click(_) => Admission::Bounded,
             }
@@ -224,5 +234,26 @@ mod tests {
             ]
         );
         assert!(deferred.take().is_empty());
+    }
+
+    #[test]
+    fn a_repeated_critical_request_moves_to_the_back() {
+        let deferred = Deferred::new(1);
+        for item in [Item::Select(1), Item::Select(2), Item::Select(1)] {
+            let _ = deferred.push(item);
+        }
+        // Selections A, B, A end on A.
+        assert_eq!(deferred.take(), [Item::Select(2), Item::Select(1)]);
+    }
+
+    #[test]
+    fn identical_button_ups_are_kept_for_a_double_click() {
+        let deferred = Deferred::new(1);
+        assert_eq!(deferred.push(Item::Click(5)), Pushed::Queued);
+        assert_eq!(deferred.push(Item::Up(5)), Pushed::Queued);
+        // Full for bounded input, but button-ups are kept, and never merged.
+        assert_eq!(deferred.push(Item::Click(5)), Pushed::Dropped);
+        assert_eq!(deferred.push(Item::Up(5)), Pushed::Queued);
+        assert_eq!(deferred.take(), [Item::Click(5), Item::Up(5), Item::Up(5)]);
     }
 }
