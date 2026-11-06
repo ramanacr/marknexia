@@ -1395,4 +1395,155 @@ mod native_tests {
         session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
+    /// Phase 3 Mermaid runtime: the pinned runtime is served through the
+    /// broker under the page nonce, a valid diagram becomes SVG, an invalid
+    /// one shows the in-page error with its message, and a diagram over a
+    /// limit stays an accessible source fallback without loading the runtime.
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_mermaid_runtime_renders_and_falls_back() {
+        use marknexia_core::contracts::AppTheme;
+        use marknexia_rendering::{
+            DocumentRenderer, PageIdentity, RenderContext, RenderLimits, Renderer,
+        };
+
+        use crate::policy::HostDocument;
+
+        let apartment = Rc::new(StaApartment::enter().unwrap());
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Marknexia Mermaid runtime test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                900,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let observer: Rc<dyn Fn(PageToHost)> = Rc::new(|_| {});
+        let folder = std::env::temp_dir()
+            .join("marknexia-webview-native-tests")
+            .join(format!("mermaid-{}", std::process::id()));
+        let mut session = WebViewSession::new(apartment, parent, folder, Rc::downgrade(&observer));
+        let limits = RenderLimits {
+            max_diagram_source_bytes: 64,
+            ..RenderLimits::default()
+        };
+        let renderer = Renderer::with_engine(marknexia_markdown::PulldownAdapter, limits).unwrap();
+        let cases = [
+            (31_u64, "```mermaid\ngraph TD\nA[Alpha]-->B[Beta]\n```\n"),
+            (32, "```mermaid\nthis is not a mermaid diagram\n```\n"),
+            (
+                33,
+                "```mermaid\ngraph TD\nA[Alpha]-->B[Beta]\nB-->C[Gamma]\nC-->D[Delta]\nD-->E[Epsilon]\n```\n",
+            ),
+        ];
+        for (tab_id, source) in cases {
+            let seed = u8::try_from(tab_id).unwrap();
+            let identity = PageIdentity::new([seed; 16], [seed ^ 0x5A; 16]).unwrap();
+            let rendered = renderer
+                .render(source, &RenderContext::new(AppTheme::Light, identity))
+                .unwrap();
+            let document =
+                HostDocument::from_rendered(tab_id, 1, "diagram.md", rendered, &identity, false)
+                    .unwrap();
+            assert_eq!(document.loads_mermaid_runtime(), tab_id != 33);
+            session.add_document(document).unwrap();
+        }
+        session.select_tab(31).unwrap();
+        session.start().unwrap();
+
+        const PROBE: &str = r#"JSON.stringify((() => {
+  const q = id => document.getElementById(id);
+  const render = q('mermaid-1-render');
+  const error = q('mermaid-1-error');
+  const message = q('mermaid-1-error-msg');
+  const fallback = document.querySelector('.marknexia-diagram-fallback');
+  return {
+    runtime: typeof mermaid,
+    svg: !!(render && render.querySelector('svg')),
+    svgText: render ? render.textContent : null,
+    error: error ? error.style.display : null,
+    message: message ? message.textContent : null,
+    fallbackRole: fallback ? fallback.getAttribute('role') : null,
+    fallbackText: fallback ? fallback.textContent : null
+  };
+})())"#;
+        let mut outcomes = std::collections::BTreeMap::new();
+        for (tab_id, _) in cases {
+            session.select_tab(tab_id).unwrap();
+            pump_until(&mut session, Duration::from_secs(30), |session| {
+                session
+                    .host(tab_id)
+                    .is_some_and(crate::host::WebViewHost::document_loaded)
+            });
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let outcome = loop {
+                let result = Rc::new(RefCell::new(None));
+                session
+                    .host(tab_id)
+                    .unwrap()
+                    .evaluate_for_test(PROBE, Rc::clone(&result))
+                    .unwrap();
+                pump_until(&mut session, Duration::from_secs(10), |_| {
+                    result.borrow().is_some()
+                });
+                let json = result.borrow_mut().take().unwrap();
+                let text: String = serde_json::from_str(&json).unwrap();
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let settled = match tab_id {
+                    31 => value["svg"] == true,
+                    32 => value["error"] == "block",
+                    _ => true,
+                };
+                if settled || Instant::now() > deadline {
+                    break value;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            eprintln!("tab {tab_id}: {outcome}");
+            outcomes.insert(tab_id, outcome);
+        }
+        let valid = &outcomes[&31];
+        assert_eq!(valid["runtime"], "object", "the pinned runtime loaded");
+        assert_eq!(valid["svg"], true, "the valid diagram became SVG");
+        let labels = valid["svgText"].as_str().unwrap();
+        assert!(
+            labels.contains("Alpha") && labels.contains("Beta"),
+            "{labels}"
+        );
+        assert_eq!(valid["error"], "none");
+
+        let invalid = &outcomes[&32];
+        assert_eq!(invalid["runtime"], "object");
+        assert_eq!(invalid["svg"], false);
+        assert_eq!(invalid["error"], "block", "the in-page diagnostic is shown");
+        assert!(!invalid["message"].as_str().unwrap().trim().is_empty());
+
+        let limited = &outcomes[&33];
+        assert_eq!(limited["runtime"], "undefined", "no runtime for a fallback");
+        assert_eq!(limited["fallbackRole"], "note");
+        let fallback = limited["fallbackText"].as_str().unwrap();
+        assert!(
+            fallback.contains("Mermaid diagram was not rendered."),
+            "{fallback}"
+        );
+        assert!(
+            fallback.contains("diagram source limit exceeded"),
+            "{fallback}"
+        );
+        assert!(
+            fallback.contains("A[Alpha]--&gt;B[Beta]") || fallback.contains("A[Alpha]-->B[Beta]")
+        );
+
+        session.close().unwrap();
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
 }

@@ -556,6 +556,26 @@ impl WebViewHost {
         &self.callback_panics
     }
 
+    /// Native tests only: evaluates `script` in the loaded page and stores
+    /// its JSON result in `result` when the completion arrives.
+    #[cfg(test)]
+    pub(crate) fn evaluate_for_test(
+        &self,
+        script: &str,
+        result: std::rc::Rc<RefCell<Option<String>>>,
+    ) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let script: Vec<u16> = script.encode_utf16().chain(std::iter::once(0)).collect();
+        let handler =
+            webview2_com::ExecuteScriptCompletedHandler::create(Box::new(move |status, json| {
+                *result.borrow_mut() = Some(status.map_or_else(|_| "error".to_owned(), |()| json));
+                Ok(())
+            }));
+        // SAFETY: called on the owning STA; WebView2 copies the script.
+        unsafe { core.ExecuteScript(windows::core::PCWSTR::from_raw(script.as_ptr()), &handler) }
+            .map_err(HostError::from_com)
+    }
+
     /// Drain validated page messages after Windows dispatch, outside COM.
     pub fn drain_page_messages(&self) -> Vec<PageToHost> {
         self.page_messages.borrow_mut().drain(..).collect()
