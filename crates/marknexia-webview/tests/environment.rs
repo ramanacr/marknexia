@@ -103,11 +103,14 @@ fn does_not_treat_a_dev_edge_channel_as_evergreen() {
 }
 
 #[test]
-fn rejects_an_empty_success_version_from_the_loader() {
-    assert_eq!(
-        EvergreenRuntime::detect_with(&VersionReply(Ok(""))),
-        Err(RuntimeError::EmptyVersion)
-    );
+fn treats_an_empty_or_null_success_version_as_missing() {
+    // `take_pwstr` turns a null PWSTR into an empty string.
+    for version in ["", "   "] {
+        assert_eq!(
+            EvergreenRuntime::detect_with(&VersionReply(Ok(version))),
+            Ok(RuntimeStatus::Missing)
+        );
+    }
 }
 
 #[test]

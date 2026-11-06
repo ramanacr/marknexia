@@ -2,6 +2,11 @@
 
 //! Native WebView2 boundary.
 
+#[cfg(windows)]
+pub mod bootstrap;
+#[cfg(windows)]
+#[allow(unsafe_code)] // WinHTTP, WinVerifyTrust and CreateProcessW adapters.
+pub mod bootstrap_native;
 pub mod broker;
 #[cfg(windows)]
 #[allow(unsafe_code)] // WebView2 event registration and response streams stay private.

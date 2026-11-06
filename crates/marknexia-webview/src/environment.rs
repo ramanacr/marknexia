@@ -36,14 +36,15 @@ pub enum RuntimeStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
     LoaderFailure(i32),
-    EmptyVersion,
 }
 
 pub trait BrowserVersionProbe {
     fn query_version(&self) -> Result<String, i32>;
 }
 
-struct NativeBrowserVersionProbe;
+/// `GetAvailableCoreWebView2BrowserVersionString` with the default browser
+/// folder. The loader also honors `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`.
+pub struct NativeBrowserVersionProbe;
 
 impl BrowserVersionProbe for NativeBrowserVersionProbe {
     fn query_version(&self) -> Result<String, i32> {
@@ -66,9 +67,13 @@ impl EvergreenRuntime {
         Self::detect_with(&NativeBrowserVersionProbe)
     }
 
-    pub fn detect_with(probe: &impl BrowserVersionProbe) -> Result<RuntimeStatus, RuntimeError> {
+    /// A null or empty version means Evergreen is unavailable, like a
+    /// missing file; preview channels do not count as the shared runtime.
+    pub fn detect_with<P: BrowserVersionProbe + ?Sized>(
+        probe: &P,
+    ) -> Result<RuntimeStatus, RuntimeError> {
         match probe.query_version() {
-            Ok(version) if version.trim().is_empty() => Err(RuntimeError::EmptyVersion),
+            Ok(version) if version.trim().is_empty() => Ok(RuntimeStatus::Missing),
             Ok(version) if is_preview_channel(&version) => Ok(RuntimeStatus::Missing),
             Ok(version) => Ok(RuntimeStatus::Available { version }),
             Err(code) if code == 0x8007_0002u32 as i32 => Ok(RuntimeStatus::Missing),
