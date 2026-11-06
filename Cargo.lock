@@ -304,6 +304,7 @@ name = "marknexia-webview"
 version = "0.1.0"
 dependencies = [
  "marknexia-core",
+ "marknexia-markdown",
  "marknexia-rendering",
  "marknexia-security",
  "percent-encoding",
