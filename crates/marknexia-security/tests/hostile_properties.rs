@@ -1210,3 +1210,54 @@ fn a_chunk_tree_over_the_node_limit_is_too_complex() {
     let split = "<p><b>x</b></p>\n".repeat(limit / 2 + 16);
     assert!(policy.sanitize_fragment(&split).is_ok());
 }
+
+#[test]
+fn a_byte_order_mark_that_starts_the_output_stays_a_fixed_point() {
+    // CI fuzzing (run 42115856878): NULs before U+FEFF are dropped by the
+    // parser, so the text node, and the output, started with U+FEFF, which
+    // the next parse discarded as a byte order mark. It is now written as a
+    // character reference there.
+    let crash = format!(
+        "{}\u{feff}{}#ebu\u{0b}<p>+ td v",
+        "\0".repeat(58),
+        "\0".repeat(22)
+    );
+    let blank = HtmlPolicy::new(
+        ContentPolicy::try_new(PolicyLimits::default(), RemoteImagePolicy::Blank).unwrap(),
+    );
+    let once = blank.sanitize_fragment(&crash).unwrap();
+    assert_eq!(once.as_str(), "&#xFEFF;#ebu\u{0b}<p>+ td v</p>");
+    assert_eq!(blank.sanitize_fragment(once.as_str()).unwrap(), once);
+    // The same class: controls the parser drops, or keeps, before U+FEFF,
+    // inside and outside elements.
+    for prefix in [
+        "\0",
+        "\0\0\r",
+        "\u{1}",
+        "\u{b}",
+        "\u{c}",
+        "\r\n",
+        "<!-- c -->",
+        "</p>",
+        "",
+    ] {
+        for suffix in ["x", "<p>y</p>", "\0<b>z</b>", "\u{feff}", ""] {
+            for input in [
+                format!("{prefix}\u{feff}{suffix}"),
+                format!("<p>{prefix}\u{feff}{suffix}</p>"),
+                format!("{prefix}\u{feff}\u{feff}{suffix}"),
+            ] {
+                let once = html(&input);
+                // `html` asserts the fixed point; the leading BOM of the
+                // input itself is the only one that may be dropped.
+                let kept =
+                    input.matches('\u{feff}').count() - usize::from(input.starts_with('\u{feff}'));
+                assert_eq!(
+                    once.matches('\u{feff}').count() + once.matches("&#xFEFF;").count(),
+                    kept,
+                    "{input:?} -> {once:?}"
+                );
+            }
+        }
+    }
+}

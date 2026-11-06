@@ -70,7 +70,17 @@ struct Writer<'b> {
     charged: usize,
     budget: &'b OutputBudget,
     restore_leading_lf: bool,
+    /// The output starts the whole fragment (see [`BOM_REFERENCE`]).
+    document_start: bool,
 }
+
+/// The HTML parser discards a U+FEFF at the very start of its input. A text
+/// node can still start with one there (when the input began with
+/// characters the parser drops, such as NUL), so a U+FEFF that would be the
+/// first character of the whole output is written as this character
+/// reference: re-parsing decodes it to the same text, and sanitizing stays a
+/// fixed point.
+const BOM_REFERENCE: &str = "&#xFEFF;";
 
 impl Writer<'_> {
     fn push(&mut self, text: &str) -> Result<(), SanitizeError> {
@@ -201,6 +211,9 @@ impl Writer<'_> {
         );
         if raw {
             self.push(text)
+        } else if self.document_start && self.out.is_empty() && text.starts_with('\u{feff}') {
+            self.out.push_str(BOM_REFERENCE);
+            self.escaped(&text['\u{feff}'.len_utf8()..], false)
         } else {
             self.escaped(text, false)
         }
@@ -238,13 +251,15 @@ fn starts_with_line_feed(node: &Handle) -> bool {
 }
 
 /// Serialize the children of `root` (ammonia's `<html>` fragment root), as
-/// ammonia's `Document::write_to` does, into a new string.
+/// ammonia's `Document::write_to` does, into a new string. `document_start`
+/// is set for the chunk whose output starts the fragment.
 pub(crate) fn serialize_children(
     root: &Handle,
     budget: &OutputBudget,
     capacity: usize,
+    document_start: bool,
 ) -> Result<String, SanitizeError> {
-    serialize_with(root, budget, capacity, true)
+    serialize_with(root, budget, capacity, true, document_start)
 }
 
 fn serialize_with(
@@ -252,12 +267,14 @@ fn serialize_with(
     budget: &OutputBudget,
     capacity: usize,
     restore_leading_lf: bool,
+    document_start: bool,
 ) -> Result<String, SanitizeError> {
     let mut writer = Writer {
         out: String::with_capacity(capacity.min(budget.limit)),
         charged: 0,
         budget,
         restore_leading_lf,
+        document_start,
     };
     // `TraversalScope::ChildrenOnly(None)`: the root's own name is not used.
     let mut stack = vec![ElemInfo {
@@ -339,7 +356,7 @@ mod tests {
             .clean(input);
         let root = document.to_dom_node();
         let budget = OutputBudget::new(usize::MAX);
-        let ours = serialize_with(&root, &budget, 0, false).unwrap();
+        let ours = serialize_with(&root, &budget, 0, false, false).unwrap();
         (ours, reference(&root))
     }
 
@@ -416,7 +433,7 @@ mod tests {
         let document = ammonia::Builder::default().clean(&text);
         let started = std::time::Instant::now();
         let budget = OutputBudget::new(usize::MAX);
-        let out = serialize_children(&document.to_dom_node(), &budget, 0).unwrap();
+        let out = serialize_children(&document.to_dom_node(), &budget, 0, true).unwrap();
         assert_eq!(out.len(), text.len() + 4 * 2_000_000);
         let bound = if cfg!(debug_assertions) { 20 } else { 1 };
         assert!(started.elapsed().as_secs() < bound);
@@ -427,10 +444,10 @@ mod tests {
         let document = ammonia::Builder::default().clean("<p>abc</p>");
         let root = document.to_dom_node();
         let budget = OutputBudget::new(20);
-        assert!(serialize_children(&root, &budget, 0).is_ok());
-        assert!(serialize_children(&root, &budget, 0).is_ok());
+        assert!(serialize_children(&root, &budget, 0, true).is_ok());
+        assert!(serialize_children(&root, &budget, 0, true).is_ok());
         assert_eq!(
-            serialize_children(&root, &budget, 0),
+            serialize_children(&root, &budget, 0, true),
             Err(SanitizeError::OutputTooLarge { limit: 20 })
         );
     }

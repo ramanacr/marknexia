@@ -764,6 +764,7 @@ fn clean_chunks(
             &builders[worker],
             &input[chunks[index].range.clone()],
             &budget,
+            index == 0,
         );
         match result {
             Ok(cleaned) => {
@@ -869,10 +870,11 @@ fn clean_chunk(
     builder: &Builder<'static>,
     chunk: &str,
     budget: &OutputBudget,
+    document_start: bool,
 ) -> Result<String, SanitizeError> {
     let document = builder.clean(chunk);
     let capacity = chunk.len() + chunk.len() / 8;
-    serialize::serialize_children(&document.to_dom_node(), budget, capacity)
+    serialize::serialize_children(&document.to_dom_node(), budget, capacity, document_start)
 }
 
 fn builder(policy: ContentPolicy) -> Builder<'static> {

@@ -204,6 +204,12 @@ const RAW: &[&str] = &[
     "<plaintext>",
     "\u{feff}",
     "\u{feff}<b>x</b>\n",
+    "\0",
+    "\0\u{feff}",
+    "\u{1}",
+    "\u{b}",
+    "\u{c}<p>",
+    "\r",
 ];
 
 #[test]

@@ -166,6 +166,8 @@ AngleSharp was probed through the .NET service. It gives the same output as Rust
 
 All of these are fixed points in both editions.
 
+**A U+FEFF that starts the output.** The parser discards U+FEFF only as the first character of its input. Characters that it drops, such as NUL, can come before a U+FEFF. In that case the text node keeps the U+FEFF, and the output starts with it. The next parse then discarded it as a byte order mark, so sanitizing was not a fixed point; CI fuzzing found this (run 42115856878). The Marknexia serializer now writes a U+FEFF that would be the first character of the whole output as `&#xFEFF;`, which parses back to the same text. Everywhere else it writes the character itself, as html5ever does. Test: `a_byte_order_mark_that_starts_the_output_stays_a_fixed_point`.
+
 ## Note — attacker-controlled attributes kept for parity
 
 These are not differences. Markdown source controls these values, and they survive sanitization in both editions:

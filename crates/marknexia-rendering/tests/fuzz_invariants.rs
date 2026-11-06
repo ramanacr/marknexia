@@ -74,6 +74,11 @@ const TOKENS: &[&str] = &[
     "-->",
     "\r\n",
     "\t",
+    "\0",
+    "\u{feff}",
+    "\u{1}",
+    "\u{b}",
+    "\u{c}",
 ];
 
 struct XorShift(u64);
