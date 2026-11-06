@@ -8,6 +8,7 @@ These decisions are deliberately outside the frozen .NET baseline and must not a
 * **Markdown source diagnostics — proposed.** See `markdown-source-diagnostics.md`: an additive, non-serialized diagnostics field; HTML output and fixtures are unchanged.
 * **Markdown resource limits — proposed.** See `markdown-resource-limits.md`: container and inline nesting flattened beyond depth 32, and a rendered-body output cap (default 128 MiB) that fails the parse.
 * **Rendering differences (REND-1 to REND-7) — proposed.** See `rendering-differences.md`: the .NET size limits (50 MiB source, 128 MiB page) with the sanitizer's budgets, C#-only highlighting, LF page bytes, single-pass remote-image blanking, math depth clamp, text-handling approximations, and API shape (including cooperative cancellation).
+* **Mermaid runtime (MER-1 to MER-5) — proposed.** See `mermaid-runtime.md`: the pinned .NET runtime (Mermaid 10.9.1, CRLF bytes, `packaging/webview/mermaid.lock.json`) served from memory by the resource broker instead of an extracted folder mapping, only to a page whose template loads it, at exactly its URI, with `no-store` headers.
 * **Navigation probe order and case folding (NAV-1 to NAV-4) — proposed.** See `navigation-probe-order.md`:
   * A relative escape is rejected before the current-file probe.
   * `..` above the drive root is rejected rather than clamped.
