@@ -15,6 +15,11 @@ use std::{
 
 use marknexia_webview::{
     bootstrap::{
+        ACCEPTED_ORIGINAL_FILENAMES, ACCEPTED_PRODUCT_NAMES, CODE_SIGNING_OID, IdentityError,
+        VersionInfo, VersionInfoReader, check_version_info, has_code_signing_usage,
+        is_allowed_download_host,
+    },
+    bootstrap::{
         BOOTSTRAPPER_URL, Bootstrap, BootstrapperDownloader, BoundedBody, DownloadError,
         DownloadLimits, DownloadUrl, InstallError, InstallerRunner, MISSING_MESSAGE,
         OFFLINE_INSTALLER_PAGE, PayloadError, RuntimeSetup, SetupFailure, SetupPhase, SetupStep,
@@ -22,6 +27,7 @@ use marknexia_webview::{
         classify_exit_code, classify_network_error, create_fresh_folder, failure_message,
         is_microsoft_signer, validate_payload, write_new_file,
     },
+    bootstrap_native::DownloadAbort,
     environment::BrowserVersionProbe,
 };
 
@@ -35,8 +41,33 @@ fn the_official_links_are_valid_microsoft_https_urls() {
     assert_eq!(url.host(), "go.microsoft.com");
     assert_eq!(url.path_and_query(), "/fwlink/p/?LinkId=2124703");
     assert_eq!(url.to_string(), BOOTSTRAPPER_URL);
-    let page = DownloadUrl::parse(OFFLINE_INSTALLER_PAGE).expect("offline page");
-    assert_eq!(page.host(), "developer.microsoft.com");
+    // The offline page is only opened in the browser, never downloaded.
+    assert!(OFFLINE_INSTALLER_PAGE.starts_with("https://developer.microsoft.com/"));
+}
+
+#[test]
+fn only_the_fwlink_host_and_the_edge_download_cdn_are_allowed() {
+    for host in [
+        "go.microsoft.com",
+        "msedge.sf.dl.delivery.mp.microsoft.com",
+        "msedge.sb.dl.delivery.mp.microsoft.com",
+        "msedge.sf.tlu.dl.delivery.mp.microsoft.com",
+        "msedge.sb.tlu.dl.delivery.mp.microsoft.com",
+    ] {
+        assert!(is_allowed_download_host(host), "{host}");
+    }
+    for host in [
+        "microsoft.com",
+        "download.microsoft.com",
+        "developer.microsoft.com",
+        "dl.delivery.mp.microsoft.com",
+        ".dl.delivery.mp.microsoft.com",
+        "msedge.sf.dl.delivery.mp.microsoft.com.example.com",
+        "evil-dl.delivery.mp.microsoft.com",
+        "fwlink.go.microsoft.com",
+    ] {
+        assert!(!is_allowed_download_host(host), "{host}");
+    }
 }
 
 #[test]
@@ -51,6 +82,8 @@ fn urls_must_be_https_to_microsoft_on_the_default_port() {
             UrlError::UntrustedHost,
         ),
         ("https://evilmicrosoft.com/x", UrlError::UntrustedHost),
+        ("https://microsoft.com/x", UrlError::UntrustedHost),
+        ("https://download.microsoft.com/x", UrlError::UntrustedHost),
         ("https://user@go.microsoft.com/x", UrlError::UserInfo),
         ("https://go.microsoft.com@example.com/x", UrlError::UserInfo),
         ("https://go.microsoft.com:8443/x", UrlError::Port),
@@ -72,10 +105,10 @@ fn urls_must_be_https_to_microsoft_on_the_default_port() {
 
 #[test]
 fn accepted_urls_are_normalized() {
-    let url = DownloadUrl::parse("HTTPS://Download.Microsoft.COM:443?x=1#frag").expect("valid");
-    assert_eq!(url.host(), "download.microsoft.com");
+    let url = DownloadUrl::parse("HTTPS://Go.Microsoft.COM:443?x=1#frag").expect("valid");
+    assert_eq!(url.host(), "go.microsoft.com");
     assert_eq!(url.path_and_query(), "/?x=1");
-    let bare = DownloadUrl::parse("https://microsoft.com").expect("valid");
+    let bare = DownloadUrl::parse("https://go.microsoft.com").expect("valid");
     assert_eq!(bare.path_and_query(), "/");
 }
 
@@ -94,13 +127,20 @@ fn redirects_are_validated_like_the_first_url() {
     assert_eq!(relative.host(), "go.microsoft.com");
     assert_eq!(relative.path_and_query(), "/download/setup.exe?v=2");
     let scheme_relative = start
-        .resolve("//download.microsoft.com/setup.exe")
+        .resolve("//msedge.sb.dl.delivery.mp.microsoft.com/setup.exe")
         .expect("scheme-relative");
-    assert_eq!(scheme_relative.host(), "download.microsoft.com");
+    assert_eq!(
+        scheme_relative.host(),
+        "msedge.sb.dl.delivery.mp.microsoft.com"
+    );
 
     assert_eq!(
-        start.resolve("http://download.microsoft.com/setup.exe"),
+        start.resolve("http://msedge.sf.dl.delivery.mp.microsoft.com/setup.exe"),
         Err(UrlError::NotHttps)
+    );
+    assert_eq!(
+        start.resolve("https://download.microsoft.com/setup.exe"),
+        Err(UrlError::UntrustedHost)
     );
     assert_eq!(
         start.resolve("https://attacker.example/setup.exe"),
@@ -197,6 +237,74 @@ fn only_a_microsoft_leaf_with_a_microsoft_root_is_accepted() {
     assert!(!is_microsoft_signer("", ""));
 }
 
+#[test]
+fn the_leaf_must_list_code_signing_explicitly() {
+    let usages = |list: &[&str]| {
+        list.iter()
+            .map(|usage| (*usage).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(has_code_signing_usage(&usages(&[CODE_SIGNING_OID])));
+    assert!(has_code_signing_usage(&usages(&[
+        "1.3.6.1.4.1.311.10.3.6",
+        CODE_SIGNING_OID
+    ])));
+    // No extension (valid for every usage), or other usages only.
+    assert!(!has_code_signing_usage(&[]));
+    assert!(!has_code_signing_usage(&usages(&["1.3.6.1.5.5.7.3.1"])));
+    assert!(!has_code_signing_usage(&usages(&["1.3.6.1.5.5.7.3.30"])));
+}
+
+#[test]
+fn the_version_resource_must_name_the_bootstrapper() {
+    assert_eq!(check_version_info(&bootstrapper_info()), Ok(()));
+    for name in ACCEPTED_ORIGINAL_FILENAMES {
+        for product in ACCEPTED_PRODUCT_NAMES {
+            let info = VersionInfo {
+                original_filename: Some(format!(" {} ", name.to_ascii_lowercase())),
+                product_name: Some(product.to_ascii_uppercase()),
+                ..bootstrapper_info()
+            };
+            assert_eq!(check_version_info(&info), Ok(()), "{name} {product}");
+        }
+    }
+    let wrong_company = VersionInfo {
+        company_name: Some("Contoso Ltd".to_owned()),
+        ..bootstrapper_info()
+    };
+    assert_eq!(
+        check_version_info(&wrong_company),
+        Err(IdentityError::UnexpectedCompany(Some(
+            "Contoso Ltd".to_owned()
+        )))
+    );
+    let other_tool = VersionInfo {
+        original_filename: Some("MicrosoftEdgeSetup.exe".to_owned()),
+        ..bootstrapper_info()
+    };
+    assert!(matches!(
+        check_version_info(&other_tool),
+        Err(IdentityError::UnexpectedOriginalFilename(_))
+    ));
+    let other_product = VersionInfo {
+        product_name: Some("Microsoft Teams".to_owned()),
+        ..bootstrapper_info()
+    };
+    assert!(matches!(
+        check_version_info(&other_product),
+        Err(IdentityError::UnexpectedProduct(_))
+    ));
+    assert!(check_version_info(&VersionInfo::default()).is_err());
+}
+
+#[test]
+fn an_abort_before_any_request_is_harmless_and_repeatable() {
+    // No handle is registered, so nothing is closed; no network is used.
+    let abort = DownloadAbort::new();
+    abort.abort();
+    abort.clone().abort();
+}
+
 // ---------------------------------------------------------------------------
 // Payload validation and the real stager (non-executable bytes only).
 // ---------------------------------------------------------------------------
@@ -258,6 +366,26 @@ fn the_real_stager_rejects_non_executable_bytes_before_writing() {
         assert!(matches!(result, Err(StageError::Payload(_))), "{result:?}");
     }
     assert_eq!(parent.entries(), 0, "nothing may reach the disk");
+}
+
+#[test]
+fn fresh_folders_have_a_protected_owner_only_dacl() {
+    let parent = TestFolder::new();
+    let folder = create_fresh_folder(&parent.0).expect("folder");
+    let output = std::process::Command::new("icacls")
+        .arg(&folder)
+        .output()
+        .expect("icacls");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<&str> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains(":("))
+        .collect();
+    // One ACE, for OWNER RIGHTS, and no inherited ACE.
+    assert_eq!(entries.len(), 1, "{listing}");
+    assert!(entries[0].contains("OWNER RIGHTS"), "{listing}");
+    assert!(!listing.contains("(I)"), "{listing}");
 }
 
 #[test]
@@ -405,10 +533,33 @@ fn downloaded_bytes() -> Vec<u8> {
     text_payload(256)
 }
 
+/// Returns a fixed version resource; never reads a file.
+struct FakeIdentity {
+    result: Result<VersionInfo, IdentityError>,
+    calls: Cell<u32>,
+}
+
+impl VersionInfoReader for FakeIdentity {
+    fn read(&self, _file: &StagedFile) -> Result<VersionInfo, IdentityError> {
+        self.calls.set(self.calls.get() + 1);
+        self.result.clone()
+    }
+}
+
+fn bootstrapper_info() -> VersionInfo {
+    VersionInfo {
+        company_name: Some("Microsoft Corporation".to_owned()),
+        product_name: Some("Microsoft Edge Update".to_owned()),
+        original_filename: Some("MicrosoftEdgeWebview2Setup.exe".to_owned()),
+        file_version: Some("1.3.195.61".to_owned()),
+    }
+}
+
 struct Harness {
     downloader: FakeDownloader,
     stager: MemoryStager,
     verifier: FakeVerifier,
+    identity: FakeIdentity,
     runner: FakeRunner,
 }
 
@@ -421,6 +572,10 @@ impl Harness {
                 result: Ok(()),
                 calls: Cell::new(0),
                 cancel: None,
+            },
+            identity: FakeIdentity {
+                result: Ok(bootstrapper_info()),
+                calls: Cell::new(0),
             },
             runner: FakeRunner {
                 result: Ok(()),
@@ -440,6 +595,7 @@ impl Harness {
             downloader: &self.downloader,
             stager: &self.stager,
             verifier: &self.verifier,
+            identity: &self.identity,
             runner: &self.runner,
             probe: &probe,
             limits: DownloadLimits::default(),
@@ -531,6 +687,8 @@ fn a_failed_signature_discards_the_file_and_never_runs_it() {
     for error in [
         SignatureError::Untrusted(0x800B_0100_u32 as i32),
         SignatureError::NoSigner,
+        SignatureError::NotMicrosoftRoot(0x800B_0109),
+        SignatureError::NoCodeSigningUsage,
         SignatureError::NotMicrosoft {
             signer: "Contoso Ltd".to_owned(),
         },
@@ -544,6 +702,51 @@ fn a_failed_signature_discards_the_file_and_never_runs_it() {
         assert_eq!(harness.stager.discarded.get(), 1);
         assert_eq!(probes, 0);
     }
+}
+
+#[test]
+fn a_signed_file_that_is_not_the_bootstrapper_is_never_run() {
+    for error in [
+        IdentityError::Unreadable(1813),
+        IdentityError::UnexpectedOriginalFilename(Some("other.exe".to_owned())),
+    ] {
+        let mut harness = Harness::new();
+        harness.identity.result = Err(error.clone());
+        let (result, steps, probes) = harness.run(&AtomicBool::new(false));
+        assert_eq!(result, Err(SetupFailure::Identity(error)));
+        assert_eq!(steps, [SetupStep::Downloading, SetupStep::Verifying]);
+        assert_eq!(harness.verifier.calls.get(), 1);
+        assert_eq!(harness.runner.calls.get(), 0);
+        assert_eq!(harness.stager.discarded.get(), 1);
+        assert_eq!(probes, 0);
+    }
+    // A rejected identity from a good reader: the check runs on its values.
+    let mut harness = Harness::new();
+    harness.identity.result = Ok(VersionInfo {
+        company_name: Some("Contoso Ltd".to_owned()),
+        ..bootstrapper_info()
+    });
+    let (result, _, _) = harness.run(&AtomicBool::new(false));
+    assert!(matches!(
+        result,
+        Err(SetupFailure::Identity(IdentityError::UnexpectedCompany(_)))
+    ));
+    assert_eq!(harness.runner.calls.get(), 0);
+}
+
+#[test]
+fn a_failed_signature_never_reads_the_version_resource() {
+    let mut harness = Harness::new();
+    harness.verifier.result = Err(SignatureError::NotMicrosoftRoot(0x800B_0109));
+    let (result, _, _) = harness.run(&AtomicBool::new(false));
+    assert_eq!(
+        result,
+        Err(SetupFailure::Signature(SignatureError::NotMicrosoftRoot(
+            0x800B_0109
+        )))
+    );
+    assert_eq!(harness.identity.calls.get(), 0);
+    assert_eq!(harness.runner.calls.get(), 0);
 }
 
 #[test]
@@ -688,6 +891,7 @@ fn every_failure_keeps_the_shell_in_a_retryable_state_without_retrying() {
         SetupFailure::Payload(PayloadError::NotExecutable),
         SetupFailure::Staging(std::io::ErrorKind::PermissionDenied),
         SetupFailure::Signature(SignatureError::NoSigner),
+        SetupFailure::Identity(IdentityError::Unreadable(1813)),
         SetupFailure::Cancelled,
         SetupFailure::Install(InstallError::ExitCode(1)),
         SetupFailure::Install(InstallError::ElevationRequired),

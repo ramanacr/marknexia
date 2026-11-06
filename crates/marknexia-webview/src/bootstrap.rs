@@ -77,12 +77,12 @@ pub enum UrlError {
     UserInfo,
     /// Only the default HTTPS port is accepted.
     Port,
-    /// The host is not `microsoft.com` or one of its subdomains.
+    /// The host is not on the allowlist ([`is_allowed_download_host`]).
     UntrustedHost,
 }
 
-/// A validated download location: HTTPS on port 443 to `microsoft.com` or
-/// a subdomain, without user information or fragment.
+/// A validated download location: HTTPS on port 443 to an allowed host
+/// ([`is_allowed_download_host`]), without user information or fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadUrl {
     host: String,
@@ -179,11 +179,28 @@ fn trusted_host(host: &str) -> Result<String, UrlError> {
     if !valid {
         return Err(UrlError::Malformed);
     }
-    if host == "microsoft.com" || host.ends_with(".microsoft.com") {
+    if is_allowed_download_host(&host) {
         Ok(host)
     } else {
         Err(UrlError::UntrustedHost)
     }
+}
+
+/// The fwlink host.
+pub const BOOTSTRAPPER_HOST: &str = "go.microsoft.com";
+/// Microsoft's documented download CDN for Edge and its updater
+/// (`*.dl.delivery.mp.microsoft.com`, "Allow list for Microsoft Edge
+/// endpoints"), where the fwlink redirects.
+pub const BOOTSTRAPPER_CDN_SUFFIX: &str = ".dl.delivery.mp.microsoft.com";
+
+/// The only hosts a download may start at or be redirected to: the
+/// fwlink host, or a host under the Edge download CDN. `host` is a
+/// lower-case DNS name.
+pub fn is_allowed_download_host(host: &str) -> bool {
+    host == BOOTSTRAPPER_HOST
+        || host
+            .strip_suffix(BOOTSTRAPPER_CDN_SUFFIX)
+            .is_some_and(|label| !label.is_empty())
 }
 
 fn path_and_query(rest: &str) -> String {
@@ -416,16 +433,25 @@ impl Stager for TempStager {
         }
     }
 
+    /// A file still in use (an installer that is still running) is
+    /// scheduled for deletion at the next restart instead.
     fn discard(&self, file: StagedFile) {
         let StagedFile { path, folder, lock } = file;
         drop(lock);
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_dir(folder);
+        let file_removed = std::fs::remove_file(&path).is_ok();
+        if !(file_removed && std::fs::remove_dir(&folder).is_ok()) {
+            crate::bootstrap_native::delete_at_restart(
+                (!file_removed).then_some(path.as_path()),
+                &folder,
+            );
+        }
     }
 }
 
-/// Creates a new folder with an unpredictable name under `parent`. An
-/// existing folder is never reused.
+/// Creates a new folder with an unpredictable name under `parent`, with a
+/// protected DACL that grants access to its owner only
+/// (`bootstrap_native::create_owner_only_dir`). An existing folder is
+/// never reused.
 pub fn create_fresh_folder(parent: &Path) -> std::io::Result<PathBuf> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let mut last_error = None;
@@ -439,7 +465,7 @@ pub fn create_fresh_folder(parent: &Path) -> std::io::Result<PathBuf> {
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         let folder = parent.join(format!("Marknexia-WebView2-{token:016x}"));
-        match std::fs::create_dir(&folder) {
+        match crate::bootstrap_native::create_owner_only_dir(&folder) {
             Ok(()) => return Ok(folder),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_error = Some(error);
@@ -490,6 +516,11 @@ pub enum SignatureError {
     NotMicrosoft {
         signer: String,
     },
+    /// `CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_MICROSOFT_ROOT)`
+    /// rejected the signer's verified chain (its error code).
+    NotMicrosoftRoot(u32),
+    /// The leaf certificate has no explicit code-signing usage.
+    NoCodeSigningUsage,
 }
 
 pub trait SignatureVerifier {
@@ -497,9 +528,85 @@ pub trait SignatureVerifier {
 }
 
 /// The leaf certificate must name Microsoft Corporation and the chain must
-/// end in a Microsoft root.
+/// end in a Microsoft root. A name check only: the native verifier also
+/// requires the Microsoft root chain policy and the code-signing usage.
 pub fn is_microsoft_signer(leaf: &str, root: &str) -> bool {
     leaf == "Microsoft Corporation" && root.starts_with("Microsoft Root Certificate Authority")
+}
+
+/// `szOID_PKIX_KP_CODE_SIGNING`.
+pub const CODE_SIGNING_OID: &str = "1.3.6.1.5.5.7.3.3";
+
+/// The leaf's enhanced key usages must list code signing explicitly; an
+/// absent extension (valid for every usage) is not enough.
+pub fn has_code_signing_usage(usages: &[String]) -> bool {
+    usages.iter().any(|usage| usage == CODE_SIGNING_OID)
+}
+
+// ---------------------------------------------------------------------------
+// File identity (VERSIONINFO).
+// ---------------------------------------------------------------------------
+
+/// The `StringFileInfo` values that identify the bootstrapper.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VersionInfo {
+    pub company_name: Option<String>,
+    pub product_name: Option<String>,
+    pub original_filename: Option<String>,
+    pub file_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityError {
+    /// No readable version resource (Win32 error code).
+    Unreadable(u32),
+    UnexpectedCompany(Option<String>),
+    UnexpectedProduct(Option<String>),
+    UnexpectedOriginalFilename(Option<String>),
+}
+
+/// Reads the staged file's version resource.
+pub trait VersionInfoReader {
+    fn read(&self, file: &StagedFile) -> Result<VersionInfo, IdentityError>;
+}
+
+/// Accepted `OriginalFilename` values. The WebView2 bootstrapper is a tagged
+/// Microsoft Edge Update setup; both names are accepted until a clean-VM run
+/// records the real value.
+pub const ACCEPTED_ORIGINAL_FILENAMES: [&str; 2] = [
+    "MicrosoftEdgeWebview2Setup.exe",
+    "MicrosoftEdgeUpdateSetup.exe",
+];
+/// Accepted `ProductName` values (see [`ACCEPTED_ORIGINAL_FILENAMES`]).
+pub const ACCEPTED_PRODUCT_NAMES: [&str; 3] = [
+    "Microsoft Edge Update",
+    "Microsoft Edge WebView2",
+    "Microsoft Edge WebView2 Runtime",
+];
+
+/// Checks the version resource after the signature and before the run.
+/// Comparisons ignore ASCII case and surrounding white space. Microsoft
+/// documents no minimum bootstrapper `FileVersion`, so none is required.
+pub fn check_version_info(info: &VersionInfo) -> Result<(), IdentityError> {
+    let matches = |value: &Option<String>, accepted: &[&str]| {
+        value.as_deref().is_some_and(|value| {
+            accepted
+                .iter()
+                .any(|candidate| value.trim().eq_ignore_ascii_case(candidate))
+        })
+    };
+    if !matches(&info.company_name, &["Microsoft Corporation"]) {
+        return Err(IdentityError::UnexpectedCompany(info.company_name.clone()));
+    }
+    if !matches(&info.original_filename, &ACCEPTED_ORIGINAL_FILENAMES) {
+        return Err(IdentityError::UnexpectedOriginalFilename(
+            info.original_filename.clone(),
+        ));
+    }
+    if !matches(&info.product_name, &ACCEPTED_PRODUCT_NAMES) {
+        return Err(IdentityError::UnexpectedProduct(info.product_name.clone()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +659,8 @@ pub enum SetupFailure {
     Payload(PayloadError),
     Staging(std::io::ErrorKind),
     Signature(SignatureError),
+    /// Signed by Microsoft, but not the WebView2 bootstrapper.
+    Identity(IdentityError),
     Cancelled,
     Install(InstallError),
     /// The installer finished, but detection still finds no runtime.
@@ -563,6 +672,7 @@ pub struct Bootstrap<'a> {
     pub downloader: &'a dyn BootstrapperDownloader,
     pub stager: &'a dyn Stager,
     pub verifier: &'a dyn SignatureVerifier,
+    pub identity: &'a dyn VersionInfoReader,
     pub runner: &'a dyn InstallerRunner,
     pub probe: &'a dyn BrowserVersionProbe,
     pub limits: DownloadLimits,
@@ -601,6 +711,10 @@ impl Bootstrap<'_> {
             self.verifier
                 .verify(&staged)
                 .map_err(SetupFailure::Signature)?;
+            self.identity
+                .read(&staged)
+                .and_then(|info| check_version_info(&info))
+                .map_err(SetupFailure::Identity)?;
             if cancelled() {
                 return Err(SetupFailure::Cancelled);
             }
@@ -795,6 +909,7 @@ pub fn failure_message(failure: &SetupFailure) -> String {
             "The WebView2 Runtime installer could not be saved to the temporary folder. Try again, {OFFLINE}"
         ),
         SetupFailure::Signature(_) => "The downloaded installer does not have a valid Microsoft signature, so it was not run. Use Microsoft's offline installer.".to_owned(),
+        SetupFailure::Identity(_) => "The downloaded file is not Microsoft's WebView2 Runtime installer, so it was not run. Use Microsoft's offline installer.".to_owned(),
         SetupFailure::Cancelled => format!(
             "The installation was cancelled. The WebView2 Runtime is still not installed. Try again, {OFFLINE}"
         ),
