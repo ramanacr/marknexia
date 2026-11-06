@@ -19,7 +19,6 @@ use std::{
 use marknexia_webview::protocol::{HostToPage, PageToHost};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_MENU},
-    Shell::{DragAcceptFiles, HDROP},
     WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SendMessageW, WM_APP},
 };
 
@@ -47,9 +46,10 @@ const WM_CLOSE_TAB_REQUEST: u32 = WM_APP + 0x101;
 const WM_DROPS_CLASSIFIED: u32 = WM_APP + 0x102;
 /// Posted by an activation resolution thread: resolved paths are queued.
 const WM_ACTIVATION_RESOLVED: u32 = WM_APP + 0x103;
+/// Posted when a UIA close was deferred: retry once the outer call returns.
+const WM_DEFERRED_CLOSE: u32 = WM_APP + 0x104;
 /// The find box's control ID (`initialize` creates it).
 const FIND_EDIT_ID: usize = 1004;
-const WM_DROPFILES: u32 = 0x0233;
 const EM_SETSEL: u32 = 0x00B1;
 const PROTOCOL: u16 = 1;
 
@@ -90,6 +90,8 @@ pub(super) struct InputState {
     /// UIA close requests that arrived while an outer call held the WebView
     /// session; they run once it is checked back in.
     deferred_closes: Vec<TabId>,
+    /// The OLE drop target; revoked at shutdown, before the window goes.
+    drop_target: Option<dragdrop::native::DropRegistration>,
 }
 
 impl InputState {
@@ -144,8 +146,14 @@ pub(super) fn initialize(
 ) -> Result<Rc<CloseTab>, WindowError> {
     let controls = FindControls::create(hwnd, instance, find_edit).map_err(WindowError::Child)?;
     let token = message_token().ok_or(WindowError::State)?;
-    // SAFETY: this thread's own top-level window.
-    unsafe { DragAcceptFiles(hwnd, true) };
+    // File drops: an OLE drop target that reads CF_HDROP from the drag's
+    // data object. A failure leaves the shell without drops, nothing else.
+    let drop_window = hwnd.0 as isize;
+    let drop_target = dragdrop::native::DropRegistration::register(
+        hwnd,
+        Box::new(move |path| on_dropped_path(HWND(drop_window as *mut c_void), path)),
+    )
+    .ok();
     let window = hwnd.0 as isize;
     let close: Rc<CloseTab> = Rc::new(move |tab: TabId| {
         // SAFETY: posts to this thread's own window; no pointers.
@@ -161,6 +169,7 @@ pub(super) fn initialize(
     });
     let mut state = state.borrow_mut();
     state.input.message_token = token;
+    state.input.drop_target = drop_target;
     state.input.find_controls = Some(controls);
     state.input.close_request = Some(Rc::clone(&close));
     Ok(close)
@@ -236,8 +245,16 @@ const SINGLE_INSTANCE_UNAVAILABLE: &str =
 /// `close_state` hook: stops the activation server first, so a new launch
 /// becomes the first instance instead of handing off to this one.
 pub(super) fn shutdown(state: &Rc<RefCell<AppState>>) {
-    let server = state.borrow_mut().input.activation_server.take();
+    let (server, drop_target) = {
+        let mut state = state.borrow_mut();
+        (
+            state.input.activation_server.take(),
+            state.input.drop_target.take(),
+        )
+    };
     drop(server);
+    // RevokeDragDrop and OleUninitialize, while the window still exists.
+    drop(drop_target);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,19 +269,16 @@ pub(super) fn handles(message: u32) -> bool {
             | WM_CLOSE_TAB_REQUEST
             | WM_DROPS_CLASSIFIED
             | WM_ACTIVATION_RESOLVED
-            | WM_DROPFILES
+            | WM_DEFERRED_CLOSE
     )
 }
 
 /// Any process at the same or a higher integrity level can post messages to
 /// this window (UIPI blocks lower levels). The private messages therefore
 /// carry the per-process token and only make the shell drain its own
-/// queues; `WM_DROPFILES` is validated in `dragdrop::native`.
+/// queues. File drops arrive through OLE (`IDropTarget`), never through
+/// `WM_DROPFILES`, which is not enabled.
 pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if message == WM_DROPFILES {
-        on_drop_files(hwnd, HDROP(wparam.0 as *mut c_void));
-        return LRESULT(0);
-    }
     let Some(state) = handle(hwnd) else {
         return LRESULT(0);
     };
@@ -278,14 +292,17 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
         WM_CLOSE_TAB_REQUEST => {
             if let Some(tab) = tab_by_raw(&state, wparam.0 as u64) {
                 if state.borrow().webview_checked_out {
-                    // Retried by `after_poll` once the session is back.
+                    // Retried when the outer call has returned (and by
+                    // `after_poll`); the wake-up carries the token.
                     state.borrow_mut().input.deferred_closes.push(tab);
+                    post_to_window(hwnd.0 as isize, WM_DEFERRED_CLOSE, token);
                 } else {
                     let _ = close_tab(hwnd, tab);
                 }
             }
         }
         WM_DROPS_CLASSIFIED => on_drops_classified(hwnd),
+        WM_DEFERRED_CLOSE => run_deferred_closes(hwnd),
         _ => {}
     }
     LRESULT(0)
@@ -1011,12 +1028,9 @@ pub(super) fn select_open_document(hwnd: HWND, state: &Rc<RefCell<AppState>>, pa
 // Drag and drop (.NET Root_DragOver / Root_Drop)
 // ---------------------------------------------------------------------------
 
-fn on_drop_files(hwnd: HWND, drop: HDROP) {
-    // SAFETY: `drop` is this WM_DROPFILES message's handle; it is released
-    // inside and not used again.
-    let Some(path) = (unsafe { dragdrop::native::take_first_path(drop) }) else {
-        return;
-    };
+/// The drop target's callback: the first dropped path, from the data
+/// object's `CF_HDROP`. It only gates and starts the classification worker.
+fn on_dropped_path(hwnd: HWND, path: String) {
     let Some(state) = handle(hwnd) else {
         return;
     };

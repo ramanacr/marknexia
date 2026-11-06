@@ -471,10 +471,12 @@ pub mod native {
         let (label, length) = token_information(token.0, TokenIntegrityLevel)?;
         // SAFETY: the buffer holds a TOKEN_MANDATORY_LABEL.
         let label_sid = unsafe { (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid };
-        let label_copy = copy_sid(&label, length, label_sid)?;
-        let label_sid = PSID(label_copy.as_ptr() as *mut c_void);
-        // SAFETY: the copied label SID is valid; the sub-authority index is
-        // checked against its count.
+        // The copy only proves that the whole SID lies inside the buffer; the
+        // RID is read in place, where the 8-byte-aligned token buffer keeps
+        // the SID's sub-authorities 4-byte aligned.
+        let _ = copy_sid(&label, length, label_sid)?;
+        // SAFETY: the label SID lies inside `label` (checked above), which
+        // stays alive; the sub-authority index is checked against its count.
         let integrity = unsafe {
             let count = *GetSidSubAuthorityCount(label_sid);
             if count == 0 {
@@ -1019,17 +1021,7 @@ pub mod native {
         }
 
         fn is_file(&self, full_path: &str) -> bool {
-            use std::os::windows::fs::OpenOptionsExt;
-            /// `FILE_READ_ATTRIBUTES`: enough for metadata, no data access.
-            const FILE_READ_ATTRIBUTES: u32 = 0x0080;
-            const SHARE_ALL: u32 = 0x7;
-            std::fs::OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES)
-                .share_mode(SHARE_ALL)
-                .security_qos_flags(SECURITY_IDENTIFICATION.0)
-                .open(full_path)
-                .and_then(|file| file.metadata())
-                .is_ok_and(|metadata| metadata.is_file())
+            crate::documents::probe_is_file(std::path::Path::new(full_path))
         }
 
         fn expand_short_names(&self, full_path: &str) -> Option<String> {

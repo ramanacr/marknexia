@@ -1,10 +1,12 @@
 //! Drag and drop of files and folders: port of `MainWindow.Root_DragOver`
 //! and `Root_Drop`.
 //!
-//! The shell window accepts `CF_HDROP` (`DragAcceptFiles` and
-//! `WM_DROPFILES`), which is what .NET's `StandardDataFormats.StorageItems`
-//! accepts from Explorer, with the copy effect. As in .NET only the first
-//! dropped item counts:
+//! The shell window is an OLE drop target (`RegisterDragDrop`) that accepts
+//! only `CF_HDROP` from the drag's data object, which is what .NET's
+//! `StandardDataFormats.StorageItems` accepts from Explorer, with the copy
+//! effect. `WM_DROPFILES` is not enabled (`DragAcceptFiles` is never
+//! called), so a posted message with a forged handle is ignored. As in .NET
+//! only the first dropped item counts:
 //! - a supported Markdown file opens in a tab;
 //! - a folder becomes the repository root, and its `README.md` opens when it
 //!   exists (`OpenRepositoryFolderAsync`);
@@ -24,7 +26,7 @@ use std::{
 
 use marknexia_files::repository::is_supported_markdown_file;
 
-use crate::documents::check_document_path;
+use crate::documents::{check_document_path, probe_is_file, probe_metadata};
 
 /// .NET `Root_Drop` diagnostic for a file that is not Markdown.
 pub const NOT_MARKDOWN: &str = "Marknexia opens Markdown files (.md, .markdown, .mdown, .mkdn).";
@@ -87,13 +89,14 @@ pub fn action(path: &Path, kind: ItemKind, readme_exists: bool) -> DropAction {
 /// Queries the item (off the UI thread) and decides the action.
 #[must_use]
 pub fn classify(path: &Path) -> DropAction {
-    let (kind, readme) = match std::fs::metadata(path) {
+    // Identification-only QoS opens (`probe_metadata`), after the gate.
+    let (kind, readme) = match probe_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {
             let readme = path.join("README.md");
             let exists = readme
                 .to_str()
                 .is_some_and(|text| check_document_path(text).is_ok())
-                && readme.is_file();
+                && probe_is_file(&readme);
             (ItemKind::Folder, exists)
         }
         Ok(_) => (ItemKind::File, false),
@@ -135,59 +138,67 @@ impl DropQueue {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)] // HDROP access stays here.
+#[allow(unsafe_code)] // OLE drop target, data object and storage medium stay here.
+#[allow(non_snake_case)] // COM method names follow the IDropTarget ABI.
 pub mod native {
-    use windows::Win32::{
-        Foundation::HGLOBAL,
-        System::Memory::{GlobalLock, GlobalSize, GlobalUnlock},
-        UI::Shell::{DROPFILES, DragFinish, DragQueryFileW, HDROP},
+    use std::{
+        cell::Cell,
+        panic::{AssertUnwindSafe, catch_unwind},
     };
 
-    /// True when `drop` is a global memory block of this process with a
-    /// plausible `DROPFILES` header (the file list offset is inside it).
-    fn is_drop_block(drop: HDROP) -> bool {
-        let block = HGLOBAL(drop.0);
-        // SAFETY: GlobalSize and GlobalLock validate the handle and fail
-        // for a value that is not a global memory handle of this process.
-        unsafe {
-            let size = GlobalSize(block);
-            if size < std::mem::size_of::<DROPFILES>() || size > 64 * 1024 * 1024 {
-                return false;
-            }
-            let header = GlobalLock(block).cast::<DROPFILES>();
-            if header.is_null() {
-                return false;
-            }
-            let offset = (*header).pFiles as usize;
-            let _ = GlobalUnlock(block);
-            offset >= std::mem::size_of::<DROPFILES>() && offset < size
+    use windows::{
+        Win32::{
+            Foundation::{E_UNEXPECTED, HWND, POINTL},
+            System::{
+                Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL},
+                Ole::{
+                    CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget,
+                    IDropTarget_Impl, OleInitialize, OleUninitialize, RegisterDragDrop,
+                    ReleaseStgMedium, RevokeDragDrop,
+                },
+                SystemServices::MODIFIERKEYS_FLAGS,
+            },
+            UI::Shell::{DragQueryFileW, HDROP},
+        },
+        core::{Error, HRESULT, Ref, Result, implement},
+    };
+
+    /// The longest dropped path read, in UTF-16 units.
+    const MAX_UNITS: u32 = 32_767;
+
+    fn hdrop_format() -> FORMATETC {
+        FORMATETC {
+            cfFormat: CF_HDROP.0,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
         }
     }
 
-    /// The first dropped path, at most 32,767 UTF-16 units, and releases the
-    /// drop handle.
-    ///
-    /// # Safety
-    ///
-    /// `drop` must be the `HDROP` of the `WM_DROPFILES` being handled; it is
-    /// released here and must not be used afterwards.
-    pub unsafe fn take_first_path(drop: HDROP) -> Option<String> {
-        const MAX_UNITS: u32 = 32_767;
-        // Any process at the same or a higher integrity level can post
-        // WM_DROPFILES with an arbitrary handle. Use it only when it is a
-        // global memory block of this process that holds a DROPFILES header
-        // whose file list starts inside the block; otherwise ignore it and
-        // never release it.
-        if !is_drop_block(drop) {
-            return None;
-        }
-        // SAFETY: per the contract, `drop` is live until DragFinish below.
-        let path = unsafe {
-            let count = DragQueryFileW(drop, u32::MAX, None);
-            if count == 0 {
-                None
-            } else {
-                let length = DragQueryFileW(drop, 0, None);
+    /// True when the data object offers `CF_HDROP` in global memory.
+    fn offers_files(data: &IDataObject) -> bool {
+        // SAFETY: a plain query on a live data object; S_OK means yes.
+        (unsafe { data.QueryGetData(&hdrop_format()) }) == HRESULT(0)
+    }
+
+    /// The first path of the data object's `CF_HDROP`, at most 32,767
+    /// UTF-16 units. The storage medium is always released.
+    fn first_path(data: &IDataObject) -> Option<String> {
+        // SAFETY: GetData returns a storage medium owned by this caller; it
+        // is released with ReleaseStgMedium on every path below. The global
+        // memory belongs to the medium, so it is read with DragQueryFileW
+        // and never freed with DragFinish.
+        unsafe {
+            let mut medium = data.GetData(&hdrop_format()).ok()?;
+            let path = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                let drop = HDROP(medium.u.hGlobal.0);
+                let count = DragQueryFileW(drop, u32::MAX, None);
+                let length = if count == 0 {
+                    0
+                } else {
+                    DragQueryFileW(drop, 0, None)
+                };
                 if length == 0 || length > MAX_UNITS {
                     None
                 } else {
@@ -197,10 +208,157 @@ pub mod native {
                         .then(|| String::from_utf16(&buffer[..copied]).ok())
                         .flatten()
                 }
+            } else {
+                None
+            };
+            ReleaseStgMedium(&mut medium);
+            path
+        }
+    }
+
+    /// Writes the effect: copy when files are offered and the source allows
+    /// copying, none otherwise (.NET `Root_DragOver`).
+    fn set_effect(effect: *mut DROPEFFECT, accept: bool) {
+        if effect.is_null() {
+            return;
+        }
+        // SAFETY: OLE passes a valid in/out DROPEFFECT for this call.
+        unsafe {
+            let allowed = *effect;
+            *effect = if accept && (allowed.0 & DROPEFFECT_COPY.0) != 0 {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
+        }
+    }
+
+    /// Runs a callback body; a panic is reported as `E_UNEXPECTED` instead of
+    /// unwinding across the COM boundary.
+    fn guarded(work: impl FnOnce() -> Result<()>) -> Result<()> {
+        catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|_| Err(Error::from(E_UNEXPECTED)))
+    }
+
+    /// The shell's drop target. Not agile: it stays on the window's STA.
+    #[implement(IDropTarget, Agile = false)]
+    struct DropTarget {
+        accept: Cell<bool>,
+        on_drop: Box<dyn Fn(String)>,
+    }
+
+    impl IDropTarget_Impl for DropTarget_Impl {
+        fn DragEnter(
+            &self,
+            data: Ref<IDataObject>,
+            _keys: MODIFIERKEYS_FLAGS,
+            _point: &POINTL,
+            effect: *mut DROPEFFECT,
+        ) -> Result<()> {
+            guarded(|| {
+                let accept = data.ok().is_ok_and(offers_files);
+                self.accept.set(accept);
+                set_effect(effect, accept);
+                Ok(())
+            })
+        }
+
+        fn DragOver(
+            &self,
+            _keys: MODIFIERKEYS_FLAGS,
+            _point: &POINTL,
+            effect: *mut DROPEFFECT,
+        ) -> Result<()> {
+            guarded(|| {
+                set_effect(effect, self.accept.get());
+                Ok(())
+            })
+        }
+
+        fn DragLeave(&self) -> Result<()> {
+            guarded(|| {
+                self.accept.set(false);
+                Ok(())
+            })
+        }
+
+        fn Drop(
+            &self,
+            data: Ref<IDataObject>,
+            _keys: MODIFIERKEYS_FLAGS,
+            _point: &POINTL,
+            effect: *mut DROPEFFECT,
+        ) -> Result<()> {
+            guarded(|| {
+                let accept = self.accept.replace(false);
+                set_effect(effect, accept);
+                if accept
+                    && let Ok(data) = data.ok()
+                    && let Some(path) = first_path(data)
+                {
+                    (self.on_drop)(path);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// OLE initialization and the window's drop-target registration.
+    /// [`Self::revoke`] (or drop) revokes the target and uninitializes OLE
+    /// on the window thread, before the window is destroyed.
+    pub struct DropRegistration {
+        window: HWND,
+        registered: bool,
+        ole: bool,
+    }
+
+    impl DropRegistration {
+        /// Initializes OLE on this (STA) thread and registers a drop target
+        /// for `window`. `on_drop` receives the first dropped path. OLE on
+        /// a thread that already entered the STA with `CoInitializeEx` (or
+        /// enters it later, as `StaApartment` does) is supported: each
+        /// successful call is balanced by its own uninitialization.
+        ///
+        /// # Errors
+        ///
+        /// OLE initialization or `RegisterDragDrop` failed.
+        pub fn register(window: HWND, on_drop: Box<dyn Fn(String)>) -> Result<Self> {
+            // SAFETY: the reserved argument is null; this is the window's
+            // own thread.
+            unsafe { OleInitialize(None) }?;
+            let mut registration = Self {
+                window,
+                registered: false,
+                ole: true,
+            };
+            let target: IDropTarget = DropTarget {
+                accept: Cell::new(false),
+                on_drop,
             }
-        };
-        unsafe { DragFinish(drop) };
-        path
+            .into();
+            // SAFETY: `window` is this thread's live top-level window; OLE
+            // keeps its own reference to the target until RevokeDragDrop.
+            unsafe { RegisterDragDrop(window, &target) }?;
+            registration.registered = true;
+            Ok(registration)
+        }
+
+        pub fn revoke(&mut self) {
+            if std::mem::take(&mut self.registered) {
+                // SAFETY: revokes this window's own registration.
+                let _ = unsafe { RevokeDragDrop(self.window) };
+            }
+            if std::mem::take(&mut self.ole) {
+                // SAFETY: balances the successful OleInitialize above, on
+                // the same thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+    }
+
+    impl Drop for DropRegistration {
+        fn drop(&mut self) {
+            self.revoke();
+        }
     }
 }
 

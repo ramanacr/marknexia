@@ -374,7 +374,6 @@ impl ChromeState {
         }
     }
 
-    /// .NET `RenderContext.AllowRemoteAssets` for new renders.
     /// input: the open tab showing `path` (ordinal, case-insensitive), for
     /// .NET's "already open" check in every open path.
     pub(super) fn tab_for_path(&self, path: &Path) -> Option<u64> {
@@ -384,6 +383,7 @@ impl ChromeState {
             .map(|(tab, _)| *tab)
     }
 
+    /// .NET `RenderContext.AllowRemoteAssets` for new renders.
     pub(super) fn allow_remote_assets(&self) -> bool {
         self.allow_remote_assets
     }
@@ -1500,7 +1500,8 @@ pub(super) fn open_or_select(hwnd: HWND, path: PathBuf) {
     }
     // The existence check can block on an offline share.
     let started = chrome.link.spawn("marknexia-open-check", move || {
-        let exists = path.is_file();
+        // input: identification-only QoS open, after the gate above.
+        let exists = crate::documents::probe_is_file(&path);
         Some(WorkerResult::OpenChecked { path, exists })
     });
     if !started {
@@ -1586,11 +1587,13 @@ pub(super) fn open_repository(hwnd: HWND, folder: &Path) {
     }
     let folder = folder.to_path_buf();
     let started = chrome.link.spawn("marknexia-folder-check", move || {
-        let exists = folder.is_dir();
+        // input: identification-only QoS opens, after the gates.
+        let exists = crate::documents::probe_is_dir(&folder);
         let readme = folder.join("README.md");
-        let readme =
-            (exists && check_document_path(&readme.to_string_lossy()).is_ok() && readme.is_file())
-                .then_some(readme);
+        let readme = (exists
+            && check_document_path(&readme.to_string_lossy()).is_ok()
+            && crate::documents::probe_is_file(&readme))
+        .then_some(readme);
         Some(WorkerResult::FolderChecked {
             folder,
             exists,

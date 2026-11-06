@@ -240,6 +240,48 @@ pub fn check_document_path(text: &str) -> Result<(), OpenError> {
         .map_err(|_| OpenError::UnsupportedPath)
 }
 
+/// Metadata of a file or folder, read through a handle opened for
+/// attributes only with identification-only QoS (so a path that reaches a
+/// named pipe can never be used to impersonate this process). Follows
+/// symbolic links, like `fs::metadata`. Gate the path first; call off the UI
+/// thread (a UNC path can block).
+///
+/// # Errors
+///
+/// The open or metadata error.
+pub fn probe_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_READ_ATTRIBUTES`: metadata only, no data access.
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        /// `FILE_FLAG_BACKUP_SEMANTICS`: needed to open a folder.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const SHARE_ALL: u32 = 0x7;
+        options
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(path)?.metadata()
+}
+
+/// [`probe_metadata`] says `path` is a regular file.
+#[must_use]
+pub fn probe_is_file(path: &Path) -> bool {
+    probe_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// [`probe_metadata`] says `path` is a folder.
+#[must_use]
+pub fn probe_is_dir(path: &Path) -> bool {
+    probe_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
 /// Reads a Markdown source like .NET `FileService.ReadTextAsync`, with
 /// stricter checks on what may be opened:
 /// - the path passes [`check_document_path`] (drive and UNC share paths);
