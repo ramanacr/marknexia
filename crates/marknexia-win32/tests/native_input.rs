@@ -43,7 +43,8 @@ use windows::{
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN,
-                MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput, VK_CONTROL, VK_ESCAPE, VK_F,
+                MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VK_CONTROL, VK_ESCAPE,
+                VK_F,
             },
             WindowsAndMessaging::SetCursorPos,
         },
@@ -483,20 +484,38 @@ fn mouse(flags: MOUSE_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// Moves the cursor and sends one button event, only while `process_id`
-/// owns the foreground (re-checked immediately before each input).
-fn guarded_mouse(process_id: u32, x: i32, y: i32, flags: Option<MOUSE_EVENT_FLAGS>) {
+/// Sends one mouse event, only while `process_id` owns the foreground; the
+/// check runs immediately before each `SendInput`.
+fn guarded_send(process_id: u32, flags: MOUSE_EVENT_FLAGS) {
     assert_eq!(
         foreground_owner(),
         process_id,
         "shell must be foreground before mouse input"
     );
+    let input = [mouse(flags)];
+    let sent = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
+    assert_eq!(sent, 1, "SendInput");
+}
+
+/// Moves the cursor (no input event), only while the shell is foreground.
+fn guarded_move(process_id: u32, x: i32, y: i32) {
+    assert_eq!(
+        foreground_owner(),
+        process_id,
+        "shell must be foreground before moving the cursor"
+    );
     unsafe { SetCursorPos(x, y) }.expect("SetCursorPos");
-    if let Some(flags) = flags {
-        assert_eq!(foreground_owner(), process_id, "shell must stay foreground");
-        let input = [mouse(flags)];
-        let sent = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
-        assert_eq!(sent, 1, "SendInput");
+}
+
+/// Releases the left button when dropped, also after a failed assertion, so
+/// no button stays logically down. A button-up types nothing and is sent
+/// unconditionally, like the modifier release in `support/shell.rs`.
+struct LeftButtonGuard;
+
+impl Drop for LeftButtonGuard {
+    fn drop(&mut self) {
+        let input = [mouse(MOUSEEVENTF_LEFTUP)];
+        let _ = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
     }
 }
 
@@ -517,17 +536,19 @@ fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
 
     shell.activate();
     let id = shell.shell.id();
-    guarded_mouse(id, start, y, Some(MOUSEEVENTF_LEFTDOWN));
+    guarded_move(id, start, y);
+    guarded_send(id, MOUSEEVENTF_LEFTDOWN);
+    let button = LeftButtonGuard;
     for step in 1..=10 {
-        guarded_mouse(id, start + (end - start) * step / 10, y, None);
+        guarded_move(id, start + (end - start) * step / 10, y);
         // SetCursorPos moves the cursor; a zero move delivers WM_MOUSEMOVE.
-        let input = [mouse(
-            windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_MOVE,
-        )];
-        let _ = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
+        guarded_send(id, MOUSEEVENTF_MOVE);
         thread::sleep(Duration::from_millis(30));
     }
-    guarded_mouse(id, end, y, Some(MOUSEEVENTF_LEFTUP));
+    guarded_move(id, end, y);
+    // Normal release behind the guard; the drop guard covers failures.
+    guarded_send(id, MOUSEEVENTF_LEFTUP);
+    std::mem::forget(button);
 
     wait_for("the swapped tab order", || {
         (shell.tab_names() == [names[1].clone(), names[0].clone()]).then_some(())

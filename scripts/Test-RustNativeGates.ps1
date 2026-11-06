@@ -115,11 +115,11 @@ Invoke-Gate 'uia-native-chrome' {
     cargo test --locked --target $Target -p marknexia-win32 --test native_chrome -- --ignored --test-threads=1 --nocapture
 } -Attempts 3
 # Tab close through UIA Invoke, single-instance hand-off, find in page and
-# drag reorder.
+# drag reorder. One attempt until the gate has a green CI history.
 Invoke-Gate 'uia-native-input' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_input -- --ignored --test-threads=1 --nocapture
-} -Attempts 3
+} -Attempts 1
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
 }
