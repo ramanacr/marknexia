@@ -2094,7 +2094,24 @@ fn finish_open(hwnd: HWND, path: PathBuf, exists: bool) {
                     chrome.add_recent(&path);
                 }
             }
-            let _ = select_tab_id(hwnd, tab, false);
+            if !select_tab_id(hwnd, tab, false) {
+                // The worker result can arrive in a nested pump while the
+                // WebView session is checked out (a WebView2 call in
+                // progress, slower on ARM64); the switch then fails and was
+                // dropped. Apply it from the message loop once the session
+                // is back, as for a deferred UIA selection.
+                let id = state
+                    .borrow()
+                    .portable
+                    .borrow()
+                    .tabs()
+                    .tabs()
+                    .iter()
+                    .find_map(|candidate| (candidate.id().get() == tab).then(|| candidate.id()));
+                if let Some(id) = id {
+                    super::input::defer_automation_select(id);
+                }
+            }
             let changed = state
                 .borrow_mut()
                 .chrome
