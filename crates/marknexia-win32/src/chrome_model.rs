@@ -356,20 +356,32 @@ pub fn reveal_failed_notice(error: &str) -> String {
 }
 
 /// The path gate for "Reveal in File Explorer": `path` must pass
-/// `GatedPath` (no device, pipe, `.`/`..` or stream forms) and, with a
-/// repository open, lie inside its gated root.
+/// `GatedPath` (no device, pipe, `.`/`..` or stream forms) and lie inside
+/// the gated repository root. Without a repository nothing is revealed.
 #[must_use]
 pub fn reveal_allowed(path: &Path, root: Option<&Path>) -> bool {
     use marknexia_files::path::GatedPath;
-    let Ok(gated) = GatedPath::new(&path.to_string_lossy()) else {
+    let (Ok(gated), Some(root)) = (GatedPath::new(&path.to_string_lossy()), root) else {
         return false;
     };
-    match root {
-        None => true,
-        Some(root) => {
-            GatedPath::new(&root.to_string_lossy()).is_ok_and(|root| gated.is_within(&root))
-        }
+    GatedPath::new(&root.to_string_lossy()).is_ok_and(|root| gated.is_within(&root))
+}
+
+/// The SBOM dialog lists at most this many components.
+pub const SBOM_LIST_LIMIT: usize = 5000;
+
+/// The rows of the SBOM dialog: the first [`SBOM_LIST_LIMIT`] components,
+/// then "…and N more" when there are more (the copy keeps everything).
+#[must_use]
+pub fn sbom_rows(components: &[String]) -> Vec<String> {
+    let mut rows: Vec<String> = components.iter().take(SBOM_LIST_LIMIT).cloned().collect();
+    if components.len() > SBOM_LIST_LIMIT {
+        rows.push(format!(
+            "\u{2026}and {} more",
+            components.len() - SBOM_LIST_LIMIT
+        ));
     }
+    rows
 }
 
 /// The SPDX inventory that .NET ships beside the executable

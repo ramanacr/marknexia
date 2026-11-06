@@ -285,6 +285,7 @@ pub fn run() -> Result<(), WindowError> {
         )
     }
     .map_err(WindowError::Create)?;
+    size_for_dpi(hwnd);
     if let Err(error) = initialize(hwnd, instance, paths) {
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(error);
@@ -324,6 +325,73 @@ pub fn run() -> Result<(), WindowError> {
         input::rearm_wake();
     }
     Ok(())
+}
+
+/// Sizes the new, still hidden window for its monitor's DPI: a client area
+/// of 1100 × 760 DIPs (with the menu bar), clamped to the work area, so a
+/// high-DPI monitor does not start in the compact layout.
+fn size_for_dpi(hwnd: HWND) {
+    use windows::Win32::{
+        Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        },
+        UI::{HiDpi::AdjustWindowRectExForDpi, WindowsAndMessaging::SWP_NOMOVE},
+    };
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let mut frame = RECT::default();
+    // The menu bar is attached later by `chrome::install`; count it now.
+    if unsafe {
+        AdjustWindowRectExForDpi(
+            &mut frame,
+            WS_OVERLAPPEDWINDOW,
+            true,
+            WINDOW_EX_STYLE::default(),
+            dpi,
+        )
+    }
+    .is_err()
+    {
+        return;
+    }
+    let mut monitor = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let work = if unsafe {
+        GetMonitorInfoW(
+            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+            &mut monitor,
+        )
+    }
+    .as_bool()
+    {
+        let area = monitor.rcWork;
+        (
+            u32::try_from(area.right - area.left).unwrap_or(u32::MAX),
+            u32::try_from(area.bottom - area.top).unwrap_or(u32::MAX),
+        )
+    } else {
+        (u32::MAX, u32::MAX)
+    };
+    let (width, height) = crate::layout::initial_window_size(
+        dpi,
+        (
+            u32::try_from(frame.right - frame.left).unwrap_or(0),
+            u32::try_from(frame.bottom - frame.top).unwrap_or(0),
+        ),
+        work,
+    );
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            i32::try_from(width).unwrap_or(i32::MAX),
+            i32::try_from(height).unwrap_or(i32::MAX),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
 }
 
 fn child_style(extra: u32) -> WINDOW_STYLE {

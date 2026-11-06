@@ -88,12 +88,12 @@ use super::{
 use crate::{
     chrome_model::{
         ANCHOR_COPY_FAILED, ChromeCommand, DIAGNOSTICS_COPIED, DiagnosticsBar, DiagnosticsFacts,
-        OutlineEntry, REPOSITORY_INCOMPLETE_NOTICE, SBOM_COPIED, SBOM_FAILED, SBOM_FILE_NAME,
-        SBOM_MISSING, SidebarMode, SidebarResize, TROUBLESHOOTING_FAILED, TabLocation, TreeArena,
-        TreeNode, anchor_clipboard_text, anchor_copied_notice, clamp_sidebar_width,
-        compact_transition, diagnostics_report, dotnet_architecture, remote_assets_notice,
-        repository_header, resize_sidebar, reveal_failed_notice, route_chrome_key,
-        same_document_path, sidebar_width_dip,
+        OutlineEntry, REPOSITORY_INCOMPLETE_NOTICE, SBOM_COPIED, SBOM_FAILED, SBOM_MISSING,
+        SidebarMode, SidebarResize, TROUBLESHOOTING_FAILED, TabLocation, TreeArena, TreeNode,
+        anchor_clipboard_text, anchor_copied_notice, clamp_sidebar_width, compact_transition,
+        diagnostics_report, dotnet_architecture, remote_assets_notice, repository_header,
+        resize_sidebar, reveal_failed_notice, route_chrome_key, same_document_path,
+        sidebar_width_dip,
     },
     documents::{OpenError, check_document_path},
     keyboard::ShellCommand,
@@ -245,6 +245,10 @@ enum ChromeAction {
     CopyAnchor,
     /// The "Reveal in File Explorer" button (.NET `RevealFile_Click`).
     Reveal,
+    /// A worker gathered the troubleshooting facts: show the dialog.
+    ShowTroubleshooting(DiagnosticsFacts),
+    /// A worker read the SBOM: show the dialog or the failure.
+    ShowSbom(Result<(String, Vec<String>), shell_ops::SbomFailure>),
     Sync,
 }
 
@@ -1139,14 +1143,17 @@ pub(super) fn update_compact(state: &Rc<RefCell<AppState>>, width: u32, dpi: u32
         return;
     }
     let compact = crate::layout::is_compact(width, dpi);
-    let previous = app.chrome.compact.replace(compact);
+    let previous = app.chrome.compact;
     let Some(visible) = compact_transition(previous, compact) else {
+        app.chrome.compact = Some(compact);
         return;
     };
+    // The state is recorded only once the pane follows it; otherwise the
+    // next layout retries the transition.
     let portable = Rc::clone(&app.portable);
-    drop(app);
     if let Ok(mut portable) = portable.try_borrow_mut() {
         portable.set_sidebar_visible(visible);
+        app.chrome.compact = Some(compact);
     }
 }
 
@@ -1547,6 +1554,8 @@ fn run_action(hwnd: HWND, action: ChromeAction) {
         }
         ChromeAction::CopyAnchor => copy_anchor(hwnd),
         ChromeAction::Reveal => reveal_selected(hwnd),
+        ChromeAction::ShowTroubleshooting(facts) => show_troubleshooting(hwnd, &facts),
+        ChromeAction::ShowSbom(result) => show_sbom(hwnd, result),
         ChromeAction::Sync => sync_ui(hwnd),
     }
 }
@@ -1644,8 +1653,7 @@ fn request_troubleshooting(hwnd: HWND) {
         let remote_images = chrome.allow_remote_assets;
         let started = chrome.link.spawn("marknexia-troubleshooting", move || {
             let app = shell_ops::app_folder();
-            let sbom_present = app.as_ref().is_some_and(|folder| {
-                let path = folder.join(SBOM_FILE_NAME);
+            let sbom_present = shell_ops::sbom_path().is_some_and(|path| {
                 GatedPath::new(&path.to_string_lossy()).is_ok()
                     && crate::documents::probe_is_file(&path)
             });
@@ -1714,7 +1722,7 @@ fn request_sbom(hwnd: HWND) {
         return;
     }
     with_chrome(hwnd, |chrome| {
-        let Some(path) = shell_ops::app_folder().map(|folder| folder.join(SBOM_FILE_NAME)) else {
+        let Some(path) = shell_ops::sbom_path() else {
             chrome.diagnostic(SBOM_MISSING, DiagnosticSeverity::Warning);
             return;
         };
@@ -1745,7 +1753,7 @@ fn show_sbom(hwnd: HWND, result: Result<(String, Vec<String>), shell_ops::SbomFa
     if HELP_DIALOG_OPEN.with(|open| open.replace(true)) {
         return;
     }
-    let choice = dialogs::show_sbom(hwnd, &components);
+    let choice = dialogs::show_sbom(hwnd, &crate::chrome_model::sbom_rows(&components));
     HELP_DIALOG_OPEN.with(|open| open.set(false));
     let outcome = match choice {
         Some(true) => Some(shell_ops::copy_text(hwnd, &json).is_ok()),
@@ -2397,13 +2405,14 @@ pub(super) fn apply_worker_results(hwnd: HWND) {
                 finish_open_repository(hwnd, &folder, exists, readme);
                 continue;
             }
-            // The dialogs run nested modal loops: no borrow is held.
+            // The dialogs run nested modal loops: they run as chrome actions
+            // after this batch, so the modal pump never re-enters it.
             WorkerResult::Troubleshooting(facts) => {
-                show_troubleshooting(hwnd, &facts);
+                queue_action(ChromeAction::ShowTroubleshooting(facts));
                 continue;
             }
             WorkerResult::Sbom(result) => {
-                show_sbom(hwnd, result);
+                queue_action(ChromeAction::ShowSbom(result));
                 continue;
             }
             result => apply_worker_result(&mut state.borrow_mut().chrome, result),
@@ -2550,6 +2559,9 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
         controls.sidebar.outline_label,
         controls.sidebar.tree_label,
         controls.sidebar.recent_label,
+        // The brand image is decoration beside the product name text, so
+        // "Marknexia" is exposed once.
+        controls.toolbar.brand_icon,
     ] {
         // The list carries the name; its label is not a separate element.
         for property in [

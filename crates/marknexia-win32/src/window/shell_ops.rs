@@ -85,7 +85,8 @@ pub(super) fn copy_text(owner: HWND, text: &str) -> windows::core::Result<()> {
 pub(super) struct RevealTarget(PathBuf);
 
 impl RevealTarget {
-    /// `None` when `path` fails the gate or lies outside `root`.
+    /// `None` when `path` fails the gate, lies outside `root`, or no
+    /// repository is open.
     pub(super) fn new(path: &Path, root: Option<&Path>) -> Option<Self> {
         crate::chrome_model::reveal_allowed(path, root).then(|| Self(path.to_path_buf()))
     }
@@ -194,6 +195,25 @@ pub(super) fn read_sbom(path: &Path) -> Result<(String, Vec<String>), SbomFailur
     let components =
         crate::chrome_model::sbom_components(&json).map_err(|_| SbomFailure::Failed)?;
     Ok((json, components))
+}
+
+/// Native tests isolate the SBOM like the settings file: only an absolute
+/// path that passes the path gate is honored.
+const SBOM_PATH_VARIABLE: &str = "MARKNEXIA_SBOM_PATH";
+
+/// The SBOM the Help item reads: `MARKNEXIA_SBOM_PATH` when it is an
+/// absolute drive or UNC path that passes `GatedPath` (set only by the
+/// native tests), otherwise `marknexia-sbom.spdx.json` beside the
+/// executable, as .NET reads it.
+pub(super) fn sbom_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(SBOM_PATH_VARIABLE)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .filter(|path| GatedPath::new(&path.to_string_lossy()).is_ok())
+    {
+        return Some(path);
+    }
+    app_folder().map(|folder| folder.join(crate::chrome_model::SBOM_FILE_NAME))
 }
 
 /// `%LOCALAPPDATA%\Marknexia`, the .NET `dataDirectory`.

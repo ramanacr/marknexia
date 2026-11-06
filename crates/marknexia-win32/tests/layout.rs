@@ -1,4 +1,7 @@
-use marknexia_win32::layout::{Dip, PixelRect, ShellLayout, ShellLayoutRequest};
+use marknexia_win32::layout::{
+    Dip, INITIAL_CLIENT, PixelRect, ShellLayout, ShellLayoutRequest, initial_window_size,
+    is_compact, scale_to_dpi,
+};
 
 fn assert_rectangles_stay_in_client_and_do_not_overlap(
     layout: ShellLayout,
@@ -160,4 +163,31 @@ fn zero_and_tiny_clients_degrade_to_only_the_surfaces_that_fit() {
         }
     );
     assert_rectangles_stay_in_client_and_do_not_overlap(tiny, 500, 100);
+}
+
+#[test]
+fn the_initial_window_scales_its_client_area_with_dpi_and_fits_the_work_area() {
+    let roomy = (u32::MAX, u32::MAX);
+    for dpi in [96, 120, 144, 168, 192, 240, 288] {
+        let (width, height) = initial_window_size(dpi, (16, 59), roomy);
+        let client = (width - 16, height - 59);
+        assert_eq!(
+            client,
+            (scale_to_dpi(1100, dpi), scale_to_dpi(760, dpi)),
+            "dpi={dpi}"
+        );
+        // A DPI-scaled start is never the compact layout.
+        assert!(!is_compact(client.0, dpi), "dpi={dpi}");
+    }
+    assert_eq!(INITIAL_CLIENT, (1100, 760));
+    // MulDiv rounding: 1100 * 168 / 96 = 1925, 760 * 120 / 96 = 950.
+    assert_eq!(scale_to_dpi(1100, 168), 1925);
+    assert_eq!(scale_to_dpi(760, 120), 950);
+    assert_eq!(scale_to_dpi(1, 144), 2);
+    // Clamped to a small work area.
+    assert_eq!(
+        initial_window_size(192, (32, 118), (1920, 1040)),
+        (1920, 1040)
+    );
+    assert_eq!(initial_window_size(96, (16, 59), (1000, 2000)), (1000, 819));
 }

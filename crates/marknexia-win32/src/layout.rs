@@ -22,6 +22,25 @@ impl Dip {
     }
 }
 
+/// The initial client area in DIPs (1100 × 760).
+pub const INITIAL_CLIENT: (u32, u32) = (1100, 760);
+
+/// `MulDiv(value, dpi, 96)`: DIPs to pixels, rounded to nearest.
+pub fn scale_to_dpi(value: u32, dpi: u32) -> u32 {
+    let scaled =
+        (u64::from(value) * u64::from(dpi) + u64::from(BASE_DPI / 2)) / u64::from(BASE_DPI);
+    u32::try_from(scaled).unwrap_or(u32::MAX)
+}
+
+/// The initial window size in pixels: the 1100 × 760-DIP client area at
+/// `dpi`, plus the `frame` (non-client width and height from
+/// `AdjustWindowRectExForDpi`), clamped to the monitor `work` area.
+pub fn initial_window_size(dpi: u32, frame: (u32, u32), work: (u32, u32)) -> (u32, u32) {
+    let width = scale_to_dpi(INITIAL_CLIENT.0, dpi).saturating_add(frame.0);
+    let height = scale_to_dpi(INITIAL_CLIENT.1, dpi).saturating_add(frame.1);
+    (width.min(work.0), height.min(work.1))
+}
+
 /// True when a client `width` in pixels at `dpi` is below the .NET
 /// 720-DIP breakpoint (the `CompactWindow` visual state).
 pub fn is_compact(width: u32, dpi: u32) -> bool {

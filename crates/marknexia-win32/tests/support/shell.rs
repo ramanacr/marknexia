@@ -146,6 +146,9 @@ impl ShellProcess {
             .args(args)
             .env("MARKNEXIA_WEBVIEW2_USER_DATA", &profile)
             .env("MARKNEXIA_SETTINGS_PATH", &settings_path)
+            // The Help > Software components item reads this isolated file
+            // (absent unless a test writes it), never the executable folder.
+            .env("MARKNEXIA_SBOM_PATH", profile.join("sbom.spdx.json"))
             .env("MARKNEXIA_INSTANCE_KEY", instance_key);
         match browser_folder {
             Some(folder) => {
@@ -167,6 +170,12 @@ impl ShellProcess {
     /// The isolated settings file the shell reads and writes.
     pub fn settings_path(&self) -> PathBuf {
         self.profile.join("settings.json")
+    }
+
+    /// The isolated SBOM path (`MARKNEXIA_SBOM_PATH`); absent until a test
+    /// writes it.
+    pub fn sbom_path(&self) -> PathBuf {
+        self.profile.join("sbom.spdx.json")
     }
 }
 

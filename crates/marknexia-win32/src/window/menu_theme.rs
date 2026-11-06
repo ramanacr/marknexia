@@ -5,8 +5,9 @@
 //! still paints the one-pixel line below the bar and the drop-down menus.
 //!
 //! An owner-drawn item has no text for MSAA or UI Automation; each item's
-//! data starts with an `MSAAMENUINFO`, from which oleacc takes the name, so
-//! the names stay "File", "View", "Settings" and "Help". Owner-drawn items
+//! data starts with an `MSAAMENUINFO` holding the system menu text ("&File"
+//! and so on), from which oleacc takes the name ("File") and the access key
+//! (Alt+F), as for the system items. Owner-drawn items
 //! have no system mnemonics either: `menu_char` maps Alt+F, Alt+V, Alt+S and
 //! Alt+H to their items.
 //!
@@ -65,12 +66,13 @@ struct BarItems([BarItem; 4]);
 // SAFETY: the pointers refer to static, immutable UTF-16 literals.
 unsafe impl Sync for BarItems {}
 
-const fn item(name: PCWSTR, length: u32, label: PCWSTR, mnemonic: u8) -> BarItem {
+/// `length` counts the UTF-16 units of `label` without the terminator.
+const fn item(length: u32, label: PCWSTR, mnemonic: u8) -> BarItem {
     BarItem {
         msaa: MSAAMENUINFO {
             dwMSAASignature: MSAA_MENU_SIG as u32,
             cchWText: length,
-            pszWText: PWSTR(name.0.cast_mut()),
+            pszWText: PWSTR(label.0.cast_mut()),
         },
         label,
         mnemonic: mnemonic as u16,
@@ -79,10 +81,10 @@ const fn item(name: PCWSTR, length: u32, label: PCWSTR, mnemonic: u8) -> BarItem
 
 /// The top-level items in `toolbar::create_menu` order.
 static ITEMS: BarItems = BarItems([
-    item(w!("File"), 4, w!("&File"), b'F'),
-    item(w!("View"), 4, w!("&View"), b'V'),
-    item(w!("Settings"), 8, w!("&Settings"), b'S'),
-    item(w!("Help"), 4, w!("&Help"), b'H'),
+    item(5, w!("&File"), b'F'),
+    item(5, w!("&View"), b'V'),
+    item(9, w!("&Settings"), b'S'),
+    item(5, w!("&Help"), b'H'),
 ]);
 
 /// GDI objects and colors for painting the dark bar, deleted on drop.
@@ -331,15 +333,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_bar_item_names_itself_for_msaa() {
+    fn every_bar_item_names_itself_for_msaa_with_its_access_key() {
         for item in &ITEMS.0 {
             assert_eq!(item.msaa.dwMSAASignature, 0xAA0D_F00D);
             // SAFETY: static literals.
             let pointer = PCWSTR(item.msaa.pszWText.0);
-            let name = unsafe { pointer.as_wide() };
-            assert_eq!(name.len(), item.msaa.cchWText as usize);
-            assert_eq!(name, text_without_marker(item.label));
-            assert_eq!(name[0], item.mnemonic);
+            let text = unsafe { pointer.as_wide() };
+            assert_eq!(text.len(), item.msaa.cchWText as usize);
+            // The access-key marker stays, as in the system menu text.
+            assert_eq!(text[0], u16::from(b'&'));
+            assert_eq!(text[1], item.mnemonic);
+            assert_eq!(text_without_marker(item.label), &text[1..]);
         }
     }
 

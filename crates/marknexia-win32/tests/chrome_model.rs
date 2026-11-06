@@ -7,12 +7,12 @@ use marknexia_core::contracts::DiagnosticSeverity;
 use marknexia_files::repository::{LimitsHit, RepositoryTree, RepositoryTreeNode};
 use marknexia_win32::{
     chrome_model::{
-        ChromeCommand, DiagnosticsBar, DiagnosticsFacts, OutlineEntry, SidebarMode, SidebarResize,
-        TabLocation, TreeArena, about_text, anchor_clipboard_text, anchor_copied_notice,
-        clamp_sidebar_width, compact_transition, diagnostics_report, dotnet_architecture,
-        help_text, remote_assets_notice, repository_header, resize_sidebar, reveal_allowed,
-        reveal_failed_notice, route_chrome_key, same_document_path, sbom_components,
-        sidebar_resize_key, sidebar_width_dip,
+        ChromeCommand, DiagnosticsBar, DiagnosticsFacts, OutlineEntry, SBOM_LIST_LIMIT,
+        SidebarMode, SidebarResize, TabLocation, TreeArena, about_text, anchor_clipboard_text,
+        anchor_copied_notice, clamp_sidebar_width, compact_transition, diagnostics_report,
+        dotnet_architecture, help_text, remote_assets_notice, repository_header, resize_sidebar,
+        reveal_allowed, reveal_failed_notice, route_chrome_key, same_document_path,
+        sbom_components, sbom_rows, sidebar_resize_key, sidebar_width_dip,
     },
     layout::{Dip, ShellLayout, ShellLayoutRequest, is_compact},
 };
@@ -302,7 +302,8 @@ fn reveal_passes_the_path_gate_and_stays_in_the_repository() {
         Some(root)
     ));
     assert!(reveal_allowed(Path::new(r"C:\repo"), Some(root)));
-    assert!(reveal_allowed(Path::new(r"C:\elsewhere\a.md"), None));
+    // Without a repository nothing is revealed (CHROME-3).
+    assert!(!reveal_allowed(Path::new(r"C:\elsewhere\a.md"), None));
     assert!(!reveal_allowed(Path::new(r"C:\other\a.md"), Some(root)));
     assert!(!reveal_allowed(Path::new(r"C:\repo\..\x.md"), Some(root)));
     assert!(!reveal_allowed(Path::new(r"\\.\pipe\x"), None));
@@ -391,4 +392,17 @@ fn the_compact_breakpoint_and_pane_follow_the_dotnet_visual_states() {
     // Staying on one side changes nothing (the toggle keeps working).
     assert_eq!(compact_transition(Some(true), true), None);
     assert_eq!(compact_transition(Some(false), false), None);
+}
+
+#[test]
+fn the_sbom_list_is_capped_with_a_remainder_row() {
+    let few: Vec<String> = (0..3).map(|index| format!("c{index}  1")).collect();
+    assert_eq!(sbom_rows(&few), few);
+    let many: Vec<String> = (0..SBOM_LIST_LIMIT + 7)
+        .map(|index| format!("c{index}"))
+        .collect();
+    let rows = sbom_rows(&many);
+    assert_eq!(rows.len(), SBOM_LIST_LIMIT + 1);
+    assert_eq!(rows[SBOM_LIST_LIMIT - 1], many[SBOM_LIST_LIMIT - 1]);
+    assert_eq!(rows[SBOM_LIST_LIMIT], "\u{2026}and 7 more");
 }

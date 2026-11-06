@@ -574,18 +574,17 @@ fn enter_on_a_heading_jumps_and_alt_left_goes_back() {
 use windows::Win32::{
     Foundation::{LPARAM, RECT, WPARAM},
     System::{
-        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
-        Memory::{GlobalLock, GlobalUnlock},
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+        },
+        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
     },
     UI::{
-        Accessibility::{
-            UIA_ImageControlTypeId, UIA_ProcessIdPropertyId, UIA_TextControlTypeId,
-            UIA_WindowControlTypeId,
-        },
+        Accessibility::{UIA_ProcessIdPropertyId, UIA_TextControlTypeId, UIA_WindowControlTypeId},
         WindowsAndMessaging::{
-            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowTextW, PostMessageW,
-            SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageTimeoutW,
-            SetWindowPos, WM_CLOSE, WM_COMMAND,
+            CreateWindowExW, DestroyWindow, EnumWindows, GW_OWNER, GetClassNameW, GetWindow,
+            HWND_MESSAGE, PostMessageW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+            SendMessageTimeoutW, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
         },
     },
 };
@@ -723,10 +722,120 @@ fn top_level_windows(class: &str) -> Vec<HWND> {
     search.found
 }
 
-fn window_title(hwnd: HWND) -> String {
-    let mut text = [0_u16; 260];
-    let length = unsafe { GetWindowTextW(hwnd, &mut text) };
-    String::from_utf16_lossy(&text[..usize::try_from(length).unwrap_or(0)])
+/// Replaces the clipboard with `text` (or empties it), from this test
+/// process. A message-only window owns the new data.
+fn set_clipboard_text(text: Option<&str>) {
+    let Ok(owner) = (unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            windows::core::w!("STATIC"),
+            None,
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+    }) else {
+        return;
+    };
+    for _ in 0..20 {
+        if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
+            unsafe {
+                let _ = EmptyClipboard();
+                if let Some(text) = text {
+                    let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                    if let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) {
+                        let target = GlobalLock(memory).cast::<u16>();
+                        if !target.is_null() {
+                            std::ptr::copy_nonoverlapping(units.as_ptr(), target, units.len());
+                            let _ = GlobalUnlock(memory);
+                            let _ = SetClipboardData(
+                                13,
+                                Some(windows::Win32::Foundation::HANDLE(memory.0)),
+                            );
+                        }
+                    }
+                }
+                let _ = CloseClipboard();
+            }
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = unsafe { DestroyWindow(owner) };
+}
+
+/// Saves the clipboard text and puts it back on drop, so a test that
+/// copies leaves the user's clipboard as it was.
+struct ClipboardGuard(Option<String>);
+
+impl ClipboardGuard {
+    fn save() -> Self {
+        Self(clipboard_text())
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        set_clipboard_text(self.0.as_deref());
+    }
+}
+
+/// Closes, on drop, every File Explorer window that opened after `new`,
+/// matched by the new window handles (never by title).
+struct ExplorerWindows(Vec<HWND>);
+
+impl ExplorerWindows {
+    fn new() -> Self {
+        Self(top_level_windows("CabinetWClass"))
+    }
+
+    fn opened(&self) -> Vec<HWND> {
+        top_level_windows("CabinetWClass")
+            .into_iter()
+            .filter(|window| !self.0.contains(window))
+            .collect()
+    }
+}
+
+impl Drop for ExplorerWindows {
+    fn drop(&mut self) {
+        for window in self.opened() {
+            let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        }
+    }
+}
+
+/// The menu bar items' names and access keys.
+fn menu_bar_items(shell: &Launched) -> Vec<(String, String)> {
+    shell.until("the menu bar items", || {
+        let items: Vec<(String, String)> = shell
+            .find_all(&shell.root, UIA_MenuBarControlTypeId, false)
+            .iter()
+            .flat_map(|bar| {
+                shell
+                    .find_all(
+                        bar,
+                        windows::Win32::UI::Accessibility::UIA_MenuItemControlTypeId,
+                        true,
+                    )
+                    .into_iter()
+                    .map(|item| {
+                        let key = unsafe { item.CurrentAccessKey() }
+                            .map(|key| key.to_string())
+                            .unwrap_or_default();
+                        (name(&item), key)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        (items.len() >= 4).then_some(items)
+    })
 }
 
 #[test]
@@ -738,10 +847,16 @@ fn the_brand_tooltips_and_open_button_follow_dotnet() {
     // .NET `OpenFileButton` name.
     let open = shell.wait_id("1001", UIA_ButtonControlTypeId, "Open Markdown file");
     assert_target(&open, minimum, true);
-    // .NET `BrandIcon` (an image named "Marknexia") and `BrandDetails`.
-    let icon = shell.wait_id("2030", UIA_ImageControlTypeId, "Marknexia");
-    assert!(is_onscreen(&icon));
+    // .NET `BrandDetails`; the brand image is decoration, outside the
+    // control view, so "Marknexia" is exposed once.
     let product = shell.wait_id("2031", UIA_TextControlTypeId, "Marknexia");
+    assert!(
+        shell
+            .find_id("2030")
+            .is_none_or(|icon| !unsafe { icon.CurrentIsControlElement() }
+                .is_ok_and(|control| control.as_bool())),
+        "the brand image is not a control element"
+    );
     assert!(is_onscreen(&product));
     let tagline = shell.wait_id("2032", UIA_TextControlTypeId, "Read. Explore. Understand.");
     assert!(is_onscreen(&tagline));
@@ -804,12 +919,6 @@ fn the_compact_layout_collapses_labels_and_closes_the_pane() {
     );
     let open = shell.wait_id("1001", UIA_ButtonControlTypeId, "Open Markdown file");
     assert_target(&open, minimum, true);
-    // The brand image stays.
-    assert!(is_onscreen(&shell.wait_id(
-        "2030",
-        UIA_ImageControlTypeId,
-        "Marknexia"
-    )));
 
     // The toggle opens the 240-DIP pane (and saves IsSidebarOpen).
     invoke(&shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar"));
@@ -901,6 +1010,7 @@ fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn troubleshooting_copies_the_dotnet_diagnostics() {
+    let _clipboard = ClipboardGuard::save();
     let shell = launch(&[], None);
     shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
     shell.post_command(MENU_TROUBLESHOOTING);
@@ -940,7 +1050,8 @@ fn troubleshooting_copies_the_dotnet_diagnostics() {
         "App path: ",
         "Local data: ",
         "WebView2 data: ",
-        "SBOM present: ",
+        // The isolated MARKNEXIA_SBOM_PATH has no file.
+        "SBOM present: False",
         "Remote images enabled: False",
     ]) {
         assert!(line.starts_with(prefix), "{line:?} starts with {prefix:?}");
@@ -948,38 +1059,21 @@ fn troubleshooting_copies_the_dotnet_diagnostics() {
     assert_eq!(lines.len(), 9);
 }
 
-/// Removes the test SBOM it wrote beside the shell executable.
-struct SbomFile(PathBuf);
-
-impl Drop for SbomFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn the_sbom_item_warns_when_missing_and_copies_the_inventory() {
-    let executable = PathBuf::from(std::env::var_os("MARKNEXIA_SHELL_EXE").expect("exe"));
-    let path = executable.with_file_name("marknexia-sbom.spdx.json");
-    let existing = path.exists();
-    if !existing {
-        // .NET: "missing" while no inventory ships beside the executable.
-        let shell = launch(&[], None);
-        shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
-        shell.post_command(MENU_SBOM);
-        shell.wait_diagnostic(
-            "Warning: The software components inventory is missing. Reinstall Marknexia from its release package.",
-        );
-    }
-    let json = "{\"spdxVersion\":\"SPDX-2.3\",\"packages\":[{\"name\":\"zeta\",\"versionInfo\":\"2\"},{\"name\":\"Alpha\",\"versionInfo\":\"1.0\"}]}";
-    let _cleanup = (!existing).then(|| {
-        std::fs::write(&path, json).expect("write the test SBOM");
-        SbomFile(path.clone())
-    });
-    let expected = std::fs::read_to_string(&path).expect("read the SBOM");
+    let _clipboard = ClipboardGuard::save();
+    // Each launch reads its own MARKNEXIA_SBOM_PATH (support/shell.rs),
+    // never the executable folder.
     let shell = launch(&[], None);
     shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    shell.post_command(MENU_SBOM);
+    // .NET: "missing" while no inventory exists.
+    shell.wait_diagnostic(
+        "Warning: The software components inventory is missing. Reinstall Marknexia from its release package.",
+    );
+    let json = "{\"spdxVersion\":\"SPDX-2.3\",\"packages\":[{\"name\":\"zeta\",\"versionInfo\":\"2\"},{\"name\":\"Alpha\",\"versionInfo\":\"1.0\"}]}";
+    std::fs::write(shell.shell.sbom_path(), json).expect("write the test SBOM");
     shell.post_command(MENU_SBOM);
     let dialog = shell.until("the software components dialog", || {
         shell.find_dialog("Marknexia software components")
@@ -994,10 +1088,7 @@ fn the_sbom_item_warns_when_missing_and_copies_the_inventory() {
         .iter()
         .map(name)
         .collect();
-    if !existing {
-        assert_eq!(entries, ["Alpha  1.0", "zeta  2"]);
-    }
-    assert!(!entries.is_empty());
+    assert_eq!(entries, ["Alpha  1.0", "zeta  2"]);
     let minimum = shell.minimum_pixels();
     let copy = shell.until("Copy SBOM", || {
         shell
@@ -1015,15 +1106,13 @@ fn the_sbom_item_warns_when_missing_and_copies_the_inventory() {
     );
     invoke(&copy);
     shell.wait_diagnostic("Informational: Software components inventory copied.");
-    assert_eq!(
-        clipboard_text().as_deref(),
-        Some(expected.trim_start_matches('\u{feff}'))
-    );
+    assert_eq!(clipboard_text().as_deref(), Some(json));
 }
 
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn copy_heading_anchor_copies_only_the_anchor() {
+    let _clipboard = ClipboardGuard::save();
     let features = fixture("features.md");
     let shell = launch(&[features.as_os_str()], None);
     let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
@@ -1096,14 +1185,12 @@ fn reveal_in_file_explorer_selects_the_file_in_its_folder() {
     let reveal = shell.wait_id("2019", UIA_ButtonControlTypeId, "Reveal in File Explorer");
     shell.until("Reveal to be enabled", || is_enabled(&reveal).then_some(()));
     assert_target(&reveal, shell.minimum_pixels(), true);
-    let before = top_level_windows("CabinetWClass");
+    // Closes the Explorer windows this test opened, also on failure.
+    let explorer = ExplorerWindows::new();
     invoke(&reveal);
-    let opened = shell.until("a File Explorer window for the repository", || {
-        top_level_windows("CabinetWClass")
-            .into_iter()
-            .find(|window| !before.contains(window) && window_title(*window) == root_name)
+    shell.until("a new File Explorer window", || {
+        (!explorer.opened().is_empty()).then_some(())
     });
-    let _ = unsafe { PostMessageW(Some(opened), WM_CLOSE, WPARAM(0), LPARAM(0)) };
     assert!(
         shell
             .find_id("2020")
@@ -1113,35 +1200,34 @@ fn reveal_in_file_explorer_selects_the_file_in_its_folder() {
 
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
-fn the_dark_menu_bar_is_dark_and_keeps_its_names() {
+fn the_dark_menu_bar_is_dark_and_keeps_its_names_and_access_keys() {
     use windows::Win32::{
         Graphics::Gdi::{GetDC, GetPixel, ReleaseDC},
         UI::WindowsAndMessaging::{GetMenuBarInfo, MENUBARINFO, OBJID_MENU},
     };
-    // Theme 2 is Dark (.NET `AppTheme`).
+    // Theme 1 is Light (the system menu bar), 2 is Dark (.NET `AppTheme`).
+    let light = {
+        let shell = launch(&[], Some(b"{\"Theme\": 1}"));
+        shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+        menu_bar_items(&shell)
+    };
     let shell = launch(&[], Some(b"{\"Theme\": 2}"));
     shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
-    let menus: Vec<String> = shell.until("the menu bar items", || {
-        let names: Vec<String> = shell
-            .find_all(&shell.root, UIA_MenuBarControlTypeId, false)
+    let dark = menu_bar_items(&shell);
+    for (menu, key) in [
+        ("File", "Alt+F"),
+        ("View", "Alt+V"),
+        ("Settings", "Alt+S"),
+        ("Help", "Alt+H"),
+    ] {
+        let found = dark
             .iter()
-            .flat_map(|bar| {
-                shell
-                    .find_all(
-                        bar,
-                        windows::Win32::UI::Accessibility::UIA_MenuItemControlTypeId,
-                        true,
-                    )
-                    .into_iter()
-                    .map(|item| name(&item))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        (names.len() >= 4).then_some(names)
-    });
-    for menu in ["File", "View", "Settings", "Help"] {
-        assert!(menus.iter().any(|item| item == menu), "{menu} in {menus:?}");
+            .find(|(name, _)| name == menu)
+            .unwrap_or_else(|| panic!("{menu} in {dark:?}"));
+        assert!(found.1.eq_ignore_ascii_case(key), "{menu}: {found:?}");
     }
+    // The owner-drawn bar exposes what the system bar exposes.
+    assert_eq!(dark, light);
     assert!(
         shell.activate(),
         "the shell must be visible to sample the bar"
