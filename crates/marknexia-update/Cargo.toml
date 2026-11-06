@@ -6,3 +6,12 @@ license.workspace = true
 
 [dependencies]
 marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+# Ed25519 verification of update-manifest-v1 (MIT). No default features:
+# no key generation from OS randomness, no PEM, no X25519.
+ed25519-compact = { version = "=2.6.0", default-features = false, features = ["std"] }
+# SHA-256 of the downloaded archive (MIT OR Apache-2.0).
+sha2 = { version = "=0.11.1", default-features = false }
+# DEFLATE for the strict ZIP reader (MIT OR Zlib OR Apache-2.0).
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
