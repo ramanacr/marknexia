@@ -6,8 +6,8 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, RECT},
         Graphics::Gdi::{
-            DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DrawTextW, HFONT,
-            HGDIOBJ, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            DT_CENTER, DT_SINGLELINE, DT_VCENTER, DrawTextW, HFONT, HGDIOBJ, SelectObject,
+            SetBkMode, SetTextColor, TRANSPARENT,
         },
         UI::{
             Controls::DRAWITEMSTRUCT,
@@ -21,17 +21,28 @@ use marknexia_core::contracts::DiagnosticSeverity;
 
 use super::{
     WindowError,
-    chrome::{ID_DIAGNOSTIC_CLOSE, ID_DIAGNOSTIC_TEXT, dip, set_bounds},
+    chrome::{ID_DIAGNOSTIC_CLOSE, ID_DIAGNOSTIC_ICON, ID_DIAGNOSTIC_TEXT, dip, set_bounds},
     create_child, fill, native_color,
 };
-use crate::{chrome_model::DiagnosticMessage, layout::PixelRect, theme::Palette};
+use crate::{
+    chrome_model::DiagnosticMessage,
+    layout::PixelRect,
+    theme::{ColorSpec, EffectiveTheme, Palette, SystemColorRole},
+};
 
 const BS_OWNERDRAW: u32 = 0x0B;
 const SS_OWNERDRAW: u32 = 0x0D;
+const SS_NOPREFIX: u32 = 0x80;
+const SS_CENTERIMAGE: u32 = 0x200;
+const SS_ENDELLIPSIS: u32 = 0x4000;
 const WS_TABSTOP: u32 = 0x0001_0000;
 
 #[derive(Clone, Copy)]
 pub(super) struct DiagnosticsControls {
+    /// Owner-drawn severity stripe and glyph (an image named by severity).
+    pub icon: HWND,
+    /// The message as plain static text: UIA exposes it as Text named by
+    /// its window text, "Warning: …" (an owner-drawn static is an image).
     pub text: HWND,
     pub close: HWND,
 }
@@ -41,12 +52,20 @@ pub(super) fn create(
     parent: HWND,
     instance: HINSTANCE,
 ) -> Result<DiagnosticsControls, WindowError> {
-    let text = create_child(
+    let icon = create_child(
         parent,
         instance,
         w!("STATIC"),
         w!(""),
         WINDOW_STYLE(WS_CHILD.0 | SS_OWNERDRAW),
+        ID_DIAGNOSTIC_ICON as isize,
+    )?;
+    let text = create_child(
+        parent,
+        instance,
+        w!("STATIC"),
+        w!(""),
+        WINDOW_STYLE(WS_CHILD.0 | SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS),
         ID_DIAGNOSTIC_TEXT as isize,
     )?;
     let close = create_child(
@@ -57,16 +76,19 @@ pub(super) fn create(
         WINDOW_STYLE(WS_CHILD.0 | WS_TABSTOP | BS_OWNERDRAW),
         ID_DIAGNOSTIC_CLOSE as isize,
     )?;
-    Ok(DiagnosticsControls { text, close })
+    Ok(DiagnosticsControls { icon, text, close })
 }
 
-/// Message area on the left, a 44-DIP Close button on the right.
+/// Severity icon, message, and a 44-DIP Close button on the right.
 pub(super) fn layout(controls: &DiagnosticsControls, bar: PixelRect, dpi: u32) {
     let button = bar.height.min(dip(44, dpi)).min(bar.width);
+    let icon = button.min(bar.width.saturating_sub(button));
+    set_bounds(controls.icon, PixelRect { width: icon, ..bar });
     set_bounds(
         controls.text,
         PixelRect {
-            width: bar.width.saturating_sub(button),
+            x: bar.x.saturating_add(icon),
+            width: bar.width.saturating_sub(button).saturating_sub(icon),
             ..bar
         },
     );
@@ -124,18 +146,26 @@ fn severity_glyph(severity: DiagnosticSeverity) -> char {
     }
 }
 
-/// Paints the message: a severity stripe and glyph in the severity color
-/// (system colors in high contrast), then the message text. The window text
-/// (the accessible name) carries the severity in words.
-pub(super) fn draw(
+/// Paints the severity: a stripe and the .NET glyph in the severity color.
+/// The background matches the message static's (the dark control color,
+/// otherwise the system button face, which is also the high-contrast pair).
+pub(super) fn draw_icon(
     item: &DRAWITEMSTRUCT,
+    theme: EffectiveTheme,
     colors: Palette,
     message: Option<&DiagnosticMessage>,
-    fonts: (HFONT, HFONT),
+    glyph_font: HFONT,
     dpi: u32,
 ) {
+    let background = if theme == EffectiveTheme::Dark {
+        colors.surface
+    } else {
+        ColorSpec::System(SystemColorRole::ButtonFace)
+    };
+    let dc = item.hDC;
+    let rect = item.rcItem;
+    fill(dc, &rect, native_color(background));
     let Some(message) = message else {
-        fill(item.hDC, &item.rcItem, native_color(colors.surface));
         return;
     };
     let accent = match message.severity {
@@ -143,12 +173,8 @@ pub(super) fn draw(
         DiagnosticSeverity::Warning => colors.warning,
         DiagnosticSeverity::Error => colors.error,
     };
-    // High contrast: the glyph and text use ButtonText on ButtonFace.
-    let accent = super::chrome::readable_on(colors.elevated, accent);
-    let text_color = super::chrome::readable_on(colors.elevated, colors.text);
-    let dc = item.hDC;
-    let rect = item.rcItem;
-    fill(dc, &rect, native_color(colors.elevated));
+    // High contrast: ButtonText on ButtonFace.
+    let accent = super::chrome::readable_on(background, accent);
     let stripe = i32::try_from(dip(4, dpi)).unwrap_or(4);
     fill(
         dc,
@@ -158,40 +184,25 @@ pub(super) fn draw(
         },
         native_color(accent),
     );
-    let height = rect.bottom - rect.top;
     // SAFETY: the DC is valid for WM_DRAWITEM; the previous font is
     // restored before returning.
     unsafe {
         SetBkMode(dc, TRANSPARENT);
-        let previous = SelectObject(dc, HGDIOBJ(fonts.0.0));
+        let previous = SelectObject(dc, HGDIOBJ(glyph_font.0));
         SetTextColor(dc, native_color(accent));
         let mut glyph: Vec<u16> = severity_glyph(message.severity)
             .to_string()
             .encode_utf16()
             .collect();
-        let mut glyph_area = RECT {
+        let mut area = RECT {
             left: rect.left + stripe,
-            right: rect.left + stripe + height,
             ..rect
         };
         DrawTextW(
             dc,
             &mut glyph,
-            &mut glyph_area,
-            windows::Win32::Graphics::Gdi::DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(dc, HGDIOBJ(fonts.1.0));
-        SetTextColor(dc, native_color(text_color));
-        let mut text: Vec<u16> = message.message.encode_utf16().collect();
-        let mut text_area = RECT {
-            left: glyph_area.right,
-            ..rect
-        };
-        DrawTextW(
-            dc,
-            &mut text,
-            &mut text_area,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            &mut area,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         );
         SelectObject(dc, previous);
     }

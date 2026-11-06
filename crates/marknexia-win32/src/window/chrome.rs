@@ -42,8 +42,8 @@ use windows::Win32::{
     },
     UI::{
         Accessibility::{
-            CAccPropServices, IAccPropServices, PROPID_ACC_NAME, PROPID_ACC_ROLE,
-            ROLE_SYSTEM_STATICTEXT,
+            CAccPropServices, IAccPropServices, IsContentElement_Property_GUID,
+            IsControlElement_Property_GUID, Name_Property_GUID, PROPID_ACC_NAME,
         },
         WindowsAndMessaging::{CHILDID_SELF, OBJID_CLIENT},
     },
@@ -111,6 +111,10 @@ pub(super) const ID_RECENT: usize = 2013;
 pub(super) const ID_SPLITTER: usize = 2014;
 pub(super) const ID_DIAGNOSTIC_TEXT: usize = 2020;
 pub(super) const ID_DIAGNOSTIC_CLOSE: usize = 2021;
+pub(super) const ID_DIAGNOSTIC_ICON: usize = 2022;
+pub(super) const ID_OUTLINE_LABEL: usize = 2015;
+pub(super) const ID_TREE_LABEL: usize = 2016;
+pub(super) const ID_RECENT_LABEL: usize = 2017;
 pub(super) const MENU_OPEN_FILE: usize = 2101;
 pub(super) const MENU_OPEN_FOLDER: usize = 2102;
 pub(super) const MENU_CLOSE_TAB: usize = 2103;
@@ -143,6 +147,10 @@ const REPOSITORY_LOAD_FAILED: &str = "The repository tree could not be loaded.";
 #[derive(Clone, Copy)]
 pub(super) struct SidebarControls {
     pub header: HWND,
+    /// Zero-size labels that name the lists for UIA (see `sidebar::create`).
+    pub outline_label: HWND,
+    pub tree_label: HWND,
+    pub recent_label: HWND,
     pub outline: HWND,
     pub tree: HWND,
     pub recent: HWND,
@@ -449,7 +457,12 @@ impl ChromeState {
                         window,
                         OBJID_CLIENT.0 as u32,
                         CHILDID_SELF,
-                        &[PROPID_ACC_NAME, PROPID_ACC_ROLE],
+                        &[
+                            PROPID_ACC_NAME,
+                            Name_Property_GUID,
+                            IsControlElement_Property_GUID,
+                            IsContentElement_Property_GUID,
+                        ],
                     )
                 };
             }
@@ -993,6 +1006,7 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
         );
         diagnostics::layout(&controls.diagnostics, layout.diagnostics, dpi);
         let open = diagnostics_open && layout.diagnostics.height > 0;
+        show(controls.diagnostics.icon, open);
         show(controls.diagnostics.text, open);
         show(controls.diagnostics.close, open);
     });
@@ -1199,26 +1213,29 @@ fn expand_tree_item(hwnd: HWND, tree: HWND, item: HTREEITEM, data: LPARAM) {
 fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
     let id = item.CtlID as usize;
     let face = toolbar::button_face(id);
-    if !matches!(id, ID_DIAGNOSTIC_TEXT | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE) && face.is_none() {
+    if !matches!(id, ID_DIAGNOSTIC_ICON | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE) && face.is_none() {
         return None;
     }
     // Copy what painting needs, then release the borrow: painting the
     // outline sends LB_GETTEXT to the list box.
-    let (colors, fonts, dpi, message) = {
+    let (theme, colors, fonts, dpi, message) = {
         let state = state_of(hwnd)?;
         let state = state.try_borrow().ok()?;
         let fonts = state.chrome.fonts.as_ref()?;
         (
+            state.theme,
             palette(state.theme),
             (fonts.glyph, fonts.text),
             state.dpi,
-            (id == ID_DIAGNOSTIC_TEXT)
+            (id == ID_DIAGNOSTIC_ICON)
                 .then(|| state.chrome.diagnostics.current().cloned())
                 .flatten(),
         )
     };
     match (id, face) {
-        (ID_DIAGNOSTIC_TEXT, _) => diagnostics::draw(item, colors, message.as_ref(), fonts, dpi),
+        (ID_DIAGNOSTIC_ICON, _) => {
+            diagnostics::draw_icon(item, theme, colors, message.as_ref(), fonts.0, dpi);
+        }
         (ID_DIAGNOSTIC_CLOSE, _) => toolbar::draw_button(item, colors, '\u{E711}', None, fonts),
         (ID_OUTLINE, _) => sidebar::draw_outline_item(item, colors, fonts.1, dpi),
         (_, Some((glyph, label))) => toolbar::draw_button(item, colors, glyph, label, fonts),
@@ -1328,7 +1345,7 @@ fn with_controls(state: &Rc<RefCell<AppState>>, apply: impl FnOnce(&ChromeContro
     }
 }
 
-fn all_windows(c: &ChromeControls) -> [HWND; 15] {
+fn all_windows(c: &ChromeControls) -> [HWND; 19] {
     [
         c.toolbar.toggle,
         c.toolbar.back,
@@ -1339,10 +1356,14 @@ fn all_windows(c: &ChromeControls) -> [HWND; 15] {
         c.toolbar.theme_label,
         c.toolbar.theme,
         c.sidebar.header,
+        c.sidebar.outline_label,
+        c.sidebar.tree_label,
+        c.sidebar.recent_label,
         c.sidebar.outline,
         c.sidebar.tree,
         c.sidebar.recent,
         c.sidebar.splitter,
+        c.diagnostics.icon,
         c.diagnostics.text,
         c.diagnostics.close,
     ]
@@ -1370,11 +1391,17 @@ fn order_controls(c: &ChromeControls, shell: ShellControls) {
         shell.tabs,
         shell.sidebar,
         c.sidebar.header,
+        // Each list follows its own label: the UIA and MSAA proxies name a
+        // list box or tree view from the static label just before it.
+        c.sidebar.outline_label,
         c.sidebar.outline,
+        c.sidebar.tree_label,
         c.sidebar.tree,
+        c.sidebar.recent_label,
         c.sidebar.recent,
         c.sidebar.splitter,
         shell.find,
+        c.diagnostics.icon,
         c.diagnostics.text,
         c.diagnostics.close,
         shell.status,
@@ -1958,33 +1985,48 @@ fn annotate_controls(state: &Rc<RefCell<AppState>>) {
     for (window, name) in named {
         set_accessible_name(&names, window, name);
     }
-    let role = VARIANT::from(ROLE_SYSTEM_STATICTEXT as i32);
-    // SAFETY: as above; the VARIANT outlives the call.
-    let _ = unsafe {
-        names.SetHwndProp(
-            controls.diagnostics.text,
-            OBJID_CLIENT.0 as u32,
-            CHILDID_SELF,
-            PROPID_ACC_ROLE,
-            &role,
-        )
-    };
+    for label in [
+        controls.sidebar.outline_label,
+        controls.sidebar.tree_label,
+        controls.sidebar.recent_label,
+    ] {
+        // The list carries the name; its label is not a separate element.
+        for property in [
+            IsControlElement_Property_GUID,
+            IsContentElement_Property_GUID,
+        ] {
+            // SAFETY: as above; the VARIANT outlives the call.
+            let _ = unsafe {
+                names.SetHwndProp(
+                    label,
+                    OBJID_CLIENT.0 as u32,
+                    CHILDID_SELF,
+                    property,
+                    &VARIANT::from(false),
+                )
+            };
+        }
+    }
     state.borrow_mut().chrome.names = Some(names);
 }
 
 fn set_accessible_name(names: &IAccPropServices, window: HWND, name: &str) {
     let text = wide(name);
-    // SAFETY: the buffer is NUL-terminated and outlives the call (oleacc
-    // copies it); no callback into the shell.
-    let _ = unsafe {
-        names.SetHwndPropStr(
-            window,
-            OBJID_CLIENT.0 as u32,
-            CHILDID_SELF,
-            PROPID_ACC_NAME,
-            PCWSTR::from_raw(text.as_ptr()),
-        )
-    };
+    // The MSAA name and the UI Automation Name (direct annotation of UIA
+    // properties, Windows 8 and later).
+    for property in [PROPID_ACC_NAME, Name_Property_GUID] {
+        // SAFETY: the buffer is NUL-terminated and outlives the call
+        // (oleacc copies it); no callback into the shell.
+        let _ = unsafe {
+            names.SetHwndPropStr(
+                window,
+                OBJID_CLIENT.0 as u32,
+                CHILDID_SELF,
+                property,
+                PCWSTR::from_raw(text.as_ptr()),
+            )
+        };
+    }
 }
 
 /// Brings every chrome control in line with the state. Lists are refilled
@@ -2012,7 +2054,7 @@ fn sync_ui(hwnd: HWND) {
         header: &'static str,
         diagnostic: Option<String>,
         announce: Option<String>,
-        names: Option<IAccPropServices>,
+        severity: Option<&'static str>,
         tree_generation: u32,
         relayout: bool,
     }
@@ -2097,7 +2139,10 @@ fn sync_ui(hwnd: HWND) {
             header,
             diagnostic,
             announce,
-            names: chrome.names.clone(),
+            severity: chrome
+                .diagnostics
+                .current()
+                .map(crate::chrome_model::DiagnosticMessage::severity_label),
             tree_generation: chrome.tree_shown,
             relayout: open != chrome.diagnostics_laid_out,
         }
@@ -2150,15 +2195,12 @@ fn sync_ui(hwnd: HWND) {
         controls.diagnostics.text,
         snapshot.diagnostic.as_deref().unwrap_or(""),
     );
-    if let Some(names) = snapshot.names.as_ref() {
-        set_accessible_name(
-            names,
-            controls.diagnostics.text,
-            snapshot.diagnostic.as_deref().unwrap_or(""),
-        );
+    set_text(controls.diagnostics.icon, snapshot.severity.unwrap_or(""));
+    // SAFETY: repaint requests for children of this thread.
+    unsafe {
+        let _ = InvalidateRect(Some(controls.diagnostics.icon), None, true);
+        let _ = InvalidateRect(Some(controls.diagnostics.text), None, true);
     }
-    // SAFETY: repaint request for a child of this thread.
-    let _ = unsafe { InvalidateRect(Some(controls.diagnostics.text), None, true) };
     if snapshot.relayout {
         relayout(hwnd, &state);
     }

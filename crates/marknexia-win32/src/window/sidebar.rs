@@ -35,8 +35,8 @@ use windows::{
 use super::{
     WindowError, app_state_handle,
     chrome::{
-        self, ID_OUTLINE, ID_RECENT, ID_SIDEBAR_HEADER, ID_SPLITTER, ID_TREE, SidebarControls, dip,
-        send, set_bounds, wide,
+        self, ID_OUTLINE, ID_OUTLINE_LABEL, ID_RECENT, ID_RECENT_LABEL, ID_SIDEBAR_HEADER,
+        ID_SPLITTER, ID_TREE, ID_TREE_LABEL, SidebarControls, dip, send, set_bounds, wide,
     },
     create_child, fill, native_color,
 };
@@ -137,6 +137,23 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
         WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SS_NOPREFIX | SS_CENTERIMAGE),
         ID_SIDEBAR_HEADER as isize,
     )?;
+    // The UIA and MSAA proxies name a list box or tree view from the
+    // static label just before it in z-order (`chrome::order_controls`).
+    // These zero-size labels carry the .NET `AutomationProperties.Name`;
+    // the visible heading keeps the .NET heading text ("Document Map").
+    let label = |text: PCWSTR, id: usize| {
+        create_child(
+            parent,
+            instance,
+            w!("STATIC"),
+            text,
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SS_NOPREFIX),
+            id as isize,
+        )
+    };
+    let outline_label = label(w!("Document outline"), ID_OUTLINE_LABEL)?;
+    let tree_label = label(w!("Repository files"), ID_TREE_LABEL)?;
+    let recent_label = label(w!("Recent Markdown files"), ID_RECENT_LABEL)?;
     let list_style = WS_CHILD.0 | WS_TABSTOP.0 | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT;
     let outline = create_child(
         parent,
@@ -179,6 +196,9 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
     )?;
     Ok(SidebarControls {
         header,
+        outline_label,
+        tree_label,
+        recent_label,
         outline,
         tree,
         recent,
