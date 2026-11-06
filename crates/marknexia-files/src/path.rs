@@ -134,3 +134,140 @@ impl RepositoryScope {
         self.contains(lexical_target) && self.contains(final_target)
     }
 }
+
+/// The volume part of a [`GatedPath`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PathVolume {
+    /// A drive letter, folded to ASCII lowercase.
+    Drive(char),
+    /// A UNC share; server and share are ASCII and folded to lowercase.
+    Unc { server: String, share: String },
+}
+
+/// A path that passed the lexical gate for local files: a drive path or a
+/// UNC share path (owner decision: UNC is allowed, as in .NET).
+///
+/// Accepted forms:
+/// - a drive path `C:\...` or its verbatim form `\\?\C:\...`;
+/// - a UNC path `\\server\share\...` or its verbatim form
+///   `\\?\UNC\server\share\...`.
+///
+/// Refused before anything else: any `.` or `..` component, in every form,
+/// so Win32 normalization cannot move a path onto another share (for
+/// example `\\server\..\pipe\x`). Refused forms: `\\.\` and all other
+/// `\\?\` forms (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and
+/// `mailslot` pseudo-shares (also with trailing dots or spaces, which Win32
+/// strips), the `IPC$` share (also with trailing dots or spaces), server or
+/// share names with non-ASCII characters, server or share names ending in
+/// `.` or space, and the explicit WebDAV forms: a server name with `@`
+/// (`@SSL` / `@port`) and the `DavWWWRoot` share. Server and share names may
+/// not contain separators, wildcards, `:` or control characters. The
+/// components after the drive root or after `server\share` must pass
+/// [`CanonicalPath`] (no reserved device names such as `CON`, `NUL`, `COM1`,
+/// no `:` so no alternate data streams, no wildcard or control characters).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatedPath {
+    volume: PathVolume,
+    /// The components below the volume, as a `c:/...` canonical path.
+    below: CanonicalPath,
+}
+
+impl GatedPath {
+    pub fn new(text: &str) -> Result<Self, PathError> {
+        let (body, unc) = if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if is_drive_path(rest) {
+                (rest, false)
+            } else {
+                match rest.get(..4) {
+                    Some(prefix) if prefix.eq_ignore_ascii_case(r"UNC\") => (&rest[4..], true),
+                    _ => return Err(PathError::NetworkOrDevice),
+                }
+            }
+        } else if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
+            (rest, true)
+        } else {
+            (text, false)
+        };
+        let components: Vec<&str> = body.split(['\\', '/']).collect();
+        if components
+            .iter()
+            .any(|component| matches!(*component, "." | ".."))
+        {
+            return Err(PathError::Traversal);
+        }
+        if !unc {
+            let path = CanonicalPath::new(body)?;
+            let drive = path.0.chars().next().unwrap_or('c');
+            let below = CanonicalPath(format!("c:{}", &path.0[2..]));
+            return Ok(Self {
+                volume: PathVolume::Drive(drive),
+                below,
+            });
+        }
+        let (server, share, rest) = match components.as_slice() {
+            [server, share, rest @ ..] => (*server, *share, rest),
+            _ => return Err(PathError::NetworkOrDevice),
+        };
+        // Server and share names must be ASCII, matching the ASCII-only case
+        // folding used for path containment.
+        let bad_name = |name: &str| {
+            name.is_empty()
+                || !name.is_ascii()
+                || name
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+        };
+        // Win32 strips trailing dots and spaces from a name, so "pipe." or
+        // "mailslot ." would reach those pseudo-shares: refuse such names, and
+        // compare the stripped name as defense in depth.
+        let stripped_share = share.trim_end_matches(['.', '\u{20}']);
+        if bad_name(server)
+            || bad_name(share)
+            || server.ends_with(['.', '\u{20}'])
+            || share.ends_with(['.', '\u{20}'])
+            || server.contains('@')
+            || stripped_share.eq_ignore_ascii_case("pipe")
+            || stripped_share.eq_ignore_ascii_case("mailslot")
+            || stripped_share.eq_ignore_ascii_case("DavWWWRoot")
+            // The inter-process communication share carries named pipes, not files.
+            || stripped_share.eq_ignore_ascii_case("IPC$")
+        {
+            return Err(PathError::NetworkOrDevice);
+        }
+        // The components below the share follow the drive-path rules; server
+        // and share are names, not files, so the device-name rules do not apply.
+        let below = CanonicalPath::new(&format!("C:/{}", rest.join("/")))?;
+        Ok(Self {
+            volume: PathVolume::Unc {
+                server: server.to_ascii_lowercase(),
+                share: share.to_ascii_lowercase(),
+            },
+            below,
+        })
+    }
+
+    pub fn volume(&self) -> &PathVolume {
+        &self.volume
+    }
+
+    /// True when `self` is `root` or below it: the same volume and the
+    /// component-wise [`RepositoryScope`] rule for the rest of the path.
+    pub fn is_within(&self, root: &GatedPath) -> bool {
+        self.volume == root.volume
+            && RepositoryScope {
+                root: root.below.clone(),
+            }
+            .contains(&self.below)
+    }
+
+    /// The number of components below the volume.
+    pub fn depth(&self) -> usize {
+        // `below` is `c:/...`; its first component is the placeholder drive.
+        self.below.components().count().saturating_sub(1)
+    }
+}
+
+fn is_drive_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}

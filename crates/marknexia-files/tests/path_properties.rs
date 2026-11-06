@@ -1,4 +1,65 @@
-use marknexia_files::path::{CanonicalPath, RepositoryScope};
+use marknexia_files::path::{CanonicalPath, GatedPath, PathVolume, RepositoryScope};
+
+#[test]
+fn gated_paths_accept_drive_and_unc_forms_and_compare_by_volume() {
+    let unc_root = GatedPath::new(r"\\Server\Share\Repo").unwrap();
+    assert_eq!(
+        unc_root.volume(),
+        &PathVolume::Unc {
+            server: "server".to_owned(),
+            share: "share".to_owned()
+        }
+    );
+    for inside in [
+        r"\\server\share\repo\docs\a.md",
+        r"\\?\UNC\SERVER\SHARE\REPO\a.md",
+        "//server/share/repo",
+    ] {
+        assert!(
+            GatedPath::new(inside).unwrap().is_within(&unc_root),
+            "{inside}"
+        );
+    }
+    for outside in [
+        r"\\server\other\repo\a.md",
+        r"\\other\share\repo\a.md",
+        r"\\server\share\repository\a.md",
+        r"C:\repo\a.md",
+    ] {
+        assert!(
+            !GatedPath::new(outside).unwrap().is_within(&unc_root),
+            "{outside}"
+        );
+    }
+    let drive_root = GatedPath::new(r"\\?\C:\Repo").unwrap();
+    assert_eq!(drive_root.volume(), &PathVolume::Drive('c'));
+    assert_eq!(drive_root.depth(), 1);
+    assert!(
+        GatedPath::new(r"c:/repo/x/y.md")
+            .unwrap()
+            .is_within(&drive_root)
+    );
+    assert!(
+        !GatedPath::new(r"D:\Repo\y.md")
+            .unwrap()
+            .is_within(&drive_root)
+    );
+    for refused in [
+        r"\\.\C:\Repo",
+        r"\\?\GLOBALROOT\Device\x",
+        r"\\server\pipe\x",
+        r"\\server\IPC$ \x",
+        r"\\server\..\pipe\x",
+        r"C:\Repo\.\a.md",
+        r"\\server",
+        r"\\server@SSL\share\a.md",
+        r"\\server\DavWWWRoot\a.md",
+        r"C:\Repo\CON.md",
+        "relative\\a.md",
+    ] {
+        assert!(GatedPath::new(refused).is_err(), "{refused}");
+    }
+}
 
 #[test]
 fn repository_scope_compares_windows_components_case_insensitively() {

@@ -18,7 +18,7 @@ use std::{
 use marknexia_core::contracts::AppTheme;
 use marknexia_files::{
     bounded_read::{BoundedReadError, BoundedReader},
-    path::CanonicalPath,
+    path::GatedPath,
 };
 use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, RenderError, Renderer};
 use marknexia_webview::policy::HostDocument;
@@ -220,97 +220,20 @@ const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 
 /// The lexical gate for a document path, applied to the requested path and
-/// to the opened handle's final path. Accepted forms:
-/// - a drive path `C:\...` or its verbatim form `\\?\C:\...`;
-/// - a UNC path `\\server\share\...` or its verbatim form
-///   `\\?\UNC\server\share\...` (as .NET allows).
-///
-/// Refused before anything else: any `.` or `..` component, in every form,
-/// so Win32 normalization cannot move a path onto another share (for
-/// example `\\server\..\pipe\x`). Refused forms: `\\.\` and all other
-/// `\\?\` forms (GLOBALROOT, volume GUIDs, pipes, devices), the `pipe` and
-/// `mailslot` pseudo-shares (also with trailing dots or spaces, which Win32
-/// strips), the `IPC$` share (also with trailing dots or spaces), server or
-/// share names with non-ASCII characters, server or share names ending in
-/// `.` or space, and the explicit
-/// WebDAV forms: a server name with `@` (`@SSL` / `@port`) and the
-/// `DavWWWRoot` share. .NET would pass these to the WebDAV redirector;
-/// refusing them is a deliberate decision. The refusal is partial: when SMB
-/// fails, the WebClient service may still send an ordinary share over WebDAV. Server and share names may
-/// not contain separators, wildcards, `:` or control characters. The
-/// components after the drive root or after `server\share` must pass
-/// `CanonicalPath` (no reserved device names such as `CON`, `NUL`, `COM1`,
-/// no `:` so no alternate data streams, no wildcard or control characters).
+/// to the opened handle's final path: [`GatedPath::new`] (drive paths and
+/// UNC share paths, as .NET allows; device namespaces, pipes, mailslots,
+/// `IPC$`, explicit WebDAV forms, `.`/`..` components, reserved device
+/// names, alternate data streams, wildcard and control characters are
+/// refused). The explicit WebDAV refusal is partial: when SMB fails, the
+/// WebClient service may still send an ordinary share over WebDAV.
 ///
 /// Opening a UNC path contacts the remote server (SMB, or WebDAV through
 /// the WebClient fallback) and can block until the network times out; documents
 /// are opened on render workers, never on the UI thread.
 pub fn check_document_path(text: &str) -> Result<(), OpenError> {
-    let unsupported = |_| OpenError::UnsupportedPath;
-    let (body, unc) = if let Some(rest) = text.strip_prefix(r"\\?\") {
-        if is_drive_path(rest) {
-            (rest, false)
-        } else {
-            match rest.get(..4) {
-                Some(prefix) if prefix.eq_ignore_ascii_case(r"UNC\") => (&rest[4..], true),
-                _ => return Err(OpenError::UnsupportedPath),
-            }
-        }
-    } else if let Some(rest) = text.strip_prefix(r"\\").or_else(|| text.strip_prefix("//")) {
-        (rest, true)
-    } else {
-        (text, false)
-    };
-    let components: Vec<&str> = body.split(['\\', '/']).collect();
-    if components
-        .iter()
-        .any(|component| matches!(*component, "." | ".."))
-    {
-        return Err(OpenError::UnsupportedPath);
-    }
-    if !unc {
-        return CanonicalPath::new(body).map(drop).map_err(unsupported);
-    }
-    let (server, share, rest) = match components.as_slice() {
-        [server, share, rest @ ..] => (*server, *share, rest),
-        _ => return Err(OpenError::UnsupportedPath),
-    };
-    // Server and share names must be ASCII, matching the ASCII-only case
-    // folding used for path containment.
-    let bad_name = |name: &str| {
-        name.is_empty()
-            || !name.is_ascii()
-            || name
-                .chars()
-                .any(|c| c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*'))
-    };
-    // Win32 strips trailing dots and spaces from a name, so "pipe." or
-    // "mailslot ." would reach those pseudo-shares: refuse such names, and
-    // compare the stripped name as defense in depth.
-    let stripped_share = share.trim_end_matches(['.', '\u{20}']);
-    if bad_name(server)
-        || bad_name(share)
-        || server.ends_with(['.', '\u{20}'])
-        || share.ends_with(['.', '\u{20}'])
-        || server.contains('@')
-        || stripped_share.eq_ignore_ascii_case("pipe")
-        || stripped_share.eq_ignore_ascii_case("mailslot")
-        || stripped_share.eq_ignore_ascii_case("DavWWWRoot")
-        // The inter-process communication share carries named pipes, not files.
-        || stripped_share.eq_ignore_ascii_case("IPC$")
-    {
-        return Err(OpenError::UnsupportedPath);
-    }
-    // The components below the share follow the drive-path rules; server and
-    // share are names, not files, so the device-name rules do not apply.
-    CanonicalPath::new(&format!("C:/{}", rest.join("/")))
+    GatedPath::new(text)
         .map(drop)
-        .map_err(unsupported)
-}
-
-fn is_drive_path(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+        .map_err(|_| OpenError::UnsupportedPath)
 }
 
 /// Reads a Markdown source like .NET `FileService.ReadTextAsync`, with
