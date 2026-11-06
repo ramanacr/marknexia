@@ -153,3 +153,30 @@ fn rendered_documents_are_send() {
     assert_send::<marknexia_rendering::RenderedDocument>();
     assert_send::<PageIdentity>();
 }
+
+#[test]
+fn a_page_rendered_with_remote_images_keeps_its_policy_in_the_header() {
+    let identity = identity(0x3C);
+    let mut context = RenderContext::new(AppTheme::System, identity);
+    context.allow_remote_assets = true;
+    let rendered = Renderer::new()
+        .render("![remote](https://example.com/a.png)", &context)
+        .unwrap();
+    let document = HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity).unwrap();
+    let origin = identity.origin();
+    assert!(
+        document
+            .document_csp()
+            .contains(&format!("img-src {origin} data: http: https:;"))
+    );
+    assert!(html(&document).contains("https://example.com/a.png"));
+
+    // Without the setting the header keeps the blocked policy.
+    let rendered = render("![remote](https://example.com/a.png)", identity);
+    let document = HostDocument::from_rendered(6, 1, "remote.md", rendered, &identity).unwrap();
+    assert!(
+        document
+            .document_csp()
+            .contains(&format!("img-src {origin} data:;"))
+    );
+}

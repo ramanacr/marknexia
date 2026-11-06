@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use marknexia_webview::host::ShellAccelerator;
+use marknexia_webview::host::{ShellAccelerator, scroll_script};
 
 const VK_TAB: u16 = 0x09;
 const VK_W: u16 = 0x57;
@@ -23,4 +23,48 @@ fn only_shell_owned_chords_leave_the_document() {
     assert!(ShellAccelerator::from_key(VK_W, true, true, false).is_none());
     assert!(ShellAccelerator::from_key(VK_F6, true, false, false).is_none());
     assert!(ShellAccelerator::from_key(VK_TAB, true, false, true).is_none());
+}
+
+#[test]
+fn dotnet_command_accelerators_leave_the_document() {
+    const VK_LEFT: u16 = 0x25;
+    const VK_RIGHT: u16 = 0x27;
+    const VK_O: u16 = 0x4F;
+    const VK_R: u16 = 0x52;
+    const VK_T: u16 = 0x54;
+    const VK_F5: u16 = 0x74;
+    for (key, ctrl, shift, alt) in [
+        (VK_O, true, false, false),
+        (VK_O, true, true, false),
+        (VK_T, true, false, false),
+        (VK_R, true, false, false),
+        (VK_F5, false, false, false),
+        (VK_LEFT, false, false, true),
+        (VK_RIGHT, false, false, true),
+    ] {
+        let chord = ShellAccelerator::from_key(key, ctrl, shift, alt).expect("command chord");
+        assert_eq!((chord.ctrl, chord.shift, chord.alt), (ctrl, shift, alt));
+    }
+    // Plain arrows scroll the page; Ctrl+Shift+R and Shift+F5 stay in WebView2.
+    assert!(ShellAccelerator::from_key(VK_LEFT, false, false, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_R, true, true, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_F5, false, true, false).is_none());
+    assert!(ShellAccelerator::from_key(VK_LEFT, true, false, true).is_none());
+}
+
+#[test]
+fn scroll_script_json_encodes_the_anchor() {
+    assert_eq!(scroll_script(None), "window.marknexiaBridge?.scrollToTop()");
+    assert_eq!(
+        scroll_script(Some("")),
+        "window.marknexiaBridge?.scrollToTop()"
+    );
+    assert_eq!(
+        scroll_script(Some("intro")),
+        r#"window.marknexiaBridge?.scrollToAnchor("intro")"#
+    );
+    assert_eq!(
+        scroll_script(Some("a\");alert(1);//")),
+        r#"window.marknexiaBridge?.scrollToAnchor("a\");alert(1);//")"#
+    );
 }

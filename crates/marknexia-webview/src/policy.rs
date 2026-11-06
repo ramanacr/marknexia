@@ -166,7 +166,6 @@ impl HostDocument {
         let mut page = rendered.page_html();
         drop(rendered);
         let origin = identity.origin();
-        let csp = rendered_page_csp(identity);
         // The theme value is one of three fixed template words, so the head
         // opening is at a bounded offset in trusted template text.
         let theme_end = page
@@ -183,12 +182,21 @@ impl HostDocument {
         // bundled stylesheet precedes it and contains no such text.
         let head_end = page.find(HEAD_END).ok_or(DocumentError::IdentityMismatch)?;
         let head = &page[..head_end];
-        let expected_meta = format!(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
-            html_encode(&csp)
-        );
+        // The template emits one of two policies: remote images blocked, or
+        // allowed (`RenderContext::allow_remote_assets`, the .NET
+        // `AllowRemoteAssets` setting). Both are bound to the identity.
+        let csp = [false, true]
+            .into_iter()
+            .map(|remote| rendered_page_csp(identity, remote))
+            .find(|csp| {
+                head.contains(&format!(
+                    "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
+                    html_encode(csp)
+                ))
+            })
+            .ok_or(DocumentError::IdentityMismatch)?;
         let expected_base = format!("<base href=\"{}/", html_encode(&origin));
-        if !head.contains(&expected_meta) || !head.contains(&expected_base) {
+        if !head.contains(&expected_base) {
             return Err(DocumentError::IdentityMismatch);
         }
         let title = HtmlPolicy::new(ContentPolicy::default())
@@ -502,11 +510,12 @@ impl<'a> ResponseSpec<'a> {
 /// `identity` with remote assets off (.NET `TemplateEngine`). It names the
 /// identity origin and nonce; `from_rendered` checks the page against it, so
 /// any template change fails closed instead of drifting.
-fn rendered_page_csp(identity: &PageIdentity) -> String {
+fn rendered_page_csp(identity: &PageIdentity, remote_images: bool) -> String {
     let origin = identity.origin();
     let nonce = identity.nonce();
+    let remote = if remote_images { " http: https:" } else { "" };
     format!(
-        "default-src 'none'; base-uri {origin}; script-src 'nonce-{nonce}' https://marknexia.assets; style-src 'unsafe-inline'; img-src {origin} data:; font-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'"
+        "default-src 'none'; base-uri {origin}; script-src 'nonce-{nonce}' https://marknexia.assets; style-src 'unsafe-inline'; img-src {origin} data:{remote}; font-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'"
     )
 }
 

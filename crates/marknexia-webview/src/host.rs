@@ -141,12 +141,14 @@ pub struct ShellAccelerator {
     pub virtual_key: u16,
     pub ctrl: bool,
     pub shift: bool,
+    pub alt: bool,
 }
 
 impl ShellAccelerator {
     /// Only chords the native shell owns leave the page: Ctrl+Tab,
-    /// Ctrl+Shift+Tab, Ctrl+W and F6/Shift+F6. Everything else, including
-    /// copy and find inside the document, stays with WebView2.
+    /// Ctrl+Shift+Tab, Ctrl+W and F6/Shift+F6, plus the .NET command
+    /// accelerators (see [`Self::is_command_chord`]). Everything else,
+    /// including copy and find inside the document, stays with WebView2.
     #[must_use]
     pub fn from_key(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> Option<Self> {
         let owned = !alt
@@ -156,11 +158,48 @@ impl ShellAccelerator {
                 key if key == VK_F6.0 => !ctrl,
                 _ => false,
             };
-        owned.then_some(Self {
+        (owned || Self::is_command_chord(virtual_key, ctrl, shift, alt)).then_some(Self {
             virtual_key,
             ctrl,
             shift,
+            alt,
         })
+    }
+
+    /// The .NET `MainWindow` accelerators that must reach the shell from the
+    /// document: Ctrl+O, Ctrl+Shift+O and Ctrl+T (open), F5 and Ctrl+R
+    /// (reload, instead of a browser reload of the pinned page), and
+    /// Alt+Left and Alt+Right (history, instead of browser navigation).
+    #[must_use]
+    pub fn is_command_chord(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> bool {
+        const VK_LEFT: u16 = 0x25;
+        const VK_RIGHT: u16 = 0x27;
+        const VK_O: u16 = 0x4F;
+        const VK_R: u16 = 0x52;
+        const VK_T: u16 = 0x54;
+        const VK_F5: u16 = 0x74;
+        matches!(
+            (virtual_key, ctrl, shift, alt),
+            (VK_O, true, _, false)
+                | (VK_T | VK_R, true, false, false)
+                | (VK_F5, false, false, false)
+                | (VK_LEFT | VK_RIGHT, false, false, true)
+        )
+    }
+}
+
+/// The script that asks the page bridge to scroll (.NET
+/// `ApplyPendingLocationAsync`): `scrollToAnchor` with the JSON-encoded
+/// anchor, or `scrollToTop` without one. JSON encoding keeps document text
+/// out of the script syntax.
+#[must_use]
+pub fn scroll_script(anchor: Option<&str>) -> String {
+    match anchor.filter(|anchor| !anchor.is_empty()) {
+        Some(anchor) => {
+            let argument = serde_json::to_string(anchor).unwrap_or_else(|_| "\"\"".to_owned());
+            format!("window.marknexiaBridge?.scrollToAnchor({argument})")
+        }
+        None => "window.marknexiaBridge?.scrollToTop()".to_owned(),
     }
 }
 
@@ -389,6 +428,28 @@ impl WebViewHost {
     pub fn document_identity(&self) -> Result<(u64, u64), HostError> {
         let document = self.document.as_ref().ok_or(HostError::Closed)?;
         Ok((document.tab_id(), document.document_epoch()))
+    }
+
+    /// Scrolls the loaded document through the page bridge (see
+    /// [`scroll_script`]). Fire and forget: no completion handler is kept.
+    pub fn scroll_to_anchor(&self, anchor: Option<&str>) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        if self.document.is_none() {
+            return Err(HostError::InvalidDocument);
+        }
+        let script: Vec<u16> = scroll_script(anchor)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: called on the owning STA; the script buffer outlives the
+        // call (WebView2 copies it) and no handler is registered.
+        unsafe {
+            core.ExecuteScript(
+                windows::core::PCWSTR::from_raw(script.as_ptr()),
+                None::<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ExecuteScriptCompletedHandler>,
+            )
+        }
+        .map_err(HostError::from_com)
     }
 
     /// Only a typed, identity-bound message can cross into the page. The
