@@ -15,6 +15,8 @@
 //!   and post `WM_CHROME_ACTION`; the action runs from the message loop, as
 //!   the Open dialog does (`WM_OPEN_DIALOG`).
 
+mod updater;
+
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -138,6 +140,7 @@ pub(super) const MENU_HELP: usize = 2131;
 pub(super) const MENU_ABOUT: usize = 2132;
 pub(super) const MENU_TROUBLESHOOTING: usize = 2133;
 pub(super) const MENU_SBOM: usize = 2134;
+pub(super) const MENU_CHECK_UPDATES: usize = 2135;
 /// The row buttons (CHROME-3): "Copy heading anchor" for the selected
 /// outline row, "Reveal in File Explorer" for the selected tree row.
 pub(super) const ID_COPY_ANCHOR: usize = 2018;
@@ -243,6 +246,8 @@ enum ChromeAction {
     ShowTroubleshooting(DiagnosticsFacts),
     /// A worker read the SBOM: show the dialog or the failure.
     ShowSbom(Result<(String, Vec<String>), shell_ops::SbomFailure>),
+    /// An update check or install finished (`updater`).
+    Update(updater::UpdateResult),
     Sync,
 }
 
@@ -287,6 +292,8 @@ enum WorkerResult {
     Troubleshooting(DiagnosticsFacts),
     /// The SBOM text and its component list, for the dialog.
     Sbom(Result<(String, Vec<String>), shell_ops::SbomFailure>),
+    /// An update check or install finished (`updater`).
+    Update(updater::UpdateResult),
     /// File Explorer opened, or the error message.
     Revealed(Result<(), String>),
     /// The data folder opened, or the error message.
@@ -760,7 +767,7 @@ pub(super) fn install(
     let toolbar = toolbar::create(hwnd, instance)?;
     let sidebar_controls = sidebar::create(hwnd, instance)?;
     let diagnostics_controls = diagnostics::create(hwnd, instance)?;
-    let menu = toolbar::create_menu(hwnd);
+    let menu = toolbar::create_menu(hwnd, updater::menu_enabled());
     // .NET `ToolTipService.ToolTip` texts; a missing tooltip window only
     // loses the tooltips.
     let tooltip = toolbar::create_tooltips(
@@ -1306,6 +1313,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
             ChromeAction::Command(ChromeCommand::ShowTroubleshooting)
         }
         MENU_SBOM if clicked => ChromeAction::Command(ChromeCommand::ShowSbom),
+        MENU_CHECK_UPDATES if clicked => ChromeAction::Command(ChromeCommand::CheckForUpdates),
         ID_COPY_ANCHOR if clicked => ChromeAction::CopyAnchor,
         ID_REVEAL if clicked => ChromeAction::Reveal,
         ID_DIAGNOSTIC_CLOSE if clicked => ChromeAction::DismissDiagnostic,
@@ -1529,6 +1537,7 @@ fn run_action(hwnd: HWND, action: ChromeAction) {
         ChromeAction::Reveal => reveal_selected(hwnd),
         ChromeAction::ShowTroubleshooting(facts) => show_troubleshooting(hwnd, &facts),
         ChromeAction::ShowSbom(result) => show_sbom(hwnd, result),
+        ChromeAction::Update(result) => updater::apply(hwnd, result),
         ChromeAction::Sync => sync_ui(hwnd),
     }
 }
@@ -1774,6 +1783,7 @@ fn run_command(hwnd: HWND, command: ChromeCommand) {
         ChromeCommand::ShowAbout => dialogs::show_about(hwnd),
         ChromeCommand::ShowTroubleshooting => request_troubleshooting(hwnd),
         ChromeCommand::ShowSbom => request_sbom(hwnd),
+        ChromeCommand::CheckForUpdates => updater::request_check(hwnd),
     }
 }
 
@@ -2386,6 +2396,10 @@ pub(super) fn apply_worker_results(hwnd: HWND) {
                 queue_action(ChromeAction::ShowSbom(result));
                 continue;
             }
+            WorkerResult::Update(result) => {
+                updater::deliver(result);
+                continue;
+            }
             result => apply_worker_result(&mut state.borrow_mut().chrome, result),
         }
     }
@@ -2455,6 +2469,7 @@ fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
         | WorkerResult::FolderChecked { .. }
         | WorkerResult::Troubleshooting(_)
         | WorkerResult::Sbom(_)
+        | WorkerResult::Update(_)
         | WorkerResult::Revealed(Ok(()))
         | WorkerResult::DataFolderOpened(Ok(())) => {}
     }

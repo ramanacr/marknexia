@@ -57,14 +57,14 @@ use windows::{
             WindowsAndMessaging::{
                 BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW,
-                GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
-                PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-                SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND,
-                WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-                WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-                WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+                GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, IsWindowVisible, LoadCursorW, MSG,
+                PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+                SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+                TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
+                WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+                WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE,
+                WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
                 WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
@@ -102,6 +102,9 @@ mod input;
 // The WebView2 missing-runtime state and its user-initiated install. Hooks
 // into this file are marked "runtime:".
 mod runtime;
+// Native adapters of the portable updater (`marknexia-update`). Hooks into
+// this file are marked "update:".
+mod update_native;
 
 const CLASS_NAME: PCWSTR = w!("MarknexiaRustWindow");
 const TAB_CLASS_NAME: PCWSTR = w!("MarknexiaRustTabStrip");
@@ -231,14 +234,32 @@ struct CreatePayload {
 }
 
 pub fn run() -> Result<(), WindowError> {
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // update: `--post-update-health <nonce>` starts a new version for its
+    // health check: no documents, no single-instance hand-off (the old
+    // version is still running), and an acknowledgement once ready.
+    let health = marknexia_update::activation::health_nonce_from_arguments(&arguments);
+    // update: a normal start first resolves an interrupted update, then
+    // runs a newer active portable version instead of this one.
+    if health.is_none() && update_native::forward_to_active_version(&arguments) {
+        return Ok(());
+    }
     // Single instance (.NET `OnLaunched`): a later launch hands its command
     // line to the running instance and exits.
-    let primary = match input::claim_instance() {
-        crate::single_instance::native::Claim::HandedOff => return Ok(()),
-        crate::single_instance::native::Claim::Primary(primary) => Some(primary),
-        crate::single_instance::native::Claim::Standalone => None,
+    let primary = if health.is_some() {
+        None
+    } else {
+        match input::claim_instance() {
+            crate::single_instance::native::Claim::HandedOff => return Ok(()),
+            crate::single_instance::native::Claim::Primary(primary) => Some(primary),
+            crate::single_instance::native::Claim::Standalone => None,
+        }
     };
-    let paths = documents::startup_paths(std::env::args_os().skip(1));
+    let paths = if health.is_some() {
+        Vec::new()
+    } else {
+        documents::startup_paths(arguments)
+    };
     enable_dpi().map_err(WindowError::Dpi)?;
     let module = unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(WindowError::Module)?;
     let instance = HINSTANCE(module.0);
@@ -286,7 +307,7 @@ pub fn run() -> Result<(), WindowError> {
     }
     .map_err(WindowError::Create)?;
     size_for_dpi(hwnd);
-    if let Err(error) = initialize(hwnd, instance, paths) {
+    if let Err(error) = initialize(hwnd, instance, paths, health) {
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(error);
     }
@@ -427,7 +448,12 @@ fn create_child(
     .map_err(WindowError::Child)
 }
 
-fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<(), WindowError> {
+fn initialize(
+    hwnd: HWND,
+    instance: HINSTANCE,
+    paths: Vec<PathBuf>,
+    health: Option<String>,
+) -> Result<(), WindowError> {
     let controls = ShellControls {
         command: create_child(
             hwnd,
@@ -465,7 +491,7 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         let mut state = state.borrow_mut();
         state.controls = Some(controls);
         state.dpi = dpi;
-        state.readiness = Some(Readiness::create());
+        state.readiness = Some(Readiness::create(health));
         Rc::clone(&state.portable)
     };
     // chrome: controls, menu and saved settings, before startup renders.
@@ -539,6 +565,11 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
+    }
+    // update: the health check's "shell visible" probe.
+    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if let Some(readiness) = state.borrow_mut().readiness.as_mut() {
+        readiness.shell_shown(visible);
     }
     match StaApartment::enter() {
         Ok(apartment) => {
@@ -1722,10 +1753,14 @@ struct Readiness {
     webview_signaled: bool,
     render_signaled: bool,
     failure_signaled: bool,
+    /// update: the nonce of a `--post-update-health` start, until the
+    /// acknowledgement is written.
+    health: Option<String>,
+    shell_visible: bool,
 }
 
 impl Readiness {
-    fn create() -> Self {
+    fn create(health: Option<String>) -> Self {
         let pid = std::process::id();
         Self {
             webview_ready: named_event(&format!(r"Local\Marknexia.WebViewReady.{pid}")),
@@ -1734,11 +1769,19 @@ impl Readiness {
             webview_signaled: false,
             render_signaled: false,
             failure_signaled: false,
+            health,
+            shell_visible: false,
         }
+    }
+
+    fn shell_shown(&mut self, visible: bool) {
+        self.shell_visible = visible;
+        self.acknowledge_health();
     }
 
     fn controller_ready(&mut self) {
         signal_once(&mut self.webview_ready, &mut self.webview_signaled);
+        self.acknowledge_health();
     }
 
     /// Exactly one of these is ever raised: `StartupTracker` decides once.
@@ -1750,6 +1793,33 @@ impl Readiness {
             StartupSignal::StartupFailed => {
                 signal_once(&mut self.startup_failed, &mut self.failure_signaled);
             }
+        }
+        self.acknowledge_health();
+    }
+
+    /// update: in health mode, once the shell is visible, WebView2 is ready
+    /// and the offline welcome document rendered, or once startup failed,
+    /// writes the nonce-bound acknowledgement (a failed one lets the old
+    /// version roll back at once instead of waiting for the deadline).
+    fn acknowledge_health(&mut self) {
+        let probes = marknexia_update::activation::Probes {
+            shell_visible: self.shell_visible,
+            web_view_ready: self.webview_signaled,
+            offline_render: self.render_signaled,
+        };
+        if !(probes.all_passed() || self.failure_signaled) {
+            return;
+        }
+        let Some(nonce) = self.health.take() else {
+            return;
+        };
+        if let Ok(executable) = std::env::current_exe() {
+            let _ = marknexia_update::activation::write_health_ack(
+                &executable,
+                &nonce,
+                std::process::id(),
+                probes,
+            );
         }
     }
 }

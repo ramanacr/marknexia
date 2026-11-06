@@ -591,6 +591,7 @@ use windows::Win32::{
 
 const MENU_TROUBLESHOOTING: usize = 2133;
 const MENU_SBOM: usize = 2134;
+const MENU_CHECK_UPDATES: usize = 2135;
 const TTM_GETTOOLCOUNT: u32 = 0x040D;
 
 impl Launched {
@@ -1034,7 +1035,7 @@ fn the_compact_layout_collapses_labels_and_closes_the_pane() {
 
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
-fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
+fn the_help_menu_lists_troubleshooting_sbom_and_updates() {
     let shell = launch(&[], None);
     let help = shell.until("the Help menu", || {
         shell.find(
@@ -1084,6 +1085,7 @@ fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
         // The .NET automation name; the text has no "&&" to leak.
         "Troubleshooting and diagnostics",
         "Software components (SBOM)",
+        "Check for updates",
         "About Marknexia",
     ] {
         assert!(
@@ -1091,10 +1093,17 @@ fn the_help_menu_lists_troubleshooting_and_sbom_without_updates() {
             "{wanted} in {items:?}"
         );
     }
-    // The updater waits for owner gate G2.
-    assert!(
-        !items.iter().any(|item| item.contains("update")),
-        "{items:?}"
+}
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
+fn check_for_updates_reports_an_unconfigured_build() {
+    // Default builds have no update channel: nothing is contacted.
+    let shell = launch(&[], None);
+    shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar");
+    shell.post_command(MENU_CHECK_UPDATES);
+    shell.wait_diagnostic(
+        "Warning: Update check unavailable: Updates are not configured for this build.",
     );
 }
 

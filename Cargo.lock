@@ -388,6 +388,7 @@ dependencies = [
  "marknexia-navigation",
  "marknexia-rendering",
  "marknexia-security",
+ "marknexia-update",
  "marknexia-webview",
  "serde_json",
  "windows",

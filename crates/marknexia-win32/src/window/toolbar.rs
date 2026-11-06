@@ -23,8 +23,8 @@ use windows::{
             WindowsAndMessaging::{
                 AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreateMenu, CreatePopupMenu,
                 CreateWindowExW, DI_NORMAL, DestroyIcon, DrawIconEx, HICON, HMENU, LR_DEFAULTCOLOR,
-                MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenu, WINDOW_STYLE, WS_CHILD, WS_EX_TOPMOST,
-                WS_POPUP, WS_VISIBLE,
+                MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenu, WINDOW_STYLE, WS_CHILD,
+                WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -36,9 +36,9 @@ use super::{
     chrome::{
         ChromeControls, ID_BACK, ID_BRAND_NAME, ID_BRAND_TAGLINE, ID_FIND, ID_FORWARD,
         ID_OPEN_FOLDER, ID_RELOAD, ID_THEME, ID_THEME_LABEL, ID_TOGGLE_SIDEBAR, MENU_ABOUT,
-        MENU_CLOSE_TAB, MENU_FIND, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER, MENU_RELOAD,
-        MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TOGGLE_SIDEBAR, MENU_TROUBLESHOOTING, dip, send,
-        set_bounds, show, wide,
+        MENU_CHECK_UPDATES, MENU_CLOSE_TAB, MENU_FIND, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER,
+        MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TOGGLE_SIDEBAR, MENU_TROUBLESHOOTING, dip,
+        send, set_bounds, show, wide,
     },
     create_child, fill, native_color,
 };
@@ -287,8 +287,9 @@ pub(super) fn create_tooltips(
 }
 
 /// The .NET menu bar: File, View, Settings and Help. "Check for updates"
-/// waits for the updater (owner gate G2).
-pub(super) fn create_menu(parent: HWND) -> Option<HMENU> {
+/// is grayed when `updates_enabled` is false (an MSIX/Store installation:
+/// the package manager updates it).
+pub(super) fn create_menu(parent: HWND, updates_enabled: bool) -> Option<HMENU> {
     // SAFETY: menus are created and attached on the UI thread; a menu
     // attached with SetMenu is destroyed with its window.
     unsafe {
@@ -332,6 +333,16 @@ pub(super) fn create_menu(parent: HWND) -> Option<HMENU> {
             MF_STRING,
             MENU_SBOM,
             w!("Software &components (SBOM)"),
+        );
+        let _ = AppendMenuW(
+            help,
+            if updates_enabled {
+                MF_STRING
+            } else {
+                MF_STRING | MF_GRAYED
+            },
+            MENU_CHECK_UPDATES,
+            w!("Check for &updates"),
         );
         let _ = AppendMenuW(help, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(help, MF_STRING, MENU_ABOUT, w!("&About Marknexia"));

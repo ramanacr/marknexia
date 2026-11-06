@@ -197,6 +197,8 @@ pub enum ChromeCommand {
     ShowTroubleshooting,
     /// Help > Software components (SBOM) (.NET `ShowSbom_Click`).
     ShowSbom,
+    /// Help > Check for updates (.NET `CheckForUpdates_Click`).
+    CheckForUpdates,
 }
 
 const VK_LEFT: u16 = 0x25;

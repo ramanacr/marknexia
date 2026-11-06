@@ -70,6 +70,43 @@ pub(super) fn show_about(owner: HWND) {
     message(owner, ABOUT_TITLE, &about_text(env!("CARGO_PKG_VERSION")));
 }
 
+/// .NET `CheckForUpdates_Click` "up to date" dialog.
+pub(super) fn show_up_to_date(owner: HWND, text: &str) {
+    message(owner, marknexia_update::check::UP_TO_DATE_TITLE, text);
+}
+
+/// .NET `CheckForUpdates_Click` "update available" dialog for an
+/// installable portable update: "Download and restart" and "Later" (the
+/// manifest has no release page, so there is no "Open release page").
+/// `Some(true)` when the user chose to install; `None` if the dialog could
+/// not be shown.
+pub(super) fn show_update_available(owner: HWND, text: &str) -> Option<bool> {
+    use marknexia_update::check::{AVAILABLE_TITLE, DOWNLOAD_AND_RESTART, LATER};
+    let mut template = Template::new(AVAILABLE_TITLE, 260, 84);
+    template.item(STATIC, 7, 7, 246, 40, 0xFFFF, CLASS_STATIC, text);
+    template.item(
+        BUTTON,
+        86,
+        52,
+        92,
+        BUTTON_HEIGHT,
+        ID_PRIMARY,
+        CLASS_BUTTON,
+        DOWNLOAD_AND_RESTART,
+    );
+    template.item(
+        DEFAULT_BUTTON,
+        183,
+        52,
+        70,
+        BUTTON_HEIGHT,
+        ID_CLOSE,
+        CLASS_BUTTON,
+        LATER,
+    );
+    template.run(owner, None).map(|result| result == 1)
+}
+
 /// A system message box: native keyboard, UIA and high-contrast support.
 fn message(owner: HWND, title: &str, text: &str) {
     // SAFETY: the HSTRINGs outlive the modal call; `owner` is the live shell
