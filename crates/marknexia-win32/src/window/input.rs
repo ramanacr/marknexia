@@ -33,6 +33,7 @@ use crate::{
         native::{self as find_native, ButtonColors, FindControls, Glyph},
         route_find_key,
     },
+    layout::Dip,
     single_instance::{
         self, KEY_VARIABLE,
         native::{ActivationQueue, ActivationServer, Claim, PrimaryInstance, ShellStartupProbe},
@@ -45,6 +46,8 @@ const WM_ACTIVATION_REQUEST: u32 = WM_APP + 0x100;
 const WM_CLOSE_TAB_REQUEST: u32 = WM_APP + 0x101;
 /// Posted by a drop classification thread: drop actions are queued.
 const WM_DROPS_CLASSIFIED: u32 = WM_APP + 0x102;
+/// Posted by an activation resolution thread: resolved paths are queued.
+const WM_ACTIVATION_RESOLVED: u32 = WM_APP + 0x103;
 /// The find box's control ID (`initialize` creates it).
 const FIND_EDIT_ID: usize = 1004;
 const WM_DROPFILES: u32 = 0x0233;
@@ -84,6 +87,15 @@ pub(super) struct InputState {
     /// weak reference, like `uia_selection`).
     close_request: Option<Rc<CloseTab>>,
     tab_press: Option<TabPress>,
+    /// A per-process random value that every message this module posts
+    /// carries in `lparam`. Messages without it are ignored, so another
+    /// process cannot close tabs by posting `WM_CLOSE_TAB_REQUEST`.
+    message_token: isize,
+    /// Activation paths resolved off the UI thread.
+    resolved: Arc<std::sync::Mutex<VecDeque<String>>>,
+    /// UIA close requests that arrived while an outer call held the WebView
+    /// session; they run once it is checked back in.
+    deferred_closes: Vec<TabId>,
 }
 
 impl InputState {
@@ -138,6 +150,7 @@ pub(super) fn initialize(
     find_edit: HWND,
 ) -> Result<Rc<CloseTab>, WindowError> {
     let controls = FindControls::create(hwnd, instance, find_edit).map_err(WindowError::Child)?;
+    let token = message_token().ok_or(WindowError::State)?;
     // SAFETY: this thread's own top-level window.
     unsafe { DragAcceptFiles(hwnd, true) };
     let window = hwnd.0 as isize;
@@ -148,15 +161,45 @@ pub(super) fn initialize(
                 Some(HWND(window as *mut c_void)),
                 WM_CLOSE_TAB_REQUEST,
                 WPARAM(tab.get() as usize),
-                LPARAM(0),
+                LPARAM(token),
             )
         }
         .is_ok()
     });
     let mut state = state.borrow_mut();
+    state.input.message_token = token;
     state.input.find_controls = Some(controls);
     state.input.close_request = Some(Rc::clone(&close));
     Ok(close)
+}
+
+/// A non-zero random `lparam` token for this process's own messages.
+fn message_token() -> Option<isize> {
+    for _ in 0..4 {
+        let mut bytes = [0_u8; std::mem::size_of::<isize>()];
+        // SAFETY: the buffer is a live local; no algorithm handle is needed.
+        unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+            .ok()
+            .ok()?;
+        let token = isize::from_ne_bytes(bytes);
+        if token != 0 {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn post_to_window(window: isize, message: u32, token: isize) {
+    // SAFETY: posts to the shell window; no pointers. After the window is
+    // destroyed the post just fails.
+    let _ = unsafe {
+        PostMessageW(
+            Some(HWND(window as *mut c_void)),
+            message,
+            WPARAM(0),
+            LPARAM(token),
+        )
+    };
 }
 
 /// The application page observer: it only queues. It runs inside
@@ -189,10 +232,24 @@ pub(super) fn serve_activations(hwnd: HWND, primary: Option<PrimaryInstance>) {
     let (Some(primary), Some(state)) = (primary, handle(hwnd)) else {
         return;
     };
-    let queue = state.borrow().input.activations.clone();
-    let server = primary.serve(hwnd, WM_ACTIVATION_REQUEST, queue);
+    let (queue, token) = {
+        let state = state.borrow();
+        (state.input.activations.clone(), state.input.message_token)
+    };
+    let server = primary.serve(hwnd, WM_ACTIVATION_REQUEST, token, queue);
+    let unavailable = server.is_none();
     state.borrow_mut().input.activation_server = server;
+    if unavailable {
+        // The pipe name is held by another process (or the server could not
+        // start). The mutex is released, so later launches open their own
+        // windows instead of handing off to that name.
+        show_notice(&state, SINGLE_INSTANCE_UNAVAILABLE);
+    }
 }
+
+/// Shown when this window cannot serve later launches.
+const SINGLE_INSTANCE_UNAVAILABLE: &str =
+    "Files opened from other launches cannot reach this window; they open in their own windows.";
 
 /// `close_state` hook: stops the activation server first, so a new launch
 /// becomes the first instance instead of handing off to this one.
@@ -215,23 +272,63 @@ pub(super) fn repository_root(state: &Rc<RefCell<AppState>>) -> Option<PathBuf> 
 pub(super) fn handles(message: u32) -> bool {
     matches!(
         message,
-        WM_ACTIVATION_REQUEST | WM_CLOSE_TAB_REQUEST | WM_DROPS_CLASSIFIED | WM_DROPFILES
+        WM_ACTIVATION_REQUEST
+            | WM_CLOSE_TAB_REQUEST
+            | WM_DROPS_CLASSIFIED
+            | WM_ACTIVATION_RESOLVED
+            | WM_DROPFILES
     )
 }
 
-pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM) -> LRESULT {
+/// Any process at the same or a higher integrity level can post messages to
+/// this window (UIPI blocks lower levels). The private messages therefore
+/// carry the per-process token and only make the shell drain its own
+/// queues; `WM_DROPFILES` is validated in `dragdrop::native`.
+pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if message == WM_DROPFILES {
+        on_drop_files(hwnd, HDROP(wparam.0 as *mut c_void));
+        return LRESULT(0);
+    }
+    let Some(state) = handle(hwnd) else {
+        return LRESULT(0);
+    };
+    let token = state.borrow().input.message_token;
+    if token == 0 || lparam.0 != token {
+        return LRESULT(0);
+    }
     match message {
         WM_ACTIVATION_REQUEST => on_activation(hwnd),
+        WM_ACTIVATION_RESOLVED => on_activation_resolved(hwnd),
         WM_CLOSE_TAB_REQUEST => {
-            if let Some(tab) = handle(hwnd).and_then(|state| tab_by_raw(&state, wparam.0 as u64)) {
-                let _ = close_tab(hwnd, tab);
+            if let Some(tab) = tab_by_raw(&state, wparam.0 as u64) {
+                if state.borrow().webview_checked_out {
+                    // Retried by `after_poll` once the session is back.
+                    state.borrow_mut().input.deferred_closes.push(tab);
+                } else {
+                    let _ = close_tab(hwnd, tab);
+                }
             }
         }
         WM_DROPS_CLASSIFIED => on_drops_classified(hwnd),
-        WM_DROPFILES => on_drop_files(hwnd, HDROP(wparam.0 as *mut c_void)),
         _ => {}
     }
     LRESULT(0)
+}
+
+/// Runs UIA close requests deferred while the session was checked out.
+fn run_deferred_closes(hwnd: HWND) {
+    let Some(state) = handle(hwnd) else {
+        return;
+    };
+    if state.borrow().webview_checked_out {
+        return;
+    }
+    let closes = std::mem::take(&mut state.borrow_mut().input.deferred_closes);
+    for tab in closes {
+        if tab_by_raw(&state, tab.get()).is_some() {
+            let _ = close_tab(hwnd, tab);
+        }
+    }
 }
 
 /// `WM_COMMAND` from the find box (`EN_CHANGE`) and the find buttons
@@ -366,8 +463,10 @@ fn close_search(hwnd: HWND) {
             document_epoch,
         });
     }
-    if had_focus && let Some(c) = state.borrow().controls {
-        // A hidden control keeps no focus; the tab strip takes it.
+    let shell_controls = state.borrow().controls;
+    if had_focus && let Some(c) = shell_controls {
+        // A hidden control keeps no focus; the tab strip takes it. No
+        // `AppState` borrow is held across SetFocus.
         let _ = unsafe { SetFocus(Some(c.tabs)) };
     }
 }
@@ -470,6 +569,7 @@ pub(super) fn document_replaced(state: &Rc<RefCell<AppState>>, tab: u64) {
 /// messages and marks loaded documents ready (.NET `NavigationCompleted`,
 /// which re-runs the active tab's search when the bar is visible).
 pub(super) fn after_poll(hwnd: HWND) {
+    run_deferred_closes(hwnd);
     let Some((state, controls)) = find_context(hwnd) else {
         return;
     };
@@ -667,7 +767,29 @@ fn reorder_tab(state: &Rc<RefCell<AppState>>, tab: TabId, destination: usize) ->
     moved
 }
 
-/// The strip's client size and its parent's state.
+/// The strip's client size, the smallest close button, and its parent's
+/// state.
+struct Strip {
+    parent: HWND,
+    state: Rc<RefCell<AppState>>,
+    width: i32,
+    height: i32,
+    minimum: i32,
+}
+
+fn strip(strip: HWND) -> Option<Strip> {
+    let (parent, state, width, height) = strip_context(strip)?;
+    // SAFETY: plain query on this thread's window.
+    let dpi = unsafe { GetDpiForWindow(strip) }.max(96);
+    Some(Strip {
+        parent,
+        state,
+        width,
+        height,
+        minimum: Dip::INTERACTION_TARGET.to_pixels(dpi) as i32,
+    })
+}
+
 fn strip_context(strip: HWND) -> Option<(HWND, Rc<RefCell<AppState>>, i32, i32)> {
     // SAFETY: `strip` is this thread's tab strip.
     let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
@@ -690,12 +812,20 @@ fn tab_ids(state: &Rc<RefCell<AppState>>) -> Vec<TabId> {
 
 /// `WM_LBUTTONDOWN` on the tab strip: a body press selects (as before) and
 /// may start a drag; a close-button press closes on release.
-pub(super) fn on_tab_button_down(strip: HWND, x: i32) {
-    let Some((parent, state, width, height)) = strip_context(strip) else {
+pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
+    let Some(Strip {
+        parent,
+        state,
+        width,
+        height,
+        minimum,
+    }) = strip(strip_window)
+    else {
         return;
     };
+    let strip = strip_window;
     let tabs = tab_ids(&state);
-    let Some(hit) = hit_test_tab(width, height, tabs.len(), x) else {
+    let Some(hit) = hit_test_tab(width, height, minimum, tabs.len(), x) else {
         return;
     };
     let press = match hit {
@@ -761,8 +891,15 @@ pub(super) fn on_tab_mouse_move(strip: HWND, x: i32) {
 
 /// `WM_LBUTTONUP`: ends a drag, or closes the tab when the press started
 /// and ended on the same close button.
-pub(super) fn on_tab_button_up(strip: HWND, x: i32) {
-    let Some((parent, state, width, height)) = strip_context(strip) else {
+pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
+    let Some(Strip {
+        parent,
+        state,
+        width,
+        height,
+        minimum,
+    }) = strip(strip_window)
+    else {
         return;
     };
     let press = state.borrow_mut().input.tab_press.take();
@@ -773,7 +910,7 @@ pub(super) fn on_tab_button_up(strip: HWND, x: i32) {
         return;
     };
     let tabs = tab_ids(&state);
-    if let Some(TabHit::Close(index)) = hit_test_tab(width, height, tabs.len(), x)
+    if let Some(TabHit::Close(index)) = hit_test_tab(width, height, minimum, tabs.len(), x)
         && tabs[index] == press.tab
     {
         let _ = close_tab(parent, press.tab);
@@ -782,13 +919,20 @@ pub(super) fn on_tab_button_up(strip: HWND, x: i32) {
 
 /// `WM_MBUTTONUP`: a middle click anywhere on a tab closes it, like a
 /// closable WinUI `TabViewItem`.
-pub(super) fn on_tab_middle_click(strip: HWND, x: i32) {
-    let Some((parent, state, width, height)) = strip_context(strip) else {
+pub(super) fn on_tab_middle_click(strip_window: HWND, x: i32) {
+    let Some(Strip {
+        parent,
+        state,
+        width,
+        height,
+        minimum,
+    }) = strip(strip_window)
+    else {
         return;
     };
     let tabs = tab_ids(&state);
     if let Some(TabHit::Body(index) | TabHit::Close(index)) =
-        hit_test_tab(width, height, tabs.len(), x)
+        hit_test_tab(width, height, minimum, tabs.len(), x)
     {
         let portable = Rc::clone(&state.borrow().portable);
         portable.borrow_mut().note_pointer_input();
@@ -803,12 +947,29 @@ pub(super) fn on_tab_capture_lost(strip: HWND) {
     }
 }
 
+/// The tab title color. The active tab uses the accent, except in high
+/// contrast, where the accent is `Highlight` but the fill is `ButtonFace`:
+/// there the title stays `ButtonText` on `ButtonFace`, a system pair that
+/// always contrasts.
+pub(super) fn tab_text_color(
+    theme: EffectiveTheme,
+    colors: crate::theme::Palette,
+    active: bool,
+) -> ColorSpec {
+    if active && theme != EffectiveTheme::HighContrast {
+        colors.accent
+    } else {
+        colors.text
+    }
+}
+
 /// Paints a tab's title, clipped before its close button, and the close
 /// glyph. Text starts where it did before close buttons existed.
 pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: COLORREF, dpi: u32) {
     use windows::Win32::Graphics::Gdi::{DT_END_ELLIPSIS, DT_NOPREFIX};
     let scale = |dip: u32| (dip.saturating_mul(dpi) / 96) as i32;
-    let close = close_button_slot(rect.left, rect.right, rect.bottom - rect.top);
+    let minimum = Dip::INTERACTION_TARGET.to_pixels(dpi) as i32;
+    let close = close_button_slot(rect.left, rect.right, rect.bottom - rect.top, minimum);
     let mut text_rect = RECT {
         left: rect.left.saturating_add(scale(12)),
         top: rect.top.saturating_add(scale(12)),
@@ -909,22 +1070,14 @@ fn on_drop_files(hwnd: HWND, drop: HDROP) {
         return;
     }
     let window = hwnd.0 as isize;
+    let token = state.borrow().input.message_token;
     let worker_queue = queue.clone();
     let spawned = std::thread::Builder::new()
         .name("marknexia-drop".to_owned())
         .spawn(move || {
             let action = std::panic::catch_unwind(|| dragdrop::classify(&path)).ok();
             worker_queue.complete(action);
-            // SAFETY: posts to the shell window; after it is destroyed the
-            // post just fails.
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(window as *mut c_void)),
-                    WM_DROPS_CLASSIFIED,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
+            post_to_window(window, WM_DROPS_CLASSIFIED, token);
         });
     if spawned.is_err() {
         queue.complete(None);
@@ -955,6 +1108,9 @@ fn on_drops_classified(hwnd: HWND) {
 // Single instance (.NET App.MainInstance_Activated)
 // ---------------------------------------------------------------------------
 
+/// .NET `MainInstance_Activated`: bring the window to front now, then
+/// resolve the files off the UI thread (resolution touches the file
+/// system, after the path gate) and open them when the result is posted.
 fn on_activation(hwnd: HWND) {
     let Some(state) = handle(hwnd) else {
         return;
@@ -966,16 +1122,59 @@ fn on_activation(hwnd: HWND) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         queue.drain(..).collect()
     };
+    if activations.is_empty() {
+        return;
+    }
+    single_instance::native::bring_to_front(hwnd);
     let own: Vec<String> = std::env::args_os()
         .skip(1)
+        .take(single_instance::MAX_CANDIDATES)
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
-    for activation in activations {
-        single_instance::native::bring_to_front(hwnd);
-        let resolved = single_instance::resolve_activation(&activation, &own, &ShellStartupProbe);
-        let Some(path) = resolved else {
-            continue;
-        };
+    let (resolved, token) = {
+        let state = state.borrow();
+        (Arc::clone(&state.input.resolved), state.input.message_token)
+    };
+    let window = hwnd.0 as isize;
+    let _ = std::thread::Builder::new()
+        .name("marknexia-activation-resolve".to_owned())
+        .spawn(move || {
+            let paths: Vec<String> = activations
+                .iter()
+                .filter_map(|activation| {
+                    std::panic::catch_unwind(|| {
+                        single_instance::resolve_activation(activation, &own, &ShellStartupProbe)
+                    })
+                    .ok()
+                    .flatten()
+                })
+                .collect();
+            if paths.is_empty() {
+                return;
+            }
+            resolved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(paths);
+            post_to_window(window, WM_ACTIVATION_RESOLVED, token);
+        });
+}
+
+/// Opens activation paths resolved by the worker (`OpenDocumentInTabAsync`,
+/// which selects an already open document).
+fn on_activation_resolved(hwnd: HWND) {
+    let Some(state) = handle(hwnd) else {
+        return;
+    };
+    let paths: Vec<String> = {
+        let resolved = Arc::clone(&state.borrow().input.resolved);
+        let mut resolved = resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        resolved.drain(..).collect()
+    };
+    for path in paths {
+        // Already gated in the probe; checked again before opening.
         match crate::documents::check_document_path(&path) {
             Ok(()) => open_document(hwnd, PathBuf::from(path)),
             Err(_) => show_notice(&state, dragdrop::REFUSED),

@@ -129,14 +129,16 @@ pub fn tab_slot(total_width: i32, count: usize, index: usize) -> Option<(i32, i3
 }
 
 /// The close button of a tab slot `left..right` in a strip `height` pixels
-/// high: a square of the strip height at the slot's right edge, at most half
-/// the slot width. Painting, hit testing and the UIA close-button bounds all
-/// use this, so they agree. `None` when the slot is too narrow.
+/// high: a square of the strip height at the slot's right edge. It must be at
+/// least `minimum` pixels (the 44-DIP target at the current DPI) and at most
+/// half the slot width; otherwise the tab has no close button (it is hidden,
+/// and offscreen in UIA). Painting, hit testing and the UIA close-button
+/// bounds all use this, so they agree.
 #[must_use]
-pub fn close_button_slot(left: i32, right: i32, height: i32) -> Option<(i32, i32)> {
+pub fn close_button_slot(left: i32, right: i32, height: i32, minimum: i32) -> Option<(i32, i32)> {
     let width = right.saturating_sub(left);
-    let size = height.max(0).min(width / 2);
-    (size > 0).then(|| (right - size, right))
+    let size = height.max(0);
+    (size > 0 && size >= minimum && size <= width / 2).then(|| (right - size, right))
 }
 
 /// Where a point in the tab strip falls.
@@ -163,12 +165,19 @@ pub fn tab_index_at(total_width: i32, count: usize, x: i32) -> Option<usize> {
     )
 }
 
-/// Hit-tests a point at `x` (strip coordinates) in a strip `height` high.
+/// Hit-tests a point at `x` (strip coordinates) in a strip `height` high;
+/// `minimum` is the smallest close button, as for [`close_button_slot`].
 #[must_use]
-pub fn hit_test_tab(total_width: i32, height: i32, count: usize, x: i32) -> Option<TabHit> {
+pub fn hit_test_tab(
+    total_width: i32,
+    height: i32,
+    minimum: i32,
+    count: usize,
+    x: i32,
+) -> Option<TabHit> {
     let index = tab_index_at(total_width, count, x)?;
     let (left, right) = tab_slot(total_width, count, index)?;
-    match close_button_slot(left, right, height) {
+    match close_button_slot(left, right, height, minimum) {
         Some((close_left, close_right)) if x >= close_left && x < close_right => {
             Some(TabHit::Close(index))
         }
@@ -208,13 +217,14 @@ pub mod native {
                 UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE,
                 UIA_HasKeyboardFocusPropertyId, UIA_InvokePatternId,
                 UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
-                UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId, UIA_PATTERN_ID,
-                UIA_PROPERTY_ID, UIA_SelectionItem_ElementSelectedEventId,
+                UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId, UIA_NamePropertyId,
+                UIA_PATTERN_ID, UIA_PROPERTY_ID, UIA_SelectionItem_ElementSelectedEventId,
                 UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_TabControlTypeId,
                 UIA_TabItemControlTypeId, UiaAppendRuntimeId, UiaClientsAreListening,
                 UiaHostProviderFromHwnd, UiaRaiseAutomationEvent, UiaRaiseStructureChangedEvent,
                 UiaRect, UiaReturnRawElementProvider, UiaRootObjectId,
             },
+            HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{GetFocus, SetFocus},
             WindowsAndMessaging::GetWindowRect,
         },
@@ -224,7 +234,11 @@ pub mod native {
     use windows_core::{BOOL, Error, HRESULT, IUnknown, Interface, Result, implement};
 
     use super::{close_button_slot, tab_slot};
-    use crate::{app::AppState, layout::PixelRect, tabs::TabId};
+    use crate::{
+        app::AppState,
+        layout::{Dip, PixelRect},
+        tabs::TabId,
+    };
 
     const S_OK: HRESULT = HRESULT(0);
     const E_POINTER: HRESULT = HRESULT(0x8000_4003_u32 as i32);
@@ -387,21 +401,25 @@ pub mod native {
             })
         }
 
-        /// The close button of tab `id`, in screen coordinates; empty when
-        /// the slot is too narrow for one.
+        /// The close button of tab `id`, in screen coordinates; empty (and
+        /// offscreen) when the slot is too narrow for a 44-DIP button.
         fn close_rect(&self, tabs: &[TabSnapshot], id: TabId) -> Result<UiaRect> {
             let tab = self.tab_rect(tabs, id)?;
             let left = tab.left as i32;
             let right = left + tab.width as i32;
-            Ok(match close_button_slot(left, right, tab.height as i32) {
-                Some((close_left, close_right)) => UiaRect {
-                    left: f64::from(close_left),
-                    top: tab.top,
-                    width: f64::from(close_right - close_left),
-                    height: tab.height,
+            let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
+            let minimum = Dip::INTERACTION_TARGET.to_pixels(dpi) as i32;
+            Ok(
+                match close_button_slot(left, right, tab.height as i32, minimum) {
+                    Some((close_left, close_right)) => UiaRect {
+                        left: f64::from(close_left),
+                        top: tab.top,
+                        width: f64::from(close_right - close_left),
+                        height: tab.height,
+                    },
+                    None => UiaRect::default(),
                 },
-                None => UiaRect::default(),
-            })
+            )
         }
 
         fn has_focus(&self) -> bool {
@@ -1162,7 +1180,7 @@ pub mod native {
             property: UIA_PROPERTY_ID,
             result: *mut VARIANT,
         ) -> HRESULT {
-            let value = self.live().map(|_| {
+            let value = self.live().map(|(state, tabs)| {
                 if property == UIA_NamePropertyId {
                     VARIANT::from(CLOSE_BUTTON_NAME)
                 } else if property == UIA_ControlTypePropertyId {
@@ -1171,6 +1189,12 @@ pub mod native {
                     || property == UIA_IsEnabledPropertyId
                 {
                     VARIANT::from(true)
+                } else if property == UIA_IsOffscreenPropertyId {
+                    // Hidden when its tab is too narrow for a 44-DIP button.
+                    let hidden = state
+                        .close_rect(&tabs, self.id)
+                        .is_ok_and(|rect| rect.width <= 0.0);
+                    VARIANT::from(hidden)
                 } else if property == UIA_IsKeyboardFocusablePropertyId
                     || property == UIA_HasKeyboardFocusPropertyId
                 {

@@ -137,7 +137,32 @@ impl DropQueue {
 #[cfg(windows)]
 #[allow(unsafe_code)] // HDROP access stays here.
 pub mod native {
-    use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+    use windows::Win32::{
+        Foundation::HGLOBAL,
+        System::Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+        UI::Shell::{DROPFILES, DragFinish, DragQueryFileW, HDROP},
+    };
+
+    /// True when `drop` is a global memory block of this process with a
+    /// plausible `DROPFILES` header (the file list offset is inside it).
+    fn is_drop_block(drop: HDROP) -> bool {
+        let block = HGLOBAL(drop.0);
+        // SAFETY: GlobalSize and GlobalLock validate the handle and fail
+        // for a value that is not a global memory handle of this process.
+        unsafe {
+            let size = GlobalSize(block);
+            if size < std::mem::size_of::<DROPFILES>() || size > 64 * 1024 * 1024 {
+                return false;
+            }
+            let header = GlobalLock(block).cast::<DROPFILES>();
+            if header.is_null() {
+                return false;
+            }
+            let offset = (*header).pFiles as usize;
+            let _ = GlobalUnlock(block);
+            offset >= std::mem::size_of::<DROPFILES>() && offset < size
+        }
+    }
 
     /// The first dropped path, at most 32,767 UTF-16 units, and releases the
     /// drop handle.
@@ -148,6 +173,14 @@ pub mod native {
     /// released here and must not be used afterwards.
     pub unsafe fn take_first_path(drop: HDROP) -> Option<String> {
         const MAX_UNITS: u32 = 32_767;
+        // Any process at the same or a higher integrity level can post
+        // WM_DROPFILES with an arbitrary handle. Use it only when it is a
+        // global memory block of this process that holds a DROPFILES header
+        // whose file list starts inside the block; otherwise ignore it and
+        // never release it.
+        if !is_drop_block(drop) {
+            return None;
+        }
         // SAFETY: per the contract, `drop` is live until DragFinish below.
         let path = unsafe {
             let count = DragQueryFileW(drop, u32::MAX, None);

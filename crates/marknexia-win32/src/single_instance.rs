@@ -26,7 +26,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use marknexia_core::startup::{StartupFileProbe, find_first_existing};
+use marknexia_core::startup::{StartupFileProbe, find_first_existing, split_command_line};
+
+use crate::documents::check_document_path;
 
 /// The .NET `AppInstance` key.
 pub const DEFAULT_KEY: &str = "Marknexia.SingleInstance";
@@ -226,21 +228,76 @@ impl<P: StartupFileProbe + ?Sized> StartupFileProbe for RelativeProbe<'_, P> {
     }
 }
 
+/// Applies the document path gate ([`check_document_path`]) to every path
+/// before the inner probe touches the file system with it: the absolute path
+/// (made lexically) before `is_file` and before short-name expansion, and
+/// the expanded path again.
+pub struct GatedProbe<'a, P: ?Sized> {
+    inner: &'a P,
+}
+
+impl<'a, P: StartupFileProbe + ?Sized> GatedProbe<'a, P> {
+    pub fn new(inner: &'a P) -> Self {
+        Self { inner }
+    }
+}
+
+fn gated(path: &str) -> bool {
+    check_document_path(path).is_ok()
+}
+
+impl<P: StartupFileProbe + ?Sized> StartupFileProbe for GatedProbe<'_, P> {
+    fn full_path(&self, path: &str) -> Option<String> {
+        // `full_path` is lexical (GetFullPathNameW); the result is gated.
+        self.inner.full_path(path).filter(|full| gated(full))
+    }
+
+    fn is_file(&self, full_path: &str) -> bool {
+        gated(full_path) && self.inner.is_file(full_path)
+    }
+
+    fn expand_short_names(&self, full_path: &str) -> Option<String> {
+        if !gated(full_path) {
+            return None;
+        }
+        self.inner
+            .expand_short_names(full_path)
+            .filter(|long| gated(long))
+    }
+}
+
+/// Arguments considered per source (the sender's split command line, or the
+/// running instance's own arguments). A sender with more is ignored.
+pub const MAX_CANDIDATES: usize = 64;
+
 /// .NET `ResolveFilePathFromActivation`: the sender's arguments first, then
 /// the running instance's own startup arguments (`Environment
 /// .GetCommandLineArgs().Skip(1)`, a .NET behavior kept as is). Sender
 /// candidates resolve relative to the sender's working directory; the
-/// instance's own candidates relative to its own.
+/// instance's own candidates relative to its own. Every path passes the
+/// document path gate before any file-system access ([`GatedProbe`]). It
+/// touches the file system, so the shell runs it on a worker thread.
 pub fn resolve_activation<P: StartupFileProbe + ?Sized>(
     activation: &Activation,
     own_arguments: &[String],
     probe: &P,
 ) -> Option<String> {
-    let sender = RelativeProbe::new(&activation.working_directory, probe);
-    find_first_existing([Some(activation.arguments.as_str())], &sender).or_else(|| {
+    let sender = if split_command_line(&activation.arguments).len() > MAX_CANDIDATES {
+        None
+    } else {
+        let relative = RelativeProbe::new(&activation.working_directory, probe);
         find_first_existing(
-            own_arguments.iter().map(|argument| Some(argument.as_str())),
-            probe,
+            [Some(activation.arguments.as_str())],
+            &GatedProbe::new(&relative),
+        )
+    };
+    sender.or_else(|| {
+        find_first_existing(
+            own_arguments
+                .iter()
+                .take(MAX_CANDIDATES)
+                .map(|argument| Some(argument.as_str())),
+            &GatedProbe::new(probe),
         )
     })
 }
@@ -289,8 +346,9 @@ pub mod native {
                     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
                     SDDL_REVISION_1,
                 },
-                EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-                TOKEN_QUERY, TOKEN_USER, TokenUser,
+                EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+                PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_MANDATORY_LABEL,
+                TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenIsAppContainer, TokenUser,
             },
             Storage::FileSystem::{
                 CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -351,44 +409,89 @@ pub mod native {
     // SAFETY: kernel handles may be used and closed from any thread.
     unsafe impl Send for Owned {}
 
-    /// The user SID of a process token, as an owned byte copy.
-    fn token_user(process: HANDLE) -> Option<Vec<u8>> {
-        let mut token = HANDLE::default();
-        // SAFETY: `process` is a live process handle; `token` receives an
-        // owned handle that `Owned` closes.
-        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
-        let token = Owned(token);
+    /// One token information class, in u64-aligned storage, with the
+    /// byte length the call reported.
+    fn token_information(
+        token: HANDLE,
+        class: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
+    ) -> Option<(Vec<u64>, usize)> {
         let mut needed = 0_u32;
         // SAFETY: the size query writes only `needed`.
-        let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut needed) };
+        let _ = unsafe { GetTokenInformation(token, class, None, 0, &mut needed) };
         if needed == 0 || needed > 4096 {
             return None;
         }
-        // u64 storage keeps TOKEN_USER aligned.
         let mut buffer = vec![0_u64; (needed as usize).div_ceil(8)];
-        // SAFETY: the buffer holds `needed` bytes and is aligned for
-        // TOKEN_USER; the SID it points to lives inside the same buffer.
+        // SAFETY: the buffer holds `needed` bytes and is 8-byte aligned.
         unsafe {
             GetTokenInformation(
-                token.0,
-                TokenUser,
+                token,
+                class,
                 Some(buffer.as_mut_ptr().cast()),
                 needed,
                 &mut needed,
             )
         }
         .ok()?;
-        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-        let sid = user.User.Sid;
-        let length = unsafe { windows::Win32::Security::GetLengthSid(sid) } as usize;
+        Some((buffer, needed as usize))
+    }
+
+    /// Copies a SID that points into `buffer` (`length` valid bytes).
+    fn copy_sid(buffer: &[u64], length: usize, sid: PSID) -> Option<Vec<u8>> {
+        // SAFETY: GetLengthSid reads the SID header inside the token buffer.
+        let size = unsafe { windows::Win32::Security::GetLengthSid(sid) } as usize;
         let start = sid.0 as usize;
         let base = buffer.as_ptr() as usize;
-        let end = base + needed as usize;
-        if start < base || start.checked_add(length)? > end {
+        if start < base || start.checked_add(size)? > base.checked_add(length)? {
             return None;
         }
         // SAFETY: bounds checked above against the token buffer.
-        Some(unsafe { std::slice::from_raw_parts(sid.0 as *const u8, length) }.to_vec())
+        Some(unsafe { std::slice::from_raw_parts(sid.0 as *const u8, size) }.to_vec())
+    }
+
+    /// What the hand-off trusts about a process: its user SID, its mandatory
+    /// integrity RID, and whether it is an AppContainer.
+    struct TokenFacts {
+        sid: Vec<u8>,
+        integrity: u32,
+        app_container: bool,
+    }
+
+    fn token_facts(process: HANDLE) -> Option<TokenFacts> {
+        let mut token = HANDLE::default();
+        // SAFETY: `process` is a live process handle; `token` receives an
+        // owned handle that `Owned` closes.
+        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+        let token = Owned(token);
+        let (user, length) = token_information(token.0, TokenUser)?;
+        // SAFETY: the buffer holds a TOKEN_USER written by the call above.
+        let sid = copy_sid(&user, length, unsafe {
+            (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid
+        })?;
+        let (label, length) = token_information(token.0, TokenIntegrityLevel)?;
+        // SAFETY: the buffer holds a TOKEN_MANDATORY_LABEL.
+        let label_sid = unsafe { (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid };
+        let label_copy = copy_sid(&label, length, label_sid)?;
+        let label_sid = PSID(label_copy.as_ptr() as *mut c_void);
+        // SAFETY: the copied label SID is valid; the sub-authority index is
+        // checked against its count.
+        let integrity = unsafe {
+            let count = *GetSidSubAuthorityCount(label_sid);
+            if count == 0 {
+                return None;
+            }
+            *GetSidSubAuthority(label_sid, u32::from(count) - 1)
+        };
+        let (container, length) = token_information(token.0, TokenIsAppContainer)?;
+        if length < 4 {
+            return None;
+        }
+        let app_container = (container[0] & 0xffff_ffff) != 0;
+        Some(TokenFacts {
+            sid,
+            integrity,
+            app_container,
+        })
     }
 
     fn sid_string(sid: &[u8]) -> Option<String> {
@@ -401,22 +504,30 @@ pub mod native {
         value
     }
 
-    /// This process's identity: user SID bytes and session.
+    /// This process's identity: user SID bytes, session and integrity.
     struct Identity {
         sid: Vec<u8>,
         session: u32,
+        integrity: u32,
     }
 
     impl Identity {
         fn current() -> Option<Self> {
             // SAFETY: the pseudo handle needs no closing.
-            let sid = token_user(unsafe { GetCurrentProcess() })?;
+            let facts = token_facts(unsafe { GetCurrentProcess() })?;
             let mut session = 0;
             unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }.ok()?;
-            Some(Self { sid, session })
+            Some(Self {
+                sid: facts.sid,
+                session,
+                integrity: facts.integrity,
+            })
         }
 
-        /// True when `process_id` runs as the same user in the same session.
+        /// True when `process_id` runs as the same user in the same session,
+        /// at an integrity level at least this process's, and not in an
+        /// AppContainer. A sandboxed or lower-integrity process of the same
+        /// user (which could pre-create the pipe name) is never trusted.
         fn matches(&self, process_id: u32) -> bool {
             let mut session = u32::MAX;
             // SAFETY: plain query; failure leaves `session` unmatched.
@@ -431,8 +542,15 @@ pub mod native {
                 return false;
             };
             let process = Owned(process);
-            token_user(process.0).is_some_and(|sid| {
-                sid.len() == self.sid.len()
+            token_facts(process.0).is_some_and(
+                |TokenFacts {
+                     sid,
+                     integrity,
+                     app_container,
+                 }| {
+                    !app_container
+                    && integrity >= self.integrity
+                    && sid.len() == self.sid.len()
                     // SAFETY: both buffers are valid SIDs of equal length.
                     && unsafe {
                         EqualSid(
@@ -441,7 +559,8 @@ pub mod native {
                         )
                     }
                     .is_ok()
-            })
+                },
+            )
         }
 
         fn names(&self, key: &str) -> Option<(String, String)> {
@@ -679,11 +798,14 @@ pub mod native {
     impl PrimaryInstance {
         /// Serves activations for `window`: each accepted one is queued and
         /// `message` is posted to the window. `None` when the pipe cannot be
-        /// created (another process holds the name): the shell still runs.
+        /// created (another process holds the name). The mutex is then
+        /// released with `self`, so later launches stop handing off to a
+        /// name this instance does not serve; the caller reports it.
         pub fn serve(
             self,
             window: HWND,
             message: u32,
+            token: isize,
             queue: ActivationQueue,
         ) -> Option<ActivationServer> {
             let stop = event()?;
@@ -734,7 +856,17 @@ pub mod native {
             let identity = self.identity;
             let thread = thread::Builder::new()
                 .name("marknexia-activation".to_owned())
-                .spawn(move || serve_loop(&pipe, &stop_handle, &identity, window, message, &queue))
+                .spawn(move || {
+                    serve_loop(
+                        &pipe,
+                        &stop_handle,
+                        &identity,
+                        window,
+                        message,
+                        token,
+                        &queue,
+                    );
+                })
                 .ok()?;
             Some(ActivationServer {
                 stop,
@@ -768,6 +900,7 @@ pub mod native {
         identity: &Identity,
         window: isize,
         message: u32,
+        token: isize,
         queue: &ActivationQueue,
     ) {
         let mut buffer = vec![0_u8; MAX_MESSAGE_BYTES + 1];
@@ -796,7 +929,7 @@ pub mod native {
                         Some(HWND(window as *mut c_void)),
                         message,
                         WPARAM(0),
-                        LPARAM(0),
+                        LPARAM(token),
                     )
                 };
             }
@@ -835,6 +968,12 @@ pub mod native {
         let Ok(activation) = Activation::decode(&buffer[..length.min(buffer.len())]) else {
             return false;
         };
+        // Shutting down: no acknowledgement, so the sender retries and
+        // becomes the first instance instead of losing its file.
+        // SAFETY: plain wait on an owned event.
+        if unsafe { WaitForSingleObject(stop.0, 0) } == WAIT_OBJECT_0 {
+            return false;
+        }
         {
             let mut pending = queue.lock().unwrap_or_else(PoisonError::into_inner);
             if pending.len() >= MAX_PENDING {
@@ -866,8 +1005,12 @@ pub mod native {
         }
     }
 
-    /// [`StdStartupProbe`] plus the Win32 8.3 short-name expansion that .NET
-    /// `Path.GetFullPath` performs (SET-8c).
+    /// [`StdStartupProbe`]'s lexical `full_path`, an `is_file` that opens
+    /// with identification-only QoS (so a path that reaches a pipe can never
+    /// be used to impersonate this process), and the Win32 8.3 short-name
+    /// expansion that .NET `Path.GetFullPath` performs (SET-8c). Use it
+    /// through `GatedProbe` (as `resolve_activation` does), off the UI thread.
+    #[derive(Clone, Copy, Debug, Default)]
     pub struct ShellStartupProbe;
 
     impl StartupFileProbe for ShellStartupProbe {
@@ -876,7 +1019,17 @@ pub mod native {
         }
 
         fn is_file(&self, full_path: &str) -> bool {
-            StdStartupProbe.is_file(full_path)
+            use std::os::windows::fs::OpenOptionsExt;
+            /// `FILE_READ_ATTRIBUTES`: enough for metadata, no data access.
+            const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+            const SHARE_ALL: u32 = 0x7;
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(SHARE_ALL)
+                .security_qos_flags(SECURITY_IDENTIFICATION.0)
+                .open(full_path)
+                .and_then(|file| file.metadata())
+                .is_ok_and(|metadata| metadata.is_file())
         }
 
         fn expand_short_names(&self, full_path: &str) -> Option<String> {
@@ -1077,6 +1230,59 @@ mod tests {
         assert_eq!(
             resolve_activation(&activation, &[], &probe),
             Some(r"D:\docs\a.md".to_owned())
+        );
+    }
+
+    /// Records every path that reaches a file-system call.
+    struct RecordingProbe(std::cell::RefCell<Vec<String>>);
+
+    impl StartupFileProbe for RecordingProbe {
+        fn full_path(&self, path: &str) -> Option<String> {
+            Some(path.to_owned())
+        }
+
+        fn is_file(&self, full_path: &str) -> bool {
+            self.0.borrow_mut().push(full_path.to_owned());
+            false
+        }
+
+        fn expand_short_names(&self, full_path: &str) -> Option<String> {
+            self.0.borrow_mut().push(full_path.to_owned());
+            None
+        }
+    }
+
+    #[test]
+    fn gated_candidates_never_reach_the_file_system() {
+        let probe = RecordingProbe(std::cell::RefCell::new(Vec::new()));
+        let activation = Activation {
+            working_directory: String::new(),
+            arguments:
+                r#"\\.\pipe\x.md "\\?\GLOBALROOT\a.md" C:\a\..\b.md C:\ok.md C:\PROGRA~1\c.md"#
+                    .to_owned(),
+        };
+        assert_eq!(resolve_activation(&activation, &[], &probe), None);
+        assert_eq!(
+            *probe.0.borrow(),
+            [r"C:\ok.md", r"C:\PROGRA~1\c.md", r"C:\PROGRA~1\c.md"],
+            "only gated paths are probed"
+        );
+    }
+
+    #[test]
+    fn senders_with_too_many_arguments_are_ignored() {
+        let probe = FakeProbe([r"C:\a.md", r"C:\own.md"].into());
+        let many = std::iter::repeat_n("x", MAX_CANDIDATES)
+            .chain([r"C:\a.md"])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let activation = Activation {
+            working_directory: String::new(),
+            arguments: many,
+        };
+        assert_eq!(
+            resolve_activation(&activation, &[r"C:\own.md".to_owned()], &probe),
+            Some(r"C:\own.md".to_owned())
         );
     }
 }

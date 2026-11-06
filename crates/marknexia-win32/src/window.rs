@@ -1033,7 +1033,7 @@ unsafe extern "system" fn window_proc(
             open_from_dialog(hwnd);
             LRESULT(0)
         }
-        message if input::handles(message) => input::on_message(hwnd, message, wparam),
+        message if input::handles(message) => input::on_message(hwnd, message, wparam, lparam),
         WM_RENDER_COMPLETE => {
             apply_render_results(hwnd);
             LRESULT(0)
@@ -1122,7 +1122,7 @@ fn paint_tabs(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(parent) }) else {
         return;
     };
-    let (tabs, selected, focus_visible, colors, dpi) = {
+    let (tabs, selected, focus_visible, colors, dpi, theme) = {
         let state = state.borrow();
         let app = state.portable.borrow();
         (
@@ -1135,6 +1135,7 @@ fn paint_tabs(hwnd: HWND) {
             app.focus_is_visible(),
             palette(state.theme),
             state.dpi,
+            state.theme,
         )
     };
     let count = tabs.len();
@@ -1166,7 +1167,7 @@ fn paint_tabs(hwnd: HWND) {
                     dc,
                     &rect,
                     title,
-                    native_color(if active { colors.accent } else { colors.text }),
+                    native_color(input::tab_text_color(theme, colors, active)),
                     dpi,
                 );
                 if active && focus_visible {
