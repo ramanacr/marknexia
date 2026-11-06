@@ -404,4 +404,37 @@ pub fn activate_attempt(hwnd: HWND, attempt: u32) {
         }
         let _ = unsafe { SetForegroundWindow(hwnd) };
     }
+    if on_github_actions() {
+        leave_menu_mode(hwnd);
+    }
+}
+
+/// The synthetic Alt tap can reach the shell after it became the
+/// foreground window. A lone Alt opens the shell's menu bar (keyboard menu
+/// mode), which would then swallow the test's keys (run 42199272748: Ctrl+Tab
+/// from the document did not switch tabs). Leave menu mode with Escape,
+/// sent only while the shell owns the foreground and is in menu mode.
+fn leave_menu_mode(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
+    const MENU_MODES: u32 = 0x4 | 0x8 | 0x10; // GUI_INMENUMODE | GUI_SYSTEMMENUMODE | GUI_POPUPMENUMODE
+    let mut process = 0;
+    let ui_thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process)) };
+    if ui_thread == 0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let in_menu = unsafe { GetGUIThreadInfo(ui_thread, &mut info) }.is_ok()
+            && info.flags.0 & MENU_MODES != 0;
+        if in_menu && foreground_owner() == process {
+            eprintln!("leaving the shell's menu mode after the Alt unlock");
+            send_chord_to(process, &[VK_ESCAPE]);
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }

@@ -31,11 +31,12 @@ use windows::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement,
                 IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
                 IUIAutomationSelectionItemPattern, TreeScope_Children, TreeScope_Descendants,
-                UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID, UIA_ComboBoxControlTypeId,
-                UIA_ControlTypePropertyId, UIA_ExpandCollapsePatternId, UIA_InvokePatternId,
-                UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId,
-                UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TabControlTypeId,
-                UIA_TabItemControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId,
+                UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID,
+                UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId, UIA_ExpandCollapsePatternId,
+                UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+                UIA_MenuBarControlTypeId, UIA_NamePropertyId, UIA_SelectionItemPatternId,
+                UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TreeControlTypeId,
+                UIA_TreeItemControlTypeId,
             },
             HiDpi::{
                 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
@@ -196,10 +197,72 @@ impl Launched {
         unsafe { self.root.FindFirst(TreeScope_Descendants, &condition) }.ok()
     }
 
-    fn wait(&self, kind: UIA_CONTROLTYPE_ID, wanted: &str) -> IUIAutomationElement {
-        wait_for(&format!("{wanted:?} ({})", kind.0), || {
-            self.find(kind, wanted)
-        })
+    /// The element whose AutomationId is `id` (a Win32 control's ID).
+    fn find_id(&self, id: &str) -> Option<IUIAutomationElement> {
+        let condition = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_AutomationIdPropertyId, &VARIANT::from(BSTR::from(id)))
+        }
+        .ok()?;
+        unsafe { self.root.FindFirst(TreeScope_Descendants, &condition) }.ok()
+    }
+
+    /// Waits for the control with AutomationId `id`, then asserts its
+    /// control type and accessible name.
+    fn wait_id(&self, id: &str, kind: UIA_CONTROLTYPE_ID, wanted: &str) -> IUIAutomationElement {
+        let element = self.until(&format!("AutomationId {id} ({wanted:?})"), || {
+            self.find_id(id)
+                .filter(|element| unsafe { element.CurrentControlType() }.is_ok_and(|k| k == kind))
+                .filter(|element| name(element) == wanted)
+        });
+        assert_eq!(
+            name(&element),
+            wanted,
+            "accessible name of AutomationId {id}"
+        );
+        element
+    }
+
+    /// `wait_for` that prints the shell's UIA subtree when it times out.
+    fn until<T>(&self, what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(value) = probe() {
+                return value;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("UIA subtree of the shell window (depth <= 4):");
+                self.dump(&self.root, 0);
+                panic!("timed out waiting for {what}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn dump(&self, element: &IUIAutomationElement, depth: usize) {
+        let kind = unsafe { element.CurrentControlType() }.map_or(0, |kind| kind.0);
+        let id = unsafe { element.CurrentAutomationId() }
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let offscreen = unsafe { element.CurrentIsOffscreen() }.is_ok_and(|o| o.as_bool());
+        eprintln!(
+            "{:indent$}- {:?} type={kind} id={id:?}{}",
+            "",
+            name(element),
+            if offscreen { " offscreen" } else { "" },
+            indent = depth * 2
+        );
+        if depth >= 4 {
+            return;
+        }
+        let Ok(walker) = (unsafe { self.automation.RawViewWalker() }) else {
+            return;
+        };
+        let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
+        while let Some(current) = child {
+            self.dump(&current, depth + 1);
+            child = unsafe { walker.GetNextSiblingElement(&current) }.ok();
+        }
     }
 
     fn minimum_pixels(&self) -> f64 {
@@ -266,21 +329,21 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
     let shell = launch(&[features.as_os_str()], None);
     let minimum = shell.minimum_pixels();
 
-    for button in [
-        "Toggle sidebar",
-        "Back",
-        "Forward",
-        "Reload document",
-        "Open repository folder",
-        "Find in document",
+    for (id, button) in [
+        ("2001", "Toggle sidebar"),
+        ("2002", "Back"),
+        ("2003", "Forward"),
+        ("2004", "Reload document"),
+        ("2005", "Open repository folder"),
+        ("2008", "Find in document"),
     ] {
-        let element = shell.wait(UIA_ButtonControlTypeId, button);
+        let element = shell.wait_id(id, UIA_ButtonControlTypeId, button);
         assert_target(&element, minimum, true);
     }
-    let theme = shell.wait(UIA_ComboBoxControlTypeId, "Theme");
+    let theme = shell.wait_id("2007", UIA_ComboBoxControlTypeId, "Theme");
     assert_target(&theme, minimum, true);
 
-    let selector = shell.wait(UIA_TabControlTypeId, "Sidebar view");
+    let selector = shell.wait_id("1003", UIA_TabControlTypeId, "Sidebar view");
     let views: Vec<String> = shell
         .find_all(&selector, UIA_TabItemControlTypeId, true)
         .iter()
@@ -292,8 +355,8 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
     }
 
     // The outline comes from the rendered document's headings.
-    let outline = shell.wait(UIA_ListControlTypeId, "Document outline");
-    let heading = wait_for("the outline's first heading", || {
+    let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
+    let heading = shell.until("the outline's first heading", || {
         shell
             .find_all(&outline, UIA_ListItemControlTypeId, true)
             .into_iter()
@@ -301,10 +364,16 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
     });
     assert_target(&heading, minimum, false);
     // A newly opened document has no history yet; it can be reloaded.
-    assert!(!is_enabled(&shell.wait(UIA_ButtonControlTypeId, "Back")));
-    assert!(is_enabled(
-        &shell.wait(UIA_ButtonControlTypeId, "Reload document")
-    ));
+    assert!(!is_enabled(&shell.wait_id(
+        "2002",
+        UIA_ButtonControlTypeId,
+        "Back"
+    )));
+    assert!(is_enabled(&shell.wait_id(
+        "2004",
+        UIA_ButtonControlTypeId,
+        "Reload document"
+    )));
 
     let menus: Vec<String> = shell
         .find_all(&shell.root, UIA_MenuBarControlTypeId, false)
@@ -328,7 +397,7 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
         );
     }
     // The opened file joined the recent files in the isolated settings.
-    let settings = wait_for("the recent file to be saved", || {
+    let settings = shell.until("the recent file to be saved", || {
         read_settings(&shell.shell).filter(|settings| !settings.recent_files.is_empty())
     });
     assert!(settings.recent_files[0].ends_with("features.md"));
@@ -339,15 +408,15 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
 fn toggling_the_sidebar_hides_it_and_persists_the_setting() {
     let features = fixture("features.md");
     let shell = launch(&[features.as_os_str()], None);
-    let outline = shell.wait(UIA_ListControlTypeId, "Document outline");
+    let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
     assert!(is_onscreen(&outline));
-    invoke(&shell.wait(UIA_ButtonControlTypeId, "Toggle sidebar"));
-    wait_for("IsSidebarOpen=false in the settings file", || {
+    invoke(&shell.wait_id("2001", UIA_ButtonControlTypeId, "Toggle sidebar"));
+    shell.until("IsSidebarOpen=false in the settings file", || {
         read_settings(&shell.shell)
             .filter(|settings| !settings.is_sidebar_open)
             .map(drop)
     });
-    wait_for("the outline to leave the screen", || {
+    shell.until("the outline to leave the screen", || {
         (shell
             .find(UIA_ListControlTypeId, "Document outline")
             .is_none()
@@ -370,20 +439,20 @@ fn the_saved_repository_is_restored_as_a_lazily_filled_tree() {
     );
     let shell = launch(&[], Some(settings.as_bytes()));
 
-    let tree = shell.wait(UIA_TreeControlTypeId, "Repository files");
+    let tree = shell.wait_id("2012", UIA_TreeControlTypeId, "Repository files");
     let root_name = repository
         .0
         .file_name()
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let root = wait_for("the repository root item", || {
+    let root = shell.until("the repository root item", || {
         shell
             .find_all(&tree, UIA_TreeItemControlTypeId, true)
             .into_iter()
             .find(|item| name(item) == root_name)
     });
-    let children = wait_for("the root's children", || {
+    let children = shell.until("the root's children", || {
         let names: Vec<String> = shell
             .find_all(&root, UIA_TreeItemControlTypeId, true)
             .iter()
@@ -404,13 +473,13 @@ fn the_saved_repository_is_restored_as_a_lazily_filled_tree() {
             .cast()
             .expect("ExpandCollapse interface");
     unsafe { expand.Expand() }.expect("Expand");
-    wait_for("guide.md after expansion", || {
+    shell.until("guide.md after expansion", || {
         shell
             .find_all(&docs, UIA_TreeItemControlTypeId, true)
             .into_iter()
             .find(|item| name(item) == "guide.md")
     });
-    let selector = shell.wait(UIA_TabControlTypeId, "Sidebar view");
+    let selector = shell.wait_id("1003", UIA_TabControlTypeId, "Sidebar view");
     let selected: Vec<String> = shell
         .find_all(&selector, UIA_TabItemControlTypeId, true)
         .into_iter()
@@ -431,16 +500,16 @@ fn the_saved_repository_is_restored_as_a_lazily_filled_tree() {
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn corrupt_settings_show_a_dismissible_warning() {
     let shell = launch(&[], Some(b"{ this is not JSON"));
-    let warning = wait_for("the settings warning", || {
+    let warning = shell.until("the settings warning", || {
         shell
-            .find_all(
-                &shell.root,
-                windows::Win32::UI::Accessibility::UIA_TextControlTypeId,
-                false,
-            )
-            .into_iter()
-            .find(|text| name(text).starts_with("Warning: Settings were reset to defaults"))
+            .find_id("2020")
+            .filter(|text| name(text).starts_with("Warning: Settings were reset to defaults"))
     });
+    assert_eq!(
+        unsafe { warning.CurrentControlType() }.unwrap(),
+        windows::Win32::UI::Accessibility::UIA_TextControlTypeId,
+        "the diagnostics message is exposed as text"
+    );
     assert!(is_onscreen(&warning));
     let profile = shell.shell.settings_path().parent().unwrap().to_path_buf();
     let preserved = std::fs::read_dir(&profile)
@@ -453,10 +522,10 @@ fn corrupt_settings_show_a_dismissible_warning() {
                 .starts_with("settings.json.corrupt-")
         });
     assert!(preserved, "the corrupt file is kept beside the new one");
-    let close = shell.wait(UIA_ButtonControlTypeId, "Close");
+    let close = shell.wait_id("2021", UIA_ButtonControlTypeId, "Close");
     assert_target(&close, shell.minimum_pixels(), true);
     invoke(&close);
-    wait_for("the diagnostics bar to close", || {
+    shell.until("the diagnostics bar to close", || {
         (!is_onscreen(&warning) || name(&warning).is_empty()).then_some(())
     });
 }
@@ -466,13 +535,13 @@ fn corrupt_settings_show_a_dismissible_warning() {
 fn enter_on_a_heading_jumps_and_alt_left_goes_back() {
     let features = fixture("features.md");
     let shell = launch(&[features.as_os_str()], None);
-    let outline = shell.wait(UIA_ListControlTypeId, "Document outline");
-    let items = wait_for("outline items", || {
+    let outline = shell.wait_id("2011", UIA_ListControlTypeId, "Document outline");
+    let items = shell.until("outline items", || {
         let items = shell.find_all(&outline, UIA_ListItemControlTypeId, true);
         (items.len() > 2).then_some(items)
     });
-    let back = shell.wait(UIA_ButtonControlTypeId, "Back");
-    let forward = shell.wait(UIA_ButtonControlTypeId, "Forward");
+    let back = shell.wait_id("2002", UIA_ButtonControlTypeId, "Back");
+    let forward = shell.wait_id("2003", UIA_ButtonControlTypeId, "Forward");
     assert!(!is_enabled(&back));
 
     let pattern: IUIAutomationSelectionItemPattern =
@@ -487,11 +556,11 @@ fn enter_on_a_heading_jumps_and_alt_left_goes_back() {
     );
     unsafe { outline.SetFocus() }.expect("focus the outline");
     send_chord_to(shell.shell.id(), &[VK_RETURN]);
-    wait_for("Back to be enabled after the jump", || {
+    shell.until("Back to be enabled after the jump", || {
         is_enabled(&back).then_some(())
     });
     send_chord_to(shell.shell.id(), &[VK_MENU, VK_LEFT]);
-    wait_for("Forward to be enabled after Alt+Left", || {
+    shell.until("Forward to be enabled after Alt+Left", || {
         is_enabled(&forward).then_some(())
     });
     assert!(!is_enabled(&back));
