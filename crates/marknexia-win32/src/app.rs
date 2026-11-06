@@ -133,6 +133,24 @@ impl AppState {
     pub fn set_sidebar_visible(&mut self, visible: bool) {
         self.sidebar_visible = visible;
     }
+
+    /// Closes `tab_id`, active or not (.NET `CloseTab`). Closing the active
+    /// tab selects the tab that takes its place, else the new last tab.
+    pub fn close_tab(&mut self, tab_id: TabId) -> bool {
+        self.tabs.close(tab_id)
+    }
+
+    /// Moves `tab_id` to `destination` in the visual order, which is also
+    /// the Ctrl+Tab order. Returns true only when the order changed.
+    pub fn reorder_tab(&mut self, tab_id: TabId, destination: usize) -> bool {
+        let before = self.tabs.tabs().iter().position(|tab| tab.id() == tab_id);
+        before.is_some_and(|before| before != destination) && self.tabs.reorder(tab_id, destination)
+    }
+
+    /// Shows or hides the find bar (.NET `SearchBarGrid.Visibility`).
+    pub fn set_find_bar_visible(&mut self, visible: bool) {
+        self.find_bar_visible = visible;
+    }
 }
 
 impl Default for AppState {

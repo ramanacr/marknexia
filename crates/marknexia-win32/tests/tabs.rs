@@ -92,3 +92,48 @@ fn reordering_preserves_selection_and_rejects_invalid_destination() {
     assert!(!tabs.reorder(first, 3));
     assert_eq!(tabs.active_id(), Some(second));
 }
+
+#[test]
+fn closing_any_tab_keeps_or_moves_selection_like_dotnet() {
+    use marknexia_win32::app::AppState;
+    let mut app = AppState::new();
+    let first = app.open_tab("1.md").unwrap();
+    let second = app.open_tab("2.md").unwrap();
+    let third = app.open_tab("3.md").unwrap();
+    // An inactive tab closes without changing the selection.
+    assert!(app.close_tab(first));
+    assert_eq!(app.active_tab(), Some(third));
+    // The active last tab hands selection to the new last tab.
+    assert!(app.close_tab(third));
+    assert_eq!(app.active_tab(), Some(second));
+    assert!(!app.close_tab(third), "already closed");
+    assert!(app.close_tab(second));
+    assert_eq!(app.active_tab(), None);
+}
+
+#[test]
+fn reordering_changes_the_ctrl_tab_order_and_reports_real_moves_only() {
+    use marknexia_win32::{app::AppState, keyboard::ShellCommand};
+    let mut app = AppState::new();
+    let first = app.open_tab("1.md").unwrap();
+    let second = app.open_tab("2.md").unwrap();
+    let third = app.open_tab("3.md").unwrap();
+    assert!(!app.reorder_tab(third, 2), "same position is not a move");
+    assert!(!app.reorder_tab(third, 3), "past the end");
+    assert!(app.reorder_tab(third, 0));
+    let order: Vec<_> = app.tabs().tabs().iter().map(|tab| tab.id()).collect();
+    assert_eq!(order, [third, first, second]);
+    // Ctrl+Tab follows the visual order from the active (moved) tab.
+    assert_eq!(app.active_tab(), Some(third));
+    assert!(app.apply_command(ShellCommand::NextTab));
+    assert_eq!(app.active_tab(), Some(first));
+}
+
+#[test]
+fn the_find_bar_visibility_is_portable_state() {
+    use marknexia_win32::app::AppState;
+    let mut app = AppState::new();
+    assert!(!app.find_bar_visible());
+    app.set_find_bar_visible(true);
+    assert!(app.find_bar_visible());
+}
