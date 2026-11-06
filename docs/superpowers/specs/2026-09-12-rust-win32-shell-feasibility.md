@@ -549,3 +549,15 @@ proposed).
   shell, whose new menu bar then entered keyboard menu mode and took the
   keys; `activate_attempt` now leaves menu mode with Escape (foreground
   guarded). Awaiting the next CI run.
+- **Second native run (CI 42205137174): names still wrong.** The dump
+  showed the outline list named "Document Map" (from the preceding heading
+  label) and the diagnostics message as an image (type 50006): the
+  IAccPropServices MSAA name did not reach the UIA list proxy, and an
+  owner-drawn static stays an image. Fix: each list now follows its own
+  zero-size static label with the .NET `AutomationProperties.Name`
+  ("Document outline", "Repository files", "Recent Markdown files"); the
+  visible heading keeps "Document Map". The labels are annotated out of the
+  control and content views, and the names are also set as UIA `Name`
+  annotations. The diagnostics message is now a plain text static
+  ("Warning: …"), with the severity glyph in a separate owner-drawn static.
+  Awaiting the next CI run.
