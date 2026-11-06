@@ -92,11 +92,24 @@ impl ActiveRecord {
         }
     }
 
+    /// A valid schema, a payload id under `versions`, and a version that is
+    /// exactly the payload id's version.
     fn is_valid(&self) -> bool {
         self.schema == ACTIVE_SCHEMA
             && crate::layout::is_payload_id(&self.payload)
             && Version::parse(&self.version).is_ok()
+            && crate::layout::payload_version(&self.payload) == Some(self.version.as_str())
     }
+}
+
+/// A process, identified by its id and its creation time (a 100 ns
+/// `FILETIME` count; 0 when unknown), so a reused process id is not taken
+/// for the recorded process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub started: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,8 +121,8 @@ pub struct TransactionRecord {
     /// original unpacked installation runs itself).
     pub previous: Option<ActiveRecord>,
     nonce_sha256: String,
-    pub coordinator_pid: u32,
-    pub child_pid: Option<u32>,
+    pub coordinator: ProcessIdentity,
+    pub child: Option<ProcessIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +290,7 @@ pub fn begin(
     layout: &Layout,
     staged: &StagedPayload,
     nonce: &Nonce,
-    coordinator_pid: u32,
+    coordinator: ProcessIdentity,
 ) -> Result<TransactionRecord, ActivationError> {
     if layout.transaction_file().exists() {
         return Err(ActivationError::Busy);
@@ -290,12 +303,12 @@ pub fn begin(
         // then removes the pointer, and the unpacked installation runs.
         previous: read_active(layout).ok().flatten(),
         nonce_sha256: nonce.digest_hex(),
-        coordinator_pid,
-        child_pid: None,
+        coordinator,
+        child: None,
     };
     write_atomic(&layout.transaction_file(), &record)?;
     if let Err(error) = write_atomic(&layout.active_file(), &candidate) {
-        let _ = rollback(layout, &record, &HealthFailure::Interrupted);
+        let _ = rollback(layout, &record, &HealthFailure::Interrupted, false);
         return Err(error.into());
     }
     Ok(record)
@@ -305,9 +318,9 @@ pub fn begin(
 pub fn note_child(
     layout: &Layout,
     record: &mut TransactionRecord,
-    pid: u32,
+    child: ProcessIdentity,
 ) -> Result<(), ActivationError> {
-    record.child_pid = Some(pid);
+    record.child = Some(child);
     write_atomic(&layout.transaction_file(), record).map_err(Into::into)
 }
 
@@ -337,12 +350,15 @@ pub fn commit(layout: &Layout, record: &TransactionRecord) -> Result<(), Activat
 }
 
 /// Restores the previous pointer (or removes the pointer when there was
-/// none), records the diagnostic, removes the failed payload and then the
-/// transaction. Safe to repeat after an interruption.
+/// none), records the diagnostic, removes the failed payload (unless
+/// `candidate_running`: a payload whose shell still runs is left for a
+/// later cleanup) and then the transaction. Safe to repeat after an
+/// interruption.
 pub fn rollback(
     layout: &Layout,
     record: &TransactionRecord,
     failure: &HealthFailure,
+    candidate_running: bool,
 ) -> Result<(), ActivationError> {
     match &record.previous {
         Some(previous) => write_atomic(&layout.active_file(), previous)?,
@@ -358,7 +374,7 @@ pub fn rollback(
     );
     let _ = std::fs::remove_dir_all(layout.health());
     let rollback_target = record.previous.as_ref().map(|previous| &previous.payload);
-    if rollback_target != Some(&record.candidate.payload) {
+    if rollback_target != Some(&record.candidate.payload) && !candidate_running {
         let _ = std::fs::remove_dir_all(layout.payload(&record.candidate.payload));
     }
     remove_if_present(&layout.transaction_file())?;
@@ -379,15 +395,24 @@ pub enum Recovery {
 }
 
 /// Resolves an interrupted transaction before any version starts.
-/// `is_running(pid)` tells whether the recorded coordinator still runs.
-pub fn recover(layout: &Layout, is_running: &dyn Fn(u32) -> bool) -> Recovery {
+/// `is_running` tells whether a recorded process (id and creation time)
+/// still runs; a reused process id with another creation time does not.
+/// The candidate's payload is kept while its shell still runs (the old
+/// window closed during the health wait).
+pub fn recover(layout: &Layout, is_running: &dyn Fn(ProcessIdentity) -> bool) -> Recovery {
     match read_transaction(layout) {
         Ok(None) => Recovery::Nothing,
         Ok(Some(record)) => {
-            if record.coordinator_pid != std::process::id() && is_running(record.coordinator_pid) {
+            if record.coordinator.pid != std::process::id() && is_running(record.coordinator) {
                 return Recovery::InProgress;
             }
-            let _ = rollback(layout, &record, &HealthFailure::Interrupted);
+            let candidate_running = record.child.is_some_and(is_running);
+            let _ = rollback(
+                layout,
+                &record,
+                &HealthFailure::Interrupted,
+                candidate_running,
+            );
             Recovery::RolledBack(record.candidate.version)
         }
         Err(_) => {
@@ -433,6 +458,126 @@ pub fn route(
         return Route::RunHere;
     }
     Route::Forward(shell)
+}
+
+/// Platform checks for a normal start (the native adapter in the shell).
+pub trait StartGuard {
+    /// This build has a configured update channel.
+    fn configured(&self) -> bool;
+    /// The running process is elevated: it never forwards.
+    fn elevated(&self) -> bool;
+    /// `root` is not a reparse point, is owned by the current user, and
+    /// its DACL is protected and grants the current user only.
+    fn folder_is_private(&self, root: &Path) -> bool;
+    /// Whether a recorded process (id and creation time) still runs.
+    fn is_running(&self, process: ProcessIdentity) -> bool;
+    /// Opens `shell` with a handle that denies writers and deleters, and
+    /// checks the PE machine and the pinned release publisher through that
+    /// handle. The returned value keeps the handle open.
+    fn open_verified(&self, shell: &Path) -> Result<Box<dyn std::any::Any>, String>;
+    /// Starts `shell` with `arguments`; the verified handle is still open.
+    fn start(&self, shell: &Path, arguments: &[std::ffi::OsString]) -> std::io::Result<()>;
+}
+
+/// Why a normal start runs the started executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StayReason {
+    NotConfigured,
+    Elevated,
+    NoUpdateFolder,
+    /// The update folder is a reparse point or not private to the user.
+    UnsafeFolder,
+    NoNewerVersion,
+    /// The newer payload's shell failed its signature or PE check.
+    Unverified(String),
+    StartFailed(std::io::ErrorKind),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartOutcome {
+    RunHere(StayReason),
+    /// The newer, verified shell was started; this process exits.
+    Forwarded(PathBuf),
+}
+
+/// A normal start: only in a configured build, never from an elevated
+/// process, and only through a private update folder, resolve an
+/// interrupted transaction ([`recover`]), then start a newer active
+/// payload's shell after verifying it on a locked handle that stays open
+/// until the process is created. Anything else runs here.
+pub fn start(
+    layout: &Layout,
+    running_executable: &Path,
+    running_version: &Version,
+    shell_name: &str,
+    arguments: &[std::ffi::OsString],
+    guard: &dyn StartGuard,
+) -> StartOutcome {
+    if !guard.configured() {
+        return StartOutcome::RunHere(StayReason::NotConfigured);
+    }
+    if guard.elevated() {
+        return StartOutcome::RunHere(StayReason::Elevated);
+    }
+    if !layout.root().exists() {
+        return StartOutcome::RunHere(StayReason::NoUpdateFolder);
+    }
+    if !guard.folder_is_private(layout.root()) {
+        return StartOutcome::RunHere(StayReason::UnsafeFolder);
+    }
+    let _ = recover(layout, &|process| guard.is_running(process));
+    let Route::Forward(shell) = route(layout, running_executable, running_version, shell_name)
+    else {
+        return StartOutcome::RunHere(StayReason::NoNewerVersion);
+    };
+    let lock = match guard.open_verified(&shell) {
+        Ok(lock) => lock,
+        Err(reason) => return StartOutcome::RunHere(StayReason::Unverified(reason)),
+    };
+    let started = guard.start(&shell, arguments);
+    drop(lock);
+    match started {
+        Ok(()) => StartOutcome::Forwarded(shell),
+        Err(error) => StartOutcome::RunHere(StayReason::StartFailed(error.kind())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Highest version seen.
+// ---------------------------------------------------------------------------
+
+const HIGHEST_SCHEMA: &str = "marknexia-highest-seen-v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct HighestSeen {
+    schema: String,
+    version: String,
+}
+
+/// The highest version seen in a verified manifest, if recorded.
+#[must_use]
+pub fn read_highest_seen(layout: &Layout) -> Option<Version> {
+    let bytes = read_bounded(&layout.highest_seen_file()).ok()??;
+    let record: HighestSeen = serde_json::from_slice(&bytes).ok()?;
+    (record.schema == HIGHEST_SCHEMA)
+        .then(|| Version::parse(&record.version).ok())
+        .flatten()
+}
+
+/// Raises the recorded highest version to `version` (never lowers it).
+/// The update folder must already exist.
+pub fn raise_highest_seen(layout: &Layout, version: &Version) -> std::io::Result<()> {
+    if read_highest_seen(layout).is_some_and(|highest| highest >= *version) {
+        return Ok(());
+    }
+    write_atomic(
+        &layout.highest_seen_file(),
+        &HighestSeen {
+            schema: HIGHEST_SCHEMA.to_owned(),
+            version: version.to_string(),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -595,12 +740,12 @@ pub fn activate(
     staged: &StagedPayload,
     nonce: &Nonce,
     launcher: &dyn Launcher,
+    coordinator: ProcessIdentity,
     clock_from_launch: &dyn Fn() -> Box<dyn Clock>,
 ) -> Result<(), ActivateError> {
-    let mut record =
-        begin(layout, staged, nonce, std::process::id()).map_err(ActivateError::Begin)?;
+    let mut record = begin(layout, staged, nonce, coordinator).map_err(ActivateError::Begin)?;
     let fail = |record: &TransactionRecord, failure: HealthFailure| {
-        if rollback(layout, record, &failure).is_ok() {
+        if rollback(layout, record, &failure, false).is_ok() {
             ActivateError::RolledBack(failure)
         } else {
             ActivateError::RollbackIncomplete(failure)
@@ -611,7 +756,16 @@ pub fn activate(
         Err(error) => return Err(fail(&record, HealthFailure::LaunchFailed(error.kind()))),
     };
     let clock = clock_from_launch();
-    let _ = note_child(layout, &mut record, child.id());
+    // std gives no creation time; a running process with this id keeps
+    // the payload on recovery (the safe direction).
+    let _ = note_child(
+        layout,
+        &mut record,
+        ProcessIdentity {
+            pid: child.id(),
+            started: 0,
+        },
+    );
     match await_health(
         layout,
         child.as_mut(),

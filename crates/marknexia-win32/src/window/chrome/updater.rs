@@ -22,7 +22,7 @@ use marknexia_update::{
     layout::Layout,
     manifest::{Architecture, Manifest},
     payload::PayloadPolicy,
-    stage::{StageRequest, download_and_stage},
+    stage::{StageRequest, download_and_stage, ensure_private_dir},
 };
 use windows::Win32::{
     Foundation::{HWND, LPARAM, WPARAM},
@@ -31,7 +31,8 @@ use windows::Win32::{
 
 use super::{ChromeAction, DiagnosticSeverity, WorkerResult, dialogs, queue_action, with_chrome};
 use crate::window::update_native::{
-    NativeStagePlatform, WinHttpFetcher, is_packaged, is_process_running, os_build, random_nonce,
+    NativeStagePlatform, WinHttpFetcher, current_process, is_packaged, is_process_running,
+    os_build, random_nonce,
 };
 
 thread_local! {
@@ -80,15 +81,25 @@ pub(in crate::window) fn request_check(hwnd: HWND) {
             let fetcher = WinHttpFetcher {
                 hosts: config.allowed_hosts.clone(),
             };
+            let layout = Layout::default_root().map(Layout::new);
+            let highest = layout.as_ref().and_then(activation::read_highest_seen);
             let outcome = check_for_update(
                 &config,
                 &fetcher,
                 env!("CARGO_PKG_VERSION"),
                 architecture,
                 os_build(),
+                highest.as_ref(),
                 &AtomicBool::new(false),
             )
             .map_err(|error| error.message());
+            // A verified, newer manifest raises the floor: an older one is
+            // never offered again (a frozen or replayed channel).
+            if let (Ok(CheckOutcome::Available(manifest)), Some(layout)) = (&outcome, &layout)
+                && ensure_private_dir(&NativeStagePlatform, layout.root()).is_ok()
+            {
+                let _ = activation::raise_highest_seen(layout, &manifest.version);
+            }
             Some(WorkerResult::Update(UpdateResult::Checked {
                 config: Box::new(config),
                 outcome,
@@ -190,9 +201,14 @@ fn install(config: &UpdateConfig, manifest: &Manifest) -> Result<(), String> {
     )
     .map_err(|error| error.message())?;
     let nonce = random_nonce().ok_or("no random nonce is available.")?;
-    activation::activate(&layout, &staged, &nonce, &ProcessLauncher, &|| {
-        Box::new(SystemClock::start())
-    })
+    activation::activate(
+        &layout,
+        &staged,
+        &nonce,
+        &ProcessLauncher,
+        current_process(),
+        &|| Box::new(SystemClock::start()),
+    )
     .map_err(|error| error.message())
 }
 

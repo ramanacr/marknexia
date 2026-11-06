@@ -55,7 +55,12 @@ impl KeySet {
         if !is_valid_key_id(id) {
             return Err(KeyError::InvalidId);
         }
-        if PublicKey::from_slice(&key).is_err() {
+        // A noncanonical encoding, a non-point or a small-order (weak) point
+        // is refused before it is stored.
+        if PublicKey::from_slice(&key)
+            .and_then(|key| key.validate())
+            .is_err()
+        {
             return Err(KeyError::InvalidKey);
         }
         if self.keys.iter().any(|(known, _)| known == id) {

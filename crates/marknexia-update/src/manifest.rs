@@ -313,6 +313,11 @@ pub enum ManifestError {
     /// The version is not greater than the running version (downgrade or
     /// replay).
     NotNewer,
+    /// A pre-release version on the stable `portable` channel.
+    PreRelease,
+    /// Older than a version this installation already saw in a verified
+    /// manifest (a frozen or partially replayed channel).
+    Superseded,
     WrongChannel,
     /// Unknown architecture, or not the running architecture.
     WrongArchitecture,
@@ -337,6 +342,9 @@ pub struct Expectations<'a> {
     pub os_build: u32,
     pub trusted_hosts: &'a [String],
     pub max_byte_length: u64,
+    /// The highest version seen in an earlier verified manifest
+    /// (`activation::read_highest_seen`); nothing lower is offered.
+    pub highest_seen: Option<&'a Version>,
 }
 
 /// A verified manifest.
@@ -430,8 +438,17 @@ fn check(
         return Err(ManifestError::UnsupportedArtifactKind);
     }
     let version = Version::parse(&document.version).map_err(|_| ManifestError::InvalidVersion)?;
+    if version.is_pre_release() {
+        return Err(ManifestError::PreRelease);
+    }
     if version <= *expect.current_version {
         return Err(ManifestError::NotNewer);
+    }
+    if expect
+        .highest_seen
+        .is_some_and(|highest| version < *highest)
+    {
+        return Err(ManifestError::Superseded);
     }
     let architecture = Architecture::from_manifest(&document.architecture)
         .filter(|architecture| *architecture == expect.architecture)

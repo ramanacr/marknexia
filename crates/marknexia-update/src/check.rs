@@ -61,6 +61,9 @@ impl CheckError {
     pub fn message(&self) -> String {
         match self {
             Self::Download(error) => error.message(),
+            Self::Manifest(ManifestError::Superseded) => {
+                "The update information is older than a release Marknexia has already seen, so it was not used.".to_owned()
+            }
             Self::Manifest(ManifestError::OsTooOld) => {
                 "The latest version needs a newer version of Windows.".to_owned()
             }
@@ -73,13 +76,17 @@ impl CheckError {
 }
 
 /// Fetches the manifest and its signature and verifies them. A verified
-/// manifest that is not newer (a replay or downgrade) means up to date.
+/// manifest that is not newer (a replay or downgrade) means up to date; one
+/// older than `highest_seen` (an earlier verified manifest, see
+/// `activation::read_highest_seen`) is refused. The caller records the
+/// version of an available manifest (`activation::raise_highest_seen`).
 pub fn check_for_update(
     config: &UpdateConfig,
     fetcher: &dyn Fetcher,
     current_version: &str,
     architecture: Architecture,
     os_build: u32,
+    highest_seen: Option<&Version>,
     cancel: &AtomicBool,
 ) -> Result<CheckOutcome, CheckError> {
     let current = Version::parse(current_version).map_err(|_| CheckError::InvalidCurrentVersion)?;
@@ -103,6 +110,7 @@ pub fn check_for_update(
         os_build,
         trusted_hosts: &config.allowed_hosts,
         max_byte_length: MAX_ARTIFACT_BYTES,
+        highest_seen,
     };
     match manifest::verify(&manifest_bytes, &signature_bytes, &config.keys, &expect) {
         Ok(manifest) => Ok(CheckOutcome::Available(manifest)),

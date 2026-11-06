@@ -567,11 +567,15 @@ pub enum SignatureError {
     NotMicrosoftRoot(u32),
     /// The leaf certificate has no explicit code-signing usage.
     NoCodeSigningUsage,
-    /// Trusted, but the leaf does not name the expected publisher
-    /// (`bootstrap_native::verify_publisher`).
-    UnexpectedPublisher {
-        signer: String,
-    },
+}
+
+/// The trusted leaf certificate of a signed file
+/// (`bootstrap_native::verify_signer`): its simple display name and its DER
+/// encoding (for a thumbprint pin).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignerIdentity {
+    pub name: String,
+    pub certificate: Vec<u8>,
 }
 
 pub trait SignatureVerifier {
@@ -583,13 +587,6 @@ pub trait SignatureVerifier {
 /// requires the Microsoft root chain policy and the code-signing usage.
 pub fn is_microsoft_signer(leaf: &str, root: &str) -> bool {
     leaf == "Microsoft Corporation" && root.starts_with("Microsoft Root Certificate Authority")
-}
-
-/// The portable updater's publisher check: the leaf's simple display name
-/// equals the configured publisher exactly. An empty publisher matches
-/// nothing.
-pub fn is_expected_publisher(leaf: &str, publisher: &str) -> bool {
-    !publisher.is_empty() && leaf == publisher
 }
 
 /// `szOID_PKIX_KP_CODE_SIGNING`.

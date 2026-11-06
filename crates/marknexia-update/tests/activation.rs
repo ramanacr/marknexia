@@ -8,15 +8,21 @@ use std::{path::Path, time::Duration};
 
 use marknexia_update::{
     activation::{
-        self, ActivateError, ActiveRecord, HEALTH_ARGUMENT, HealthFailure, Probes, Recovery, Route,
-        activate, health_nonce_from_arguments, read_active, read_transaction, recover, route,
-        write_health_ack,
+        self, ActivateError, ActiveRecord, HEALTH_ARGUMENT, HealthFailure, Probes, ProcessIdentity,
+        Recovery, Route, activate, health_nonce_from_arguments, read_active, read_transaction,
+        recover, route, write_health_ack,
     },
     layout::Layout,
     stage::StagedPayload,
     version::Version,
 };
 use support::*;
+
+const COORDINATOR: ProcessIdentity = ProcessIdentity { pid: 1, started: 1 };
+
+fn process(pid: u32) -> ProcessIdentity {
+    ProcessIdentity { pid, started: 7 }
+}
 
 const ALL_OK: Probes = Probes {
     shell_visible: true,
@@ -80,7 +86,15 @@ fn a_healthy_new_version_is_committed_and_keeps_the_rollback_target() {
     let previous = make_active(&s.layout, "1.1.0");
     let new = payload(&s.layout, "1.2.0");
     let launcher = acknowledging(4242, ALL_OK);
-    activate(&s.layout, &new, &nonce(7), &launcher, &clock(250)).expect("committed");
+    activate(
+        &s.layout,
+        &new,
+        &nonce(7),
+        &launcher,
+        COORDINATOR,
+        &clock(250),
+    )
+    .expect("committed");
     let active = read_active(&s.layout).unwrap().unwrap();
     assert_eq!(active.payload, "1.2.0-x64");
     assert_eq!(read_transaction(&s.layout).unwrap(), None);
@@ -117,7 +131,14 @@ fn a_failed_probe_rolls_back_to_the_previous_version() {
         let new = payload(&s.layout, "1.2.0");
         let launcher = acknowledging(100, probes);
         assert_eq!(
-            activate(&s.layout, &new, &nonce(1), &launcher, &clock(250)),
+            activate(
+                &s.layout,
+                &new,
+                &nonce(1),
+                &launcher,
+                COORDINATOR,
+                &clock(250)
+            ),
             Err(ActivateError::RolledBack(HealthFailure::ProbeFailed))
         );
         assert_eq!(read_active(&s.layout).unwrap(), Some(previous));
@@ -146,7 +167,14 @@ fn no_acknowledgement_within_sixty_seconds_rolls_back() {
         Box::new(clock) as Box<dyn activation::Clock>
     };
     assert_eq!(
-        activate(&s.layout, &new, &nonce(2), &launcher, &make_clock),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(2),
+            &launcher,
+            COORDINATOR,
+            &make_clock
+        ),
         Err(ActivateError::RolledBack(HealthFailure::TimedOut))
     );
     // 60 s at 250 ms per poll.
@@ -176,7 +204,14 @@ fn a_late_acknowledgement_after_the_deadline_is_not_accepted() {
         Box::new(clock) as Box<dyn activation::Clock>
     };
     assert_eq!(
-        activate(&s.layout, &new, &nonce(3), &launcher, &make_clock),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(3),
+            &launcher,
+            COORDINATOR,
+            &make_clock
+        ),
         Err(ActivateError::RolledBack(HealthFailure::TimedOut))
     );
     assert_eq!(read_active(&s.layout).unwrap(), Some(previous));
@@ -191,7 +226,14 @@ fn a_crash_before_acknowledging_rolls_back() {
     let launcher = FakeLauncher::new(77);
     launcher.exit.set(Some(Some(0xC000_0005_u32 as i32)));
     assert_eq!(
-        activate(&s.layout, &new, &nonce(4), &launcher, &clock(250)),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(4),
+            &launcher,
+            COORDINATOR,
+            &clock(250)
+        ),
         Err(ActivateError::RolledBack(HealthFailure::Exited(Some(
             0xC000_0005_u32 as i32
         ))))
@@ -205,7 +247,14 @@ fn a_crash_before_acknowledging_rolls_back() {
     let launcher = acknowledging(78, ALL_OK);
     launcher.exit.set(Some(Some(3)));
     assert_eq!(
-        activate(&s.layout, &new, &nonce(5), &launcher, &clock(250)),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(5),
+            &launcher,
+            COORDINATOR,
+            &clock(250)
+        ),
         Err(ActivateError::RolledBack(HealthFailure::Exited(Some(3))))
     );
     assert_eq!(read_active(&s.layout).unwrap(), Some(previous));
@@ -218,7 +267,14 @@ fn a_launch_failure_rolls_back_and_a_first_update_restores_no_pointer() {
     let mut launcher = FakeLauncher::new(1);
     launcher.fail = true;
     assert_eq!(
-        activate(&s.layout, &new, &nonce(6), &launcher, &clock(250)),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(6),
+            &launcher,
+            COORDINATOR,
+            &clock(250)
+        ),
         Err(ActivateError::RolledBack(HealthFailure::LaunchFailed(
             std::io::ErrorKind::PermissionDenied
         )))
@@ -240,7 +296,14 @@ fn the_acknowledgement_is_bound_to_the_nonce_and_the_launched_process() {
         write_health_ack(shell, &nonce.to_hex(), 901, ALL_OK).unwrap();
     }));
     assert_eq!(
-        activate(&s.layout, &new, &nonce(8), &launcher, &clock(1000)),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(8),
+            &launcher,
+            COORDINATOR,
+            &clock(1000)
+        ),
         Err(ActivateError::RolledBack(HealthFailure::TimedOut)),
         "an acknowledgement for another process is ignored"
     );
@@ -260,7 +323,17 @@ fn the_acknowledgement_is_bound_to_the_nonce_and_the_launched_process() {
             ALL_OK,
         )));
     }));
-    assert!(activate(&s.layout, &new, &nonce(10), &launcher, &clock(1000)).is_err());
+    assert!(
+        activate(
+            &s.layout,
+            &new,
+            &nonce(10),
+            &launcher,
+            COORDINATOR,
+            &clock(1000)
+        )
+        .is_err()
+    );
     assert_eq!(wrote.get(), Some(Err(activation::AckError::WrongNonce)));
 }
 
@@ -285,7 +358,7 @@ fn an_acknowledgement_needs_a_transaction_for_its_own_payload() {
     );
     // A transaction for another payload.
     let other = payload(&s.layout, "1.3.0");
-    activation::begin(&s.layout, &other, &nonce(1), u32::MAX).unwrap();
+    activation::begin(&s.layout, &other, &nonce(1), process(u32::MAX)).unwrap();
     assert_eq!(
         write_health_ack(&new.shell, &nonce(1).to_hex(), 1, ALL_OK),
         Err(activation::AckError::NotAnUpdate)
@@ -301,7 +374,7 @@ fn an_interrupted_switch_is_rolled_back_on_the_next_start() {
     let new = payload(&s.layout, "1.2.0");
     // The coordinator switched the pointer, then died.
     let dead_coordinator = 4_000_000;
-    activation::begin(&s.layout, &new, &nonce(1), dead_coordinator).unwrap();
+    activation::begin(&s.layout, &new, &nonce(1), process(dead_coordinator)).unwrap();
     assert_eq!(
         read_active(&s.layout).unwrap().unwrap().payload,
         "1.2.0-x64"
@@ -328,7 +401,7 @@ fn a_transaction_written_before_the_pointer_switch_also_recovers() {
     payload(&s.layout, "1.1.0");
     let previous = make_active(&s.layout, "1.1.0");
     let new = payload(&s.layout, "1.2.0");
-    activation::begin(&s.layout, &new, &nonce(1), 4_000_001).unwrap();
+    activation::begin(&s.layout, &new, &nonce(1), process(4_000_001)).unwrap();
     // Simulate a crash between the two writes: the pointer is still old.
     std::fs::write(
         s.layout.active_file(),
@@ -438,11 +511,248 @@ fn health_mode_needs_exactly_the_flag_and_a_valid_nonce() {
 fn a_second_activation_waits_for_the_first() {
     let s = setup("busy");
     let new = payload(&s.layout, "1.2.0");
-    activation::begin(&s.layout, &new, &nonce(1), u32::MAX).unwrap();
+    activation::begin(&s.layout, &new, &nonce(1), process(u32::MAX)).unwrap();
     let launcher = acknowledging(1, ALL_OK);
     assert_eq!(
-        activate(&s.layout, &new, &nonce(2), &launcher, &clock(250)),
+        activate(
+            &s.layout,
+            &new,
+            &nonce(2),
+            &launcher,
+            COORDINATOR,
+            &clock(250)
+        ),
         Err(ActivateError::Begin(activation::ActivationError::Busy))
     );
     assert!(launcher.launched.borrow().is_empty());
+}
+
+#[test]
+fn a_reused_coordinator_process_id_does_not_block_recovery() {
+    let s = setup("recover-pid-reuse");
+    payload(&s.layout, "1.1.0");
+    let previous = make_active(&s.layout, "1.1.0");
+    let new = payload(&s.layout, "1.2.0");
+    activation::begin(&s.layout, &new, &nonce(1), process(4_000_002)).unwrap();
+    // The same id is running, but it is another process (another start time).
+    let other_process =
+        |candidate: ProcessIdentity| candidate.pid == 4_000_002 && candidate.started == 99;
+    assert_eq!(
+        recover(&s.layout, &other_process),
+        Recovery::RolledBack("1.2.0".to_owned())
+    );
+    assert_eq!(read_active(&s.layout).unwrap(), Some(previous));
+    // The recorded process itself blocks recovery.
+    let new = payload(&s.layout, "1.2.0");
+    activation::begin(&s.layout, &new, &nonce(1), process(4_000_002)).unwrap();
+    assert_eq!(
+        recover(&s.layout, &|candidate| candidate == process(4_000_002)),
+        Recovery::InProgress
+    );
+}
+
+#[test]
+fn recovery_keeps_a_candidate_payload_whose_shell_still_runs() {
+    // The old window closed during the health wait; the new shell runs on.
+    let s = setup("recover-child-running");
+    payload(&s.layout, "1.1.0");
+    let previous = make_active(&s.layout, "1.1.0");
+    let new = payload(&s.layout, "1.2.0");
+    let mut record = activation::begin(&s.layout, &new, &nonce(1), process(4_000_003)).unwrap();
+    activation::note_child(&s.layout, &mut record, process(4_000_004)).unwrap();
+    let child_running = |candidate: ProcessIdentity| candidate == process(4_000_004);
+    assert_eq!(
+        recover(&s.layout, &child_running),
+        Recovery::RolledBack("1.2.0".to_owned())
+    );
+    assert_eq!(read_active(&s.layout).unwrap(), Some(previous));
+    assert!(new.directory.is_dir(), "a running payload is not deleted");
+    assert_eq!(read_transaction(&s.layout).unwrap(), None);
+}
+
+#[test]
+fn a_pointer_whose_version_differs_from_its_payload_is_invalid() {
+    let s = setup("pointer-version");
+    payload(&s.layout, "1.2.0");
+    std::fs::write(
+        s.layout.active_file(),
+        br#"{"schema":"marknexia-active-v1","payload":"1.2.0-x64","version":"9.0.0"}"#,
+    )
+    .unwrap();
+    assert!(read_active(&s.layout).is_err());
+    assert_eq!(
+        route(
+            &s.layout,
+            Path::new(r"C:\portable\marknexia-win32.exe"),
+            &Version::parse("1.0.0").unwrap(),
+            "shell.txt"
+        ),
+        Route::RunHere
+    );
+}
+
+#[test]
+fn the_highest_seen_version_only_rises() {
+    use marknexia_update::activation::{raise_highest_seen, read_highest_seen};
+    let s = setup("highest");
+    std::fs::create_dir_all(s.layout.root()).unwrap();
+    assert_eq!(read_highest_seen(&s.layout), None);
+    raise_highest_seen(&s.layout, &Version::parse("1.2.0").unwrap()).unwrap();
+    raise_highest_seen(&s.layout, &Version::parse("1.1.0").unwrap()).unwrap();
+    assert_eq!(read_highest_seen(&s.layout).unwrap().to_string(), "1.2.0");
+    raise_highest_seen(&s.layout, &Version::parse("1.3.0").unwrap()).unwrap();
+    assert_eq!(read_highest_seen(&s.layout).unwrap().to_string(), "1.3.0");
+    std::fs::write(s.layout.highest_seen_file(), b"garbage").unwrap();
+    assert_eq!(read_highest_seen(&s.layout), None);
+}
+
+// ---------------------------------------------------------------------------
+// Guarded start (forwarding).
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FakeGuard {
+    unconfigured: bool,
+    elevated: bool,
+    foreign_folder: bool,
+    /// The shell's signature or PE check fails (a planted payload).
+    unsigned: bool,
+    lock_held: std::rc::Rc<std::cell::Cell<bool>>,
+    verified: std::cell::RefCell<Vec<std::path::PathBuf>>,
+    started: std::cell::RefCell<Vec<(std::path::PathBuf, bool)>>,
+    recovered_with: std::cell::Cell<u32>,
+}
+
+struct Lock(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+impl activation::StartGuard for FakeGuard {
+    fn configured(&self) -> bool {
+        !self.unconfigured
+    }
+    fn elevated(&self) -> bool {
+        self.elevated
+    }
+    fn folder_is_private(&self, _root: &Path) -> bool {
+        !self.foreign_folder
+    }
+    fn is_running(&self, _process: ProcessIdentity) -> bool {
+        self.recovered_with.set(self.recovered_with.get() + 1);
+        false
+    }
+    fn open_verified(&self, shell: &Path) -> Result<Box<dyn std::any::Any>, String> {
+        self.verified.borrow_mut().push(shell.to_path_buf());
+        if self.unsigned {
+            return Err("it is not signed with the release certificate.".to_owned());
+        }
+        self.lock_held.set(true);
+        Ok(Box::new(Lock(self.lock_held.clone())))
+    }
+    fn start(&self, shell: &Path, _arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
+        self.started
+            .borrow_mut()
+            .push((shell.to_path_buf(), self.lock_held.get()));
+        Ok(())
+    }
+}
+
+fn planted(label: &str) -> (Setup, StagedPayload) {
+    let s = setup(label);
+    let new = payload(&s.layout, "1.2.0");
+    make_active(&s.layout, "1.2.0");
+    // An interrupted transaction too, so recovery is observable.
+    (s, new)
+}
+
+fn start_with(s: &Setup, guard: &FakeGuard) -> activation::StartOutcome {
+    activation::start(
+        &s.layout,
+        Path::new(r"C:\portable\marknexia-win32.exe"),
+        &Version::parse("1.0.0").unwrap(),
+        "shell.txt",
+        &[],
+        guard,
+    )
+}
+
+#[test]
+fn a_planted_unsigned_payload_is_never_started() {
+    use activation::{StartOutcome, StayReason};
+    let (s, new) = planted("start-unsigned");
+    let guard = FakeGuard {
+        unsigned: true,
+        ..FakeGuard::default()
+    };
+    assert_eq!(
+        start_with(&s, &guard),
+        StartOutcome::RunHere(StayReason::Unverified(
+            "it is not signed with the release certificate.".to_owned()
+        ))
+    );
+    assert_eq!(guard.verified.borrow().as_slice(), [new.shell]);
+    assert!(guard.started.borrow().is_empty());
+}
+
+#[test]
+fn an_elevated_or_unconfigured_process_never_forwards() {
+    use activation::{StartOutcome, StayReason};
+    for (guard, reason) in [
+        (
+            FakeGuard {
+                elevated: true,
+                ..FakeGuard::default()
+            },
+            StayReason::Elevated,
+        ),
+        (
+            FakeGuard {
+                unconfigured: true,
+                ..FakeGuard::default()
+            },
+            StayReason::NotConfigured,
+        ),
+        (
+            FakeGuard {
+                foreign_folder: true,
+                ..FakeGuard::default()
+            },
+            StayReason::UnsafeFolder,
+        ),
+    ] {
+        let (s, _) = planted("start-refused");
+        // A transaction is pending: it is not touched either.
+        let other = payload(&s.layout, "1.3.0");
+        activation::begin(&s.layout, &other, &nonce(1), process(4_000_005)).unwrap();
+        assert_eq!(start_with(&s, &guard), StartOutcome::RunHere(reason));
+        assert!(guard.verified.borrow().is_empty());
+        assert!(guard.started.borrow().is_empty());
+        assert_eq!(guard.recovered_with.get(), 0);
+        assert!(read_transaction(&s.layout).unwrap().is_some());
+    }
+}
+
+#[test]
+fn a_verified_payload_starts_while_its_handle_is_held() {
+    use activation::StartOutcome;
+    let (s, new) = planted("start-ok");
+    let guard = FakeGuard::default();
+    assert_eq!(
+        start_with(&s, &guard),
+        StartOutcome::Forwarded(new.shell.clone())
+    );
+    assert_eq!(guard.started.borrow().as_slice(), [(new.shell, true)]);
+    assert!(!guard.lock_held.get(), "released after the start");
+    // Without an update folder nothing is checked.
+    let empty = setup("start-none");
+    std::fs::remove_dir_all(empty.layout.root()).unwrap();
+    let guard = FakeGuard::default();
+    assert_eq!(
+        start_with(&empty, &guard),
+        StartOutcome::RunHere(activation::StayReason::NoUpdateFolder)
+    );
 }

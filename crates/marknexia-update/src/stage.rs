@@ -25,7 +25,7 @@ use crate::{
     archive::{self, ArchiveError, ArchiveLimits},
     layout::{Layout, payload_id},
     manifest::{HttpsUrl, Manifest},
-    payload::{self, AllowedExecutable, PayloadError, PayloadPolicy},
+    payload::{self, AllowedExecutable, PayloadError, PayloadPolicy, PublisherPin},
     version::Version,
 };
 
@@ -82,15 +82,19 @@ pub trait StagePlatform {
     /// Creates `path` with a protected DACL that grants its owner only;
     /// fails if it exists.
     fn create_private_dir(&self, path: &Path) -> std::io::Result<()>;
-    /// Checks a staged executable: PE machine `machine` for the shell,
-    /// and the Authenticode signer required by `executable.signer`
-    /// (`publisher` for [`payload::Signer::Release`]).
+    /// An existing folder (for example one left by the .NET updater): fails
+    /// for a reparse point or a folder another account owns; otherwise
+    /// re-applies the protected owner-only DACL.
+    fn secure_existing_dir(&self, path: &Path) -> std::io::Result<()>;
+    /// Checks a staged executable: PE machine `machine`, and the
+    /// Authenticode signer required by `executable.signer` (the pinned
+    /// `publisher` for [`payload::Signer::Release`]).
     fn check_executable(
         &self,
         path: &Path,
         executable: &AllowedExecutable,
         machine: u16,
-        publisher: &str,
+        publisher: &PublisherPin,
     ) -> Result<(), String>;
 }
 
@@ -152,7 +156,7 @@ pub struct StageRequest<'a> {
     pub manifest: &'a Manifest,
     pub policy: &'a PayloadPolicy,
     pub limits: ArchiveLimits,
-    pub publisher: &'a str,
+    pub publisher: &'a PublisherPin,
 }
 
 /// Downloads the artifact, then [`stage_bytes`].
@@ -246,17 +250,22 @@ pub fn stage_bytes(
     staged
 }
 
-fn ensure_private_dir(platform: &dyn StagePlatform, path: &Path) -> Result<(), StageError> {
-    if path.is_dir() {
-        return Ok(());
+/// Creates `path` (and its parents) as an owner-only folder, or checks and
+/// secures an existing one (`StagePlatform::secure_existing_dir`).
+pub fn ensure_private_dir(platform: &dyn StagePlatform, path: &Path) -> Result<(), StageError> {
+    // `symlink_metadata` does not follow a link: a planted link or
+    // junction is passed to the platform check, which refuses it.
+    if std::fs::symlink_metadata(path).is_ok() {
+        return platform.secure_existing_dir(path).map_err(Into::into);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     match platform.create_private_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
-        Err(error) => Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            platform.secure_existing_dir(path).map_err(Into::into)
+        }
+        other => other.map_err(Into::into),
     }
 }
 

@@ -13,6 +13,7 @@ use marknexia_update::{
 };
 use support::*;
 
+const PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MANIFEST_URL: &str = "https://updates.example.test/portable/{arch}/update-manifest-v1.json";
 
 fn release_keys() -> String {
@@ -29,6 +30,7 @@ fn config() -> UpdateConfig {
             manifest_url: Some(MANIFEST_URL),
             allowed_hosts: Some(HOST),
             publisher: Some("Example Publisher"),
+            publisher_thumbprints: Some(PIN),
             public_keys: Some(&keys),
         },
         Architecture::X64,
@@ -60,6 +62,7 @@ fn every_value_is_required_and_the_test_key_is_never_enough() {
         manifest_url: Some(MANIFEST_URL),
         allowed_hosts: Some(HOST),
         publisher: Some("Example Publisher"),
+        publisher_thumbprints: Some(PIN),
         public_keys: Some(&keys),
     };
     let cases = [
@@ -90,6 +93,20 @@ fn every_value_is_required_and_the_test_key_is_never_enough() {
                 ..full
             },
             NotConfigured::MissingPublisher,
+        ),
+        (
+            BuildValues {
+                publisher_thumbprints: Some("not-hex"),
+                ..full
+            },
+            NotConfigured::MissingPublisherPin,
+        ),
+        (
+            BuildValues {
+                publisher_thumbprints: None,
+                ..full
+            },
+            NotConfigured::MissingPublisherPin,
         ),
         // No release keys: only the TEST key, refused.
         (
@@ -185,6 +202,7 @@ fn a_newer_signed_release_is_available_and_an_older_one_is_up_to_date() {
         "1.1.0",
         Architecture::X64,
         22631,
+        None,
         &AtomicBool::new(false),
     )
     .unwrap();
@@ -205,6 +223,7 @@ fn a_newer_signed_release_is_available_and_an_older_one_is_up_to_date() {
                 current,
                 Architecture::X64,
                 22631,
+                None,
                 &AtomicBool::new(false)
             ),
             Ok(CheckOutcome::UpToDate)
@@ -228,6 +247,7 @@ fn tampered_or_unreachable_update_information_is_an_error() {
         "1.1.0",
         Architecture::X64,
         22631,
+        None,
         &AtomicBool::new(false),
     )
     .unwrap_err();
@@ -245,6 +265,7 @@ fn tampered_or_unreachable_update_information_is_an_error() {
             "1.1.0",
             Architecture::X64,
             22631,
+            None,
             &AtomicBool::new(false)
         ),
         Err(CheckError::Download(FetchError::Http(404)))
@@ -260,6 +281,7 @@ fn tampered_or_unreachable_update_information_is_an_error() {
             "1.1.0",
             Architecture::X64,
             22631,
+            None,
             &AtomicBool::new(false)
         ),
         Err(CheckError::Download(FetchError::TooLarge))
@@ -271,11 +293,33 @@ fn tampered_or_unreachable_update_information_is_an_error() {
         "1.1.0",
         Architecture::Arm64,
         22631,
+        None,
         &AtomicBool::new(false),
     )
     .unwrap_err();
     assert_eq!(
         error,
         CheckError::Manifest(ManifestError::WrongArchitecture)
+    );
+}
+
+#[test]
+fn a_frozen_channel_below_the_highest_seen_version_is_refused() {
+    let config = config();
+    let highest = marknexia_update::version::Version::parse("1.3.0").unwrap();
+    let error = check_for_update(
+        &config,
+        &serve(&document("1.2.0", b"zip")),
+        "1.1.0",
+        Architecture::X64,
+        22631,
+        Some(&highest),
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert_eq!(error, CheckError::Manifest(ManifestError::Superseded));
+    assert_eq!(
+        error.message(),
+        "The update information is older than a release Marknexia has already seen, so it was not used."
     );
 }

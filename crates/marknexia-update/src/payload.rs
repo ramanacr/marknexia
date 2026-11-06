@@ -20,11 +20,14 @@ pub struct AllowedExecutable {
     pub is_shell: bool,
 }
 
-/// Required files and allowed executables, by name at the payload root.
+/// The exact payload: required files, optional files and allowed
+/// executables, by relative path. Nothing else may be in the archive (no
+/// `.local`, `.manifest` or `.config` redirection files, no extra folders).
 /// Names compare case-insensitively (Windows file names).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayloadPolicy {
     pub required_files: Vec<String>,
+    pub optional_files: Vec<String>,
     pub executables: Vec<AllowedExecutable>,
 }
 
@@ -76,6 +79,10 @@ impl PayloadPolicy {
     pub fn rust_portable() -> Self {
         Self {
             required_files: vec![SHELL_EXECUTABLE.to_owned(), WEBVIEW_LOADER.to_owned()],
+            optional_files: vec![
+                "README.txt".to_owned(),
+                "THIRD-PARTY-NOTICES.txt".to_owned(),
+            ],
             executables: vec![
                 AllowedExecutable {
                     name: SHELL_EXECUTABLE.to_owned(),
@@ -91,6 +98,27 @@ impl PayloadPolicy {
         }
     }
 
+    fn allows_file(&self, path: &str) -> bool {
+        self.required_files
+            .iter()
+            .chain(&self.optional_files)
+            .chain(self.executables.iter().map(|executable| &executable.name))
+            .any(|allowed| allowed.eq_ignore_ascii_case(path))
+    }
+
+    /// A folder is allowed only as the parent of an allowed file.
+    fn allows_folder(&self, path: &str) -> bool {
+        self.required_files
+            .iter()
+            .chain(&self.optional_files)
+            .chain(self.executables.iter().map(|executable| &executable.name))
+            .any(|allowed| {
+                allowed.len() > path.len()
+                    && allowed.as_bytes()[path.len()] == b'/'
+                    && allowed[..path.len()].eq_ignore_ascii_case(path)
+            })
+    }
+
     /// The executable that is started for the health check.
     #[must_use]
     pub fn shell(&self) -> Option<&AllowedExecutable> {
@@ -104,6 +132,8 @@ impl PayloadPolicy {
 pub enum PayloadError {
     /// An executable that the policy does not allow (or not at the root).
     UnexpectedExecutable(String),
+    /// A file or folder outside the exact payload.
+    UnexpectedFile(String),
     /// The first required file that is missing (.NET order).
     MissingFile(String),
 }
@@ -114,6 +144,9 @@ impl PayloadError {
         match self {
             Self::UnexpectedExecutable(name) => {
                 format!("The update package contains an unexpected executable '{name}'.")
+            }
+            Self::UnexpectedFile(name) => {
+                format!("The update package contains an unexpected file '{name}'.")
             }
             // .NET `ValidatePortablePayload`.
             Self::MissingFile(name) => {
@@ -143,6 +176,16 @@ pub fn check(entries: &[Entry], policy: &PayloadPolicy) -> Result<(), PayloadErr
             return Err(PayloadError::UnexpectedExecutable(entry.path.clone()));
         }
     }
+    for entry in entries {
+        let allowed = if entry.is_dir {
+            policy.allows_folder(&entry.path)
+        } else {
+            policy.allows_file(&entry.path)
+        };
+        if !allowed {
+            return Err(PayloadError::UnexpectedFile(entry.path.clone()));
+        }
+    }
     for required in &policy.required_files {
         if !entries
             .iter()
@@ -152,6 +195,72 @@ pub fn check(entries: &[Entry], policy: &PayloadPolicy) -> Result<(), PayloadErr
         }
     }
     Ok(())
+}
+
+/// The trusted leaf certificate of a staged executable, as the platform's
+/// Authenticode check reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignerCertificate {
+    /// The leaf's simple display name (CN).
+    pub name: String,
+    /// The leaf certificate, DER.
+    pub certificate: Vec<u8>,
+}
+
+/// The release publisher. The identity is an allowlist of SHA-256
+/// thumbprints of the leaf certificate (DER), set at build time like the
+/// keys (several allow a certificate renewal). The leaf name is an extra
+/// check, never the identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublisherPin {
+    pub name: String,
+    pub thumbprints: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinError {
+    /// The certificate is not one of the pinned thumbprints.
+    UnknownCertificate,
+    /// A pinned certificate, but not the configured leaf name.
+    NameMismatch,
+}
+
+impl PinError {
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::UnknownCertificate => "it is not signed with the release certificate.",
+            Self::NameMismatch => "its signer name is not the release publisher.",
+        }
+    }
+}
+
+impl PublisherPin {
+    /// Parses `hex[,hex…]` (64 lower-case hex characters each).
+    #[must_use]
+    pub fn parse_thumbprints(text: &str) -> Option<Vec<[u8; 32]>> {
+        let thumbprints: Option<Vec<[u8; 32]>> = text
+            .split(',')
+            .map(|item| crate::hex::decode::<32>(item.trim()))
+            .collect();
+        thumbprints.filter(|list| !list.is_empty())
+    }
+
+    pub fn accepts(&self, signer: &SignerCertificate) -> Result<(), PinError> {
+        use sha2::Digest;
+        let thumbprint: [u8; 32] = sha2::Sha256::digest(&signer.certificate).into();
+        if !self
+            .thumbprints
+            .iter()
+            .any(|pinned| crate::hex::constant_time_eq(pinned, &thumbprint))
+        {
+            return Err(PinError::UnknownCertificate);
+        }
+        if self.name.is_empty() || signer.name != self.name {
+            return Err(PinError::NameMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// The `IMAGE_FILE_HEADER.Machine` of a PE image, from its first bytes

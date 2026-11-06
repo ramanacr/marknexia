@@ -25,6 +25,7 @@ fn expect<'a>(current: &'a Version, hosts: &'a [String]) -> Expectations<'a> {
         os_build: 22631,
         trusted_hosts: hosts,
         max_byte_length: 256 * 1024 * 1024,
+        highest_seen: None,
     }
 }
 
@@ -329,11 +330,6 @@ fn replay_and_downgrade_are_rejected() {
             Err(ManifestError::NotNewer)
         );
     }
-    // A pre-release of the running version is older.
-    assert_eq!(
-        run(&document("1.0.0-rc.1", ARTIFACT)),
-        Err(ManifestError::NotNewer)
-    );
     for version in ["v1.2.0", "1.2", "1.2.0+build.5", "01.2.0"] {
         let mut document = document("1.2.0", ARTIFACT);
         document.version = version.to_owned();
@@ -343,6 +339,74 @@ fn replay_and_downgrade_are_rejected() {
             "{version}"
         );
     }
+}
+
+#[test]
+fn pre_release_versions_are_refused_on_the_stable_channel() {
+    // Older, newer and much newer pre-releases alike.
+    for version in ["1.0.0-rc.1", "1.2.0-beta", "9.0.0-alpha.1"] {
+        assert_eq!(
+            run(&document(version, ARTIFACT)),
+            Err(ManifestError::PreRelease),
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn a_version_below_the_highest_seen_is_refused() {
+    // 1.2 was seen and verified earlier; a frozen or partially replayed
+    // channel now offers the (vulnerable) 1.1 to a 1.0 installation.
+    let current = Version::parse("1.0.0").unwrap();
+    let highest = Version::parse("1.2.0").unwrap();
+    let hosts = hosts();
+    let mut expectations = expect(&current, &hosts);
+    expectations.highest_seen = Some(&highest);
+    for (version, expected) in [
+        ("1.1.0", Err(ManifestError::Superseded)),
+        ("1.0.0", Err(ManifestError::NotNewer)),
+    ] {
+        let (bytes, signature) = signed(&document(version, ARTIFACT));
+        assert_eq!(
+            verify(&bytes, &signature, &keys(), &expectations).map(|m| m.version),
+            expected,
+            "{version}"
+        );
+    }
+    // The same and higher versions are still offered.
+    for version in ["1.2.0", "1.3.0"] {
+        let (bytes, signature) = signed(&document(version, ARTIFACT));
+        assert!(
+            verify(&bytes, &signature, &keys(), &expectations).is_ok(),
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn weak_or_invalid_public_keys_are_refused() {
+    use marknexia_update::keys::KeyError;
+    let mut keys = KeySet::new();
+    let mut identity = [0_u8; 32];
+    identity[0] = 1;
+    let mut order_two = [0xff_u8; 32];
+    order_two[0] = 0xec;
+    order_two[31] = 0x7f;
+    let mut non_canonical = [0xff_u8; 32];
+    non_canonical[0] = 0xee;
+    non_canonical[31] = 0x7f;
+    for weak in [[0_u8; 32], identity, order_two, non_canonical] {
+        assert_eq!(
+            keys.insert("weak", weak),
+            Err(KeyError::InvalidKey),
+            "{weak:?}"
+        );
+    }
+    assert!(keys.is_empty());
+    assert_eq!(
+        KeySet::parse_list(&format!("k={}", "00".repeat(32))),
+        Err(KeyError::InvalidKey)
+    );
 }
 
 #[test]

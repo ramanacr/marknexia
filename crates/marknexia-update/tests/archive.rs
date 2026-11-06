@@ -84,6 +84,7 @@ pub fn dotnet_policy() -> PayloadPolicy {
         ]
         .map(str::to_owned)
         .to_vec(),
+        optional_files: Vec::new(),
         executables: vec![
             AllowedExecutable {
                 name: "Marknexia.App.exe".to_owned(),
@@ -159,7 +160,7 @@ fn the_fixture_archives_are_rejected_with_the_dotnet_messages() {
             manifest: &manifest,
             policy: &policy,
             limits: ArchiveLimits::default(),
-            publisher: "Example Publisher",
+            publisher: &pin(),
         };
         let platform = FakePlatform::default();
         let result = stage_bytes(
@@ -415,4 +416,76 @@ fn the_pe_machine_reader_matches_this_test_binary() {
     assert_eq!(machine, expected);
     assert_eq!(pe_machine(b"TEST text"), None);
     assert_eq!(pe_machine(b""), None);
+}
+
+#[test]
+fn only_the_exact_payload_file_set_is_accepted() {
+    let policy = PayloadPolicy::rust_portable();
+    let base = [
+        ZipEntry::file("marknexia-win32.exe", b"TEST text"),
+        ZipEntry::file("WebView2Loader.dll", b"TEST text"),
+    ];
+    // DLL redirection and configuration files are refused, as is anything
+    // not in the set (files or folders).
+    for extra in [
+        "marknexia-win32.exe.local",
+        "marknexia-win32.exe.manifest",
+        "marknexia-win32.exe.config",
+        "WebView2Loader.dll.local",
+        "notes.txt",
+        "docs/README.txt",
+        "docs/",
+    ] {
+        let mut entries = base.to_vec();
+        entries.push(ZipEntry::file(extra, b""));
+        let error = payload::check(&list(&zip(&entries)).unwrap(), &policy).unwrap_err();
+        assert_eq!(
+            error,
+            PayloadError::UnexpectedFile(extra.trim_end_matches('/').to_owned()),
+            "{extra}"
+        );
+        assert!(error.message().contains("unexpected file"));
+    }
+    // A folder that holds an allowed file is fine (test policy).
+    payload::check(&list(&text_payload()).unwrap(), &text_policy()).unwrap();
+}
+
+#[test]
+fn the_publisher_is_pinned_by_certificate_thumbprint_and_name() {
+    use marknexia_update::payload::{PinError, PublisherPin, SignerCertificate};
+    let pin = pin();
+    let signer = |name: &str, certificate: &[u8]| SignerCertificate {
+        name: name.to_owned(),
+        certificate: certificate.to_vec(),
+    };
+    assert_eq!(
+        pin.accepts(&signer("Example Publisher", TEST_CERTIFICATE)),
+        Ok(())
+    );
+    // The right name on another certificate (a look-alike CN) is refused.
+    assert_eq!(
+        pin.accepts(&signer("Example Publisher", b"another certificate")),
+        Err(PinError::UnknownCertificate)
+    );
+    // The pinned certificate under another name is refused too.
+    assert_eq!(
+        pin.accepts(&signer("Example Publisher Ltd", TEST_CERTIFICATE)),
+        Err(PinError::NameMismatch)
+    );
+    let unnamed = PublisherPin {
+        name: String::new(),
+        ..pin.clone()
+    };
+    assert_eq!(
+        unnamed.accepts(&signer("", TEST_CERTIFICATE)),
+        Err(PinError::NameMismatch)
+    );
+    assert_eq!(PublisherPin::parse_thumbprints(""), None);
+    assert_eq!(PublisherPin::parse_thumbprints("abcd"), None);
+    assert_eq!(PublisherPin::parse_thumbprints(&"A".repeat(64)), None);
+    assert_eq!(
+        PublisherPin::parse_thumbprints(&format!("{},{}", "a".repeat(64), "b".repeat(64)))
+            .map(|list| list.len()),
+        Some(2)
+    );
 }

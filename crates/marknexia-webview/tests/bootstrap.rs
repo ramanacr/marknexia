@@ -157,25 +157,6 @@ fn an_exact_host_list_applies_to_the_url_and_every_redirect() {
 }
 
 #[test]
-fn the_publisher_check_is_exact_and_never_matches_an_empty_name() {
-    use marknexia_webview::bootstrap::is_expected_publisher;
-    assert!(is_expected_publisher(
-        "Example Publisher",
-        "Example Publisher"
-    ));
-    assert!(!is_expected_publisher(
-        "Example Publisher Ltd",
-        "Example Publisher"
-    ));
-    assert!(!is_expected_publisher(
-        "example publisher",
-        "Example Publisher"
-    ));
-    assert!(!is_expected_publisher("", ""));
-    assert!(!is_expected_publisher("Example Publisher", ""));
-}
-
-#[test]
 fn accepted_urls_are_normalized() {
     let url = DownloadUrl::parse("HTTPS://Go.Microsoft.COM:443?x=1#frag").expect("valid");
     assert_eq!(url.host(), "go.microsoft.com");

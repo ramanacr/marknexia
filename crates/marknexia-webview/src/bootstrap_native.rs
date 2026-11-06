@@ -72,7 +72,7 @@ use windows::{
 use crate::bootstrap::{
     BootstrapperDownloader, BoundedBody, DownloadError, DownloadLimits, DownloadUrl,
     INSTALLER_ARGUMENTS, IdentityError, InstallError, InstallerRunner, MAX_REDIRECTS,
-    SignatureError, SignatureVerifier, StagedFile, VersionInfo, VersionInfoReader,
+    SignatureError, SignatureVerifier, SignerIdentity, StagedFile, VersionInfo, VersionInfoReader,
     classify_exit_code, classify_network_error, has_code_signing_usage, is_microsoft_signer,
 };
 
@@ -555,24 +555,24 @@ impl SignatureVerifier for AuthenticodeVerifier {
     }
 }
 
-/// Authenticode for a named publisher: the same `WinVerifyTrust` call as
-/// [`AuthenticodeVerifier`], then, before the state is closed, an explicit
-/// code-signing usage on the leaf and a leaf simple display name equal to
-/// `publisher` (exact, case-sensitive). No Microsoft root policy: the
-/// publisher's chain only has to be trusted by Windows. Used by the
-/// portable updater for its staged executables.
-pub fn verify_publisher(file: &StagedFile, publisher: &str) -> Result<(), SignatureError> {
-    // SAFETY: `check_publisher` gets the live state of a successful verify.
-    verify_trust(file, |state| unsafe { check_publisher(state, publisher) })
+/// Authenticode for the portable updater: the same `WinVerifyTrust` call as
+/// [`AuthenticodeVerifier`] (through the file's lock handle), then, before
+/// the state is closed, an explicit code-signing usage on the leaf. Returns
+/// the leaf's simple display name and DER encoding, so the caller can pin
+/// the publisher by certificate thumbprint. No Microsoft root policy: the
+/// publisher's chain only has to be trusted by Windows.
+pub fn verify_signer(file: &StagedFile) -> Result<SignerIdentity, SignatureError> {
+    // SAFETY: `read_signer` gets the live state of a successful verify.
+    verify_trust(file, |state| unsafe { read_signer(state) })
 }
 
 /// `WinVerifyTrust` (generic verify v2, whole-chain revocation, no UI) on
 /// `file`, through its lock handle when it has one; `check` runs on the
 /// state data before the state is closed.
-fn verify_trust(
+fn verify_trust<T>(
     file: &StagedFile,
-    check: impl FnOnce(HANDLE) -> Result<(), SignatureError>,
-) -> Result<(), SignatureError> {
+    check: impl FnOnce(HANDLE) -> Result<T, SignatureError>,
+) -> Result<T, SignatureError> {
     {
         let path = wide_path(file.path());
         let handle = file
@@ -628,11 +628,11 @@ fn verify_trust(
     }
 }
 
-/// The publisher check of [`verify_publisher`].
+/// The leaf of [`verify_signer`].
 ///
 /// # Safety
 /// `state` must be the live state data of a successful verify call.
-unsafe fn check_publisher(state: HANDLE, publisher: &str) -> Result<(), SignatureError> {
+unsafe fn read_signer(state: HANDLE) -> Result<SignerIdentity, SignatureError> {
     // SAFETY: per the contract, `state` is live; the helpers return
     // pointers into it (or null), valid until the state is closed.
     unsafe {
@@ -652,12 +652,14 @@ unsafe fn check_publisher(state: HANDLE, publisher: &str) -> Result<(), Signatur
         if !has_code_signing_usage(&enhanced_key_usages(leaf_certificate)) {
             return Err(SignatureError::NoCodeSigningUsage);
         }
-        let leaf = certificate_name(leaf_certificate).ok_or(SignatureError::NoSigner)?;
-        if crate::bootstrap::is_expected_publisher(&leaf, publisher) {
-            Ok(())
-        } else {
-            Err(SignatureError::UnexpectedPublisher { signer: leaf })
+        let name = certificate_name(leaf_certificate).ok_or(SignatureError::NoSigner)?;
+        let leaf = leaf_certificate.as_ref().ok_or(SignatureError::NoSigner)?;
+        if leaf.pbCertEncoded.is_null() || leaf.cbCertEncoded == 0 {
+            return Err(SignatureError::NoSigner);
         }
+        let certificate =
+            std::slice::from_raw_parts(leaf.pbCertEncoded, leaf.cbCertEncoded as usize).to_vec();
+        Ok(SignerIdentity { name, certificate })
     }
 }
 

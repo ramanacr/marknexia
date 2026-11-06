@@ -60,7 +60,7 @@ fn a_verified_payload_is_staged_side_by_side() {
         manifest: &manifest,
         policy: &policy,
         limits: ArchiveLimits::default(),
-        publisher: "Example Publisher",
+        publisher: &pin(),
     };
     let staged = download_and_stage(
         &request,
@@ -121,7 +121,7 @@ fn a_hash_or_length_mismatch_is_rejected_before_anything_is_written() {
         manifest: &manifest,
         policy: &policy,
         limits: ArchiveLimits::default(),
-        publisher: "Example Publisher",
+        publisher: &pin(),
     };
     let cancel = AtomicBool::new(false);
     assert_eq!(
@@ -168,7 +168,7 @@ fn an_authenticode_or_architecture_failure_discards_the_stage() {
             manifest: &manifest,
             policy: &policy,
             limits: ArchiveLimits::default(),
-            publisher: "Example Publisher",
+            publisher: &pin(),
         };
         let error = stage_bytes(
             &bytes,
@@ -209,7 +209,7 @@ fn interrupted_downloads_leave_nothing_behind() {
             manifest: &manifest,
             policy: &policy,
             limits: ArchiveLimits::default(),
-            publisher: "Example Publisher",
+            publisher: &pin(),
         };
         assert_eq!(
             download_and_stage(
@@ -233,7 +233,7 @@ fn interrupted_downloads_leave_nothing_behind() {
         manifest: &manifest,
         policy: &policy,
         limits: ArchiveLimits::default(),
-        publisher: "p",
+        publisher: &pin(),
     };
     assert_eq!(
         download_and_stage(
@@ -280,12 +280,15 @@ fn interrupted_staging_removes_the_pending_folder_and_keeps_others() {
         fn create_private_dir(&self, path: &std::path::Path) -> std::io::Result<()> {
             self.inner.create_private_dir(path)
         }
+        fn secure_existing_dir(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.secure_existing_dir(path)
+        }
         fn check_executable(
             &self,
             path: &std::path::Path,
             executable: &marknexia_update::payload::AllowedExecutable,
             machine: u16,
-            publisher: &str,
+            publisher: &marknexia_update::payload::PublisherPin,
         ) -> Result<(), String> {
             self.cancel
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -302,7 +305,7 @@ fn interrupted_staging_removes_the_pending_folder_and_keeps_others() {
         manifest: &manifest,
         policy: &policy,
         limits: ArchiveLimits::default(),
-        publisher: "p",
+        publisher: &pin(),
     };
     assert_eq!(
         stage_bytes(&bytes, &request, &s.layout, &platform, &cancel),
@@ -343,7 +346,7 @@ fn a_leftover_folder_for_the_same_version_is_replaced() {
         manifest: &manifest,
         policy: &policy,
         limits: ArchiveLimits::default(),
-        publisher: "p",
+        publisher: &pin(),
     };
     let staged = stage_bytes(
         &bytes,
@@ -355,4 +358,54 @@ fn a_leftover_folder_for_the_same_version_is_replaced() {
     .unwrap();
     assert!(!staged.directory.join("planted.txt").exists());
     assert!(staged.directory.join("shell.txt").is_file());
+}
+
+#[test]
+fn an_existing_update_folder_is_secured_or_refused() {
+    // A folder left by the .NET updater is re-secured (owner-only DACL).
+    let s = setup("stage-existing");
+    std::fs::create_dir_all(s.layout.root().join("pending-dotnet")).unwrap();
+    let bytes = text_payload();
+    let manifest = manifest_for(&bytes, "1.2.0");
+    let policy = text_policy();
+    let request = StageRequest {
+        manifest: &manifest,
+        policy: &policy,
+        limits: ArchiveLimits::default(),
+        publisher: &pin(),
+    };
+    let platform = FakePlatform::default();
+    stage_bytes(
+        &bytes,
+        &request,
+        &s.layout,
+        &platform,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        platform
+            .secured
+            .borrow()
+            .contains(&s.layout.root().to_path_buf())
+    );
+    // A folder owned by another account (or a reparse point) is refused
+    // before anything is written.
+    let s = setup("stage-foreign");
+    std::fs::create_dir_all(s.layout.root()).unwrap();
+    let platform = FakePlatform {
+        foreign: vec![s.layout.root().to_path_buf()],
+        ..FakePlatform::default()
+    };
+    assert_eq!(
+        stage_bytes(
+            &bytes,
+            &request,
+            &s.layout,
+            &platform,
+            &AtomicBool::new(false)
+        ),
+        Err(StageError::Io(std::io::ErrorKind::PermissionDenied))
+    );
+    assert!(!s.layout.staging().exists());
 }

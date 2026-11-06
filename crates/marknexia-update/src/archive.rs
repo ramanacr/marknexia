@@ -329,9 +329,41 @@ fn check_name(name: &str, limits: &ArchiveLimits) -> Result<(String, bool), Arch
 }
 
 fn valid_segment(segment: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    // Win32 device names, including CONIN$/CONOUT$, COM0/LPT0 and the
+    // superscript-digit forms (COM¹–³, LPT¹–³) that Windows also maps.
+    const RESERVED: [&str; 32] = [
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        "conin$",
+        "conout$",
+        "com0",
+        "com1",
+        "com2",
+        "com3",
+        "com4",
+        "com5",
+        "com6",
+        "com7",
+        "com8",
+        "com9",
+        "com\u{b9}",
+        "com\u{b2}",
+        "com\u{b3}",
+        "lpt0",
+        "lpt1",
+        "lpt2",
+        "lpt3",
+        "lpt4",
+        "lpt5",
+        "lpt6",
+        "lpt7",
+        "lpt8",
+        "lpt9",
+        "lpt\u{b9}",
+        "lpt\u{b2}",
+        "lpt\u{b3}",
     ];
     if segment.is_empty() || segment == "." || segment.ends_with(['.', ' ']) {
         return false;
@@ -347,7 +379,7 @@ fn valid_segment(segment: &str) -> bool {
         .next()
         .unwrap_or_default()
         .trim_end()
-        .to_ascii_lowercase();
+        .to_lowercase();
     !RESERVED.contains(&stem.as_str())
 }
 
@@ -475,6 +507,13 @@ mod tests {
             ("nul", ArchiveError::InvalidPath),
             ("CON.txt", ArchiveError::InvalidPath),
             ("dir/LPT1", ArchiveError::InvalidPath),
+            ("CONIN$", ArchiveError::InvalidPath),
+            ("conout$.txt", ArchiveError::InvalidPath),
+            ("com0", ArchiveError::InvalidPath),
+            ("LPT0.log", ArchiveError::InvalidPath),
+            ("COM\u{b9}", ArchiveError::InvalidPath),
+            ("lpt\u{b3}.txt", ArchiveError::InvalidPath),
+            ("Com\u{b2} .txt", ArchiveError::InvalidPath),
             ("trailing.", ArchiveError::InvalidPath),
             ("trailing ", ArchiveError::InvalidPath),
             ("a?b", ArchiveError::InvalidPath),

@@ -88,6 +88,12 @@ impl Layout {
         self.root.join("last-update-failure.json")
     }
 
+    /// The highest version seen in a verified manifest.
+    #[must_use]
+    pub fn highest_seen_file(&self) -> PathBuf {
+        self.root.join("highest-seen.json")
+    }
+
     /// `versions\<id>`; `id` must pass [`is_payload_id`].
     #[must_use]
     pub fn payload(&self, id: &str) -> PathBuf {
@@ -99,6 +105,16 @@ impl Layout {
 #[must_use]
 pub fn payload_id(version: &Version, architecture: Architecture) -> String {
     format!("{version}-{}", architecture.asset_token())
+}
+
+/// The version text of a payload id (`1.2.0` for `1.2.0-x64`).
+#[must_use]
+pub fn payload_version(id: &str) -> Option<&str> {
+    ["x64", "arm64"].iter().find_map(|token| {
+        id.strip_suffix(token)
+            .and_then(|rest| rest.strip_suffix('-'))
+            .filter(|version| Version::parse(version).is_ok())
+    })
 }
 
 /// A payload folder name the updater could have created. Only such names

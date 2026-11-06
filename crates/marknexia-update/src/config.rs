@@ -9,7 +9,8 @@
 //! | --- | --- |
 //! | `MARKNEXIA_UPDATE_MANIFEST_URL` | `https://<host>/<path>/update-manifest-v1.json`; `{arch}` is replaced by `x64` or `arm64`. The signature is the same URL plus `.ed25519`. |
 //! | `MARKNEXIA_UPDATE_ALLOWED_HOSTS` | Comma-separated lower-case host names (exact match) for the manifest, the artifact and every redirect. |
-//! | `MARKNEXIA_UPDATE_PUBLISHER` | The Authenticode leaf subject name of the release publisher. |
+//! | `MARKNEXIA_UPDATE_PUBLISHER` | The release publisher's Authenticode leaf name (an extra check). |
+//! | `MARKNEXIA_UPDATE_PUBLISHER_SHA256` | Comma-separated SHA-256 thumbprints (64 lower-case hex) of the release signing certificate(s), DER: the publisher identity. |
 //! | `MARKNEXIA_UPDATE_PUBLIC_KEYS` | `keyId=<64 hex>[,…]`: release Ed25519 PUBLIC keys. Unset: the TEST key. |
 //!
 //! A configuration that trusts the TEST key (whose private seed is public)
@@ -18,6 +19,7 @@
 use crate::{
     keys::{KeyError, KeySet},
     manifest::{Architecture, HttpsUrl},
+    payload::PublisherPin,
 };
 
 /// Shown when the build has no update channel (the default).
@@ -28,6 +30,8 @@ pub enum NotConfigured {
     MissingManifestUrl,
     MissingHosts,
     MissingPublisher,
+    /// No valid certificate thumbprint pins the publisher.
+    MissingPublisherPin,
     /// Only the TEST key (or the TEST key among others) would be trusted.
     TestKey,
     InvalidKeys(KeyError),
@@ -48,7 +52,7 @@ pub struct UpdateConfig {
     pub manifest_url: HttpsUrl,
     pub signature_url: HttpsUrl,
     pub allowed_hosts: Vec<String>,
-    pub publisher: String,
+    pub publisher: PublisherPin,
     pub keys: KeySet,
 }
 
@@ -58,6 +62,7 @@ pub struct BuildValues<'a> {
     pub manifest_url: Option<&'a str>,
     pub allowed_hosts: Option<&'a str>,
     pub publisher: Option<&'a str>,
+    pub publisher_thumbprints: Option<&'a str>,
     pub public_keys: Option<&'a str>,
 }
 
@@ -69,6 +74,7 @@ impl BuildValues<'static> {
             manifest_url: option_env!("MARKNEXIA_UPDATE_MANIFEST_URL"),
             allowed_hosts: option_env!("MARKNEXIA_UPDATE_ALLOWED_HOSTS"),
             publisher: option_env!("MARKNEXIA_UPDATE_PUBLISHER"),
+            publisher_thumbprints: option_env!("MARKNEXIA_UPDATE_PUBLISHER_SHA256"),
             public_keys: option_env!("MARKNEXIA_UPDATE_PUBLIC_KEYS"),
         }
     }
@@ -99,9 +105,13 @@ impl UpdateConfig {
         if allowed_hosts.is_empty() {
             return Err(NotConfigured::MissingHosts);
         }
-        let publisher = present(values.publisher)
+        let name = present(values.publisher)
             .ok_or(NotConfigured::MissingPublisher)?
             .to_owned();
+        let thumbprints = present(values.publisher_thumbprints)
+            .and_then(PublisherPin::parse_thumbprints)
+            .ok_or(NotConfigured::MissingPublisherPin)?;
+        let publisher = PublisherPin { name, thumbprints };
         let keys = match present(values.public_keys) {
             Some(list) => KeySet::parse_list(list).map_err(NotConfigured::InvalidKeys)?,
             None => KeySet::test_only(),

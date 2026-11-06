@@ -16,7 +16,7 @@ use marknexia_update::{
     activation::{Clock, LaunchedChild, Launcher, Nonce},
     keys::KeySet,
     manifest::{Architecture, HttpsUrl, ManifestDocument, SignatureDocument, artifact_name},
-    payload::{AllowedExecutable, PayloadPolicy, Signer},
+    payload::{AllowedExecutable, PayloadPolicy, PublisherPin, Signer},
     stage::{FetchError, Fetcher, StagePlatform},
     version::Version,
 };
@@ -180,11 +180,24 @@ pub fn zip(entries: &[ZipEntry]) -> Vec<u8> {
     out
 }
 
+/// TEST certificate bytes (not a real certificate) and the pin that
+/// accepts them.
+pub const TEST_CERTIFICATE: &[u8] = b"TEST signing certificate placeholder, not DER";
+
+pub fn pin() -> PublisherPin {
+    let thumbprint = marknexia_update::hex::decode(&sha256_hex(TEST_CERTIFICATE)).unwrap();
+    PublisherPin {
+        name: "Example Publisher".to_owned(),
+        thumbprints: vec![thumbprint],
+    }
+}
+
 /// A non-executable test payload policy: the "shell" and "loader" are
 /// text files, so staging tests never write a `.exe` or `.dll`.
 pub fn text_policy() -> PayloadPolicy {
     PayloadPolicy {
         required_files: vec!["shell.txt".to_owned(), "loader.txt".to_owned()],
+        optional_files: vec!["docs/README.txt".to_owned()],
         executables: vec![
             AllowedExecutable {
                 name: "shell.txt".to_owned(),
@@ -250,6 +263,9 @@ pub struct FakePlatform {
     pub reject: HashMap<String, String>,
     pub checked: RefCell<Vec<(PathBuf, u16, String)>>,
     pub private_dirs: RefCell<Vec<PathBuf>>,
+    /// Existing folders the fake treats as owned by another account.
+    pub foreign: Vec<PathBuf>,
+    pub secured: RefCell<Vec<PathBuf>>,
 }
 
 impl StagePlatform for FakePlatform {
@@ -259,18 +275,26 @@ impl StagePlatform for FakePlatform {
         Ok(())
     }
 
+    fn secure_existing_dir(&self, path: &Path) -> std::io::Result<()> {
+        if self.foreign.iter().any(|foreign| foreign == path) {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        self.secured.borrow_mut().push(path.to_path_buf());
+        Ok(())
+    }
+
     fn check_executable(
         &self,
         path: &Path,
         executable: &AllowedExecutable,
         machine: u16,
-        publisher: &str,
+        publisher: &PublisherPin,
     ) -> Result<(), String> {
         // The check runs on the extracted file.
         assert!(path.is_file(), "{}", path.display());
         self.checked
             .borrow_mut()
-            .push((path.to_path_buf(), machine, publisher.to_owned()));
+            .push((path.to_path_buf(), machine, publisher.name.clone()));
         match self.reject.get(&executable.name) {
             Some(reason) => Err(reason.clone()),
             None => Ok(()),
