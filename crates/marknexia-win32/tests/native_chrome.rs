@@ -827,6 +827,11 @@ impl Drop for ExplorerWindows {
         while Instant::now() < deadline && !self.opened().is_empty() {
             thread::sleep(Duration::from_millis(100));
         }
+        // Ending processes is only for disposable CI runners: on a developer
+        // desktop a new explorer.exe may be the user's own shell restarting.
+        if !shell_support::on_github_actions() {
+            return;
+        }
         for process in explorer_processes()
             .into_iter()
             .filter(|process| !self.processes.contains(process))
