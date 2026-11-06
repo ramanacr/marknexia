@@ -72,6 +72,15 @@ enum Work {
     Drop(String),
     /// `WM_APPLY_WEBVIEW_SELECTION` dispatched inside a nested pump.
     Selection(u64),
+    /// A UIA Select that arrived while the state was busy.
+    AutomationSelect(TabId),
+    /// The tab strip painted while busy (validate only): repaint it.
+    Repaint,
+    /// Tab-strip pointer input that arrived while the state was busy, in
+    /// order: (strip window, x).
+    TabDown(isize, i32),
+    TabUp(isize, i32),
+    TabMiddle(isize, i32),
     Reflow(u32),
     RenderResults,
     Theme,
@@ -87,6 +96,27 @@ thread_local! {
 /// `window.rs`: a WebView selection switch that must wait for the loop.
 pub(super) fn defer_selection(raw: u64) {
     defer(Work::Selection(raw));
+}
+
+/// `window.rs`: a UIA Select that arrived while an outer frame held the
+/// state. It is acknowledged (S_OK, like the deferred WebView switch) and
+/// applied from the message loop, which raises `ElementSelected` then.
+pub(super) fn defer_automation_select(tab: TabId) {
+    defer(Work::AutomationSelect(tab));
+}
+
+/// `window.rs`: repaint the tab strip from the message loop.
+pub(super) fn defer_repaint() {
+    defer(Work::Repaint);
+}
+
+/// True while an outer frame holds the state behind `strip`'s parent.
+fn strip_busy(strip: HWND) -> bool {
+    // SAFETY: `strip` is this thread's tab strip.
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }
+        .ok()
+        .and_then(handle)
+        .is_some_and(|state| busy(&state))
 }
 
 /// `window.rs`: a layout requested while an outer frame held the state.
@@ -150,6 +180,20 @@ pub(super) fn run_deferred(hwnd: HWND) {
             }
             Work::Drop(path) => on_dropped_path(hwnd, path),
             Work::Selection(raw) => apply_automation_selection(hwnd, raw),
+            // A tab closed since the request is dropped.
+            Work::AutomationSelect(tab) => {
+                if handle(hwnd).is_some_and(|state| tab_by_raw(&state, tab.get()).is_some()) {
+                    let _ = select_from_automation(hwnd, tab);
+                }
+            }
+            Work::Repaint => {
+                if let Some(state) = handle(hwnd) {
+                    refresh_tabs(&state, None);
+                }
+            }
+            Work::TabDown(strip, x) => on_tab_button_down(HWND(strip as *mut c_void), x),
+            Work::TabUp(strip, x) => on_tab_button_up(HWND(strip as *mut c_void), x),
+            Work::TabMiddle(strip, x) => on_tab_middle_click(HWND(strip as *mut c_void), x),
             Work::Reflow(dpi) => reflow(hwnd, dpi),
             Work::RenderResults => apply_render_results(hwnd),
             Work::Theme => {
@@ -949,8 +993,9 @@ fn strip(strip: HWND) -> Option<Strip> {
     })
 }
 
-/// `None` also while an outer frame holds the state: pointer input that
-/// arrives then is ignored.
+/// `None` also while an outer frame holds the state. Button input checks
+/// that first and is queued (`strip_busy`); only drag moves and capture loss
+/// are ignored then (a drag continues with the next move).
 fn strip_context(strip: HWND) -> Option<(HWND, Rc<RefCell<AppState>>, i32, i32)> {
     // SAFETY: `strip` is this thread's tab strip.
     let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
@@ -974,6 +1019,13 @@ fn tab_ids(state: &Rc<RefCell<AppState>>) -> Vec<TabId> {
 /// `WM_LBUTTONDOWN` on the tab strip: a body press selects (as before) and
 /// may start a drag; a close-button press closes on release.
 pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
+    // A click is never lost: while busy it is queued with its position, and
+    // its button-up after it, so a click (or a close-button click) completes
+    // from the message loop. Only drag moves are dropped meanwhile.
+    if strip_busy(strip_window) {
+        defer(Work::TabDown(strip_window.0 as isize, x));
+        return;
+    }
     let Some(Strip {
         parent,
         state,
@@ -1053,6 +1105,10 @@ pub(super) fn on_tab_mouse_move(strip: HWND, x: i32) {
 /// `WM_LBUTTONUP`: ends a drag, or closes the tab when the press started
 /// and ended on the same close button.
 pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
+    if strip_busy(strip_window) {
+        defer(Work::TabUp(strip_window.0 as isize, x));
+        return;
+    }
     let Some(Strip {
         parent,
         state,
@@ -1081,6 +1137,10 @@ pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
 /// `WM_MBUTTONUP`: a middle click anywhere on a tab closes it, like a
 /// closable WinUI `TabViewItem`.
 pub(super) fn on_tab_middle_click(strip_window: HWND, x: i32) {
+    if strip_busy(strip_window) {
+        defer(Work::TabMiddle(strip_window.0 as isize, x));
+        return;
+    }
     let Some(Strip {
         parent,
         state,

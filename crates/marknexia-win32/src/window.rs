@@ -1990,12 +1990,18 @@ fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return false;
     };
-    // UIA can call in while an outer frame holds the state (a nested pump):
-    // refuse (UIA_E_INVALIDOPERATION) instead of panicking.
+    // UIA can call in while an outer frame holds the state (a nested pump).
+    // A shared outer borrow still lets the portable selection change now,
+    // so IsSelected agrees on return; only the repaint waits for the loop.
+    // When even that is impossible, UIA clients (which do not retry) get
+    // S_OK and the selection is applied from the message loop, like the
+    // deferred WebView switch; it raises ElementSelected then. A tab closed
+    // meanwhile is dropped.
     let Some(portable) = crate::reentry::read(&state, |state| Rc::clone(&state.portable))
-        .filter(|portable| crate::reentry::is_free(portable) && crate::reentry::is_free(&state))
+        .filter(|portable| crate::reentry::is_free(portable))
     else {
-        return false;
+        input::defer_automation_select(id);
+        return true;
     };
     let already_active = portable.borrow().active_tab() == Some(id);
     if already_active {
@@ -2006,6 +2012,10 @@ fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
         return false;
     }
     refresh_tabs(&state, Some(id));
+    if !crate::reentry::is_free(&state) {
+        // The strip could only validate its paint: repaint from the loop.
+        input::defer_repaint();
+    }
     let posted = unsafe {
         PostMessageW(
             Some(hwnd),
