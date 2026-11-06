@@ -30,16 +30,48 @@ pub fn write<T, R>(cell: &RefCell<T>, work: impl FnOnce(&mut T) -> R) -> Option<
     cell.try_borrow_mut().ok().map(|mut value| work(&mut value))
 }
 
-/// Work that arrived while the state was busy, in arrival order, bounded.
-/// The queue lives outside the state, so queueing never conflicts with the
-/// outer borrow.
+/// How a deferred item joins the queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Admission {
+    /// Idempotent work (a repaint, a layout): an item of the same kind that
+    /// is already queued is replaced, so it is queued at most once.
+    Coalesce,
+    /// Work that must never be lost (a close, a selection, a button-up): an
+    /// identical item already queued is kept, otherwise it is queued even
+    /// past the limit. Its count is bounded by what it refers to (tabs).
+    Critical,
+    /// Other input: queued while there is room, otherwise dropped (and the
+    /// caller logs it).
+    Bounded,
+}
+
+/// A deferred item's queueing rules.
+pub trait Queued {
+    fn admission(&self) -> Admission;
+    /// Same kind for [`Admission::Coalesce`], identical otherwise.
+    fn same(&self, other: &Self) -> bool;
+}
+
+/// What [`Deferred::push`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pushed {
+    Queued,
+    /// Replaced or matched an item already queued.
+    Coalesced,
+    /// The queue was full (only for [`Admission::Bounded`]).
+    Dropped,
+}
+
+/// Work that arrived while the state was busy, in arrival order. The queue
+/// lives outside the state, so queueing never conflicts with the outer
+/// borrow.
 #[derive(Debug)]
 pub struct Deferred<T> {
     items: RefCell<VecDeque<T>>,
     limit: usize,
 }
 
-impl<T> Deferred<T> {
+impl<T: Queued> Deferred<T> {
     #[must_use]
     pub const fn new(limit: usize) -> Self {
         Self {
@@ -48,15 +80,32 @@ impl<T> Deferred<T> {
         }
     }
 
-    /// Queues `item`; returns false (and drops it) when the queue is full.
-    pub fn push(&self, item: T) -> bool {
-        match self.items.try_borrow_mut() {
-            Ok(mut items) if items.len() < self.limit => {
-                items.push_back(item);
-                true
+    /// Queues `item` by its [`Admission`].
+    pub fn push(&self, item: T) -> Pushed {
+        let Ok(mut items) = self.items.try_borrow_mut() else {
+            // Only reachable if pushing re-entered a push; never panics.
+            return Pushed::Dropped;
+        };
+        match item.admission() {
+            Admission::Coalesce => {
+                if let Some(slot) = items.iter_mut().find(|queued| queued.same(&item)) {
+                    *slot = item;
+                    return Pushed::Coalesced;
+                }
             }
-            _ => false,
+            Admission::Critical => {
+                if items.iter().any(|queued| queued.same(&item)) {
+                    return Pushed::Coalesced;
+                }
+            }
+            Admission::Bounded => {
+                if items.len() >= self.limit {
+                    return Pushed::Dropped;
+                }
+            }
         }
+        items.push_back(item);
+        Pushed::Queued
     }
 
     /// Takes everything queued so far. Work queued while the taken items run
@@ -83,17 +132,42 @@ impl<T> Deferred<T> {
 mod tests {
     use super::*;
 
+    #[derive(Debug, PartialEq)]
+    enum Item {
+        Close(u64),
+        Repaint,
+        Layout(u32),
+        Click(u32),
+    }
+
+    impl Queued for Item {
+        fn admission(&self) -> Admission {
+            match self {
+                Self::Close(_) => Admission::Critical,
+                Self::Repaint | Self::Layout(_) => Admission::Coalesce,
+                Self::Click(_) => Admission::Bounded,
+            }
+        }
+
+        fn same(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Layout(_), Self::Layout(_)) => true,
+                _ => self == other,
+            }
+        }
+    }
+
     #[derive(Default)]
     struct State {
         closes: Vec<u64>,
     }
 
     /// The shape of the shell's crash: a handler that needs the state runs
-    /// while an outer frame holds a shared borrow (a nested pump). It must
-    /// defer, not panic, and the work runs once the outer frame returns.
-    fn close_handler(state: &RefCell<State>, deferred: &Deferred<u64>, tab: u64) {
+    /// while an outer frame holds a borrow (a nested pump). It must defer,
+    /// not panic, and the work runs once the outer frame returns.
+    fn close_handler(state: &RefCell<State>, deferred: &Deferred<Item>, tab: u64) {
         if !is_free(state) {
-            assert!(deferred.push(tab));
+            assert_eq!(deferred.push(Item::Close(tab)), Pushed::Queued);
             return;
         }
         write(state, |state| state.closes.push(tab)).expect("free");
@@ -116,7 +190,8 @@ mod tests {
         }
         assert_eq!(deferred.len(), 2);
         // Back at the top of the message loop: the queue runs in order.
-        for tab in deferred.take() {
+        for item in deferred.take() {
+            let Item::Close(tab) = item else { panic!() };
             close_handler(&state, &deferred, tab);
         }
         assert_eq!(state.borrow().closes, [7, 8]);
@@ -124,12 +199,30 @@ mod tests {
     }
 
     #[test]
-    fn the_deferred_queue_is_bounded() {
+    fn idempotent_work_coalesces_and_critical_work_is_never_dropped() {
         let deferred = Deferred::new(2);
-        assert!(deferred.push(1));
-        assert!(deferred.push(2));
-        assert!(!deferred.push(3));
-        assert_eq!(deferred.take(), [1, 2]);
+        assert_eq!(deferred.push(Item::Click(1)), Pushed::Queued);
+        assert_eq!(deferred.push(Item::Layout(96)), Pushed::Queued);
+        // Full: bounded input is dropped, the rest is not.
+        assert_eq!(deferred.push(Item::Click(2)), Pushed::Dropped);
+        assert_eq!(deferred.push(Item::Layout(144)), Pushed::Coalesced);
+        assert_eq!(deferred.push(Item::Repaint), Pushed::Queued);
+        assert_eq!(deferred.push(Item::Repaint), Pushed::Coalesced);
+        assert_eq!(deferred.push(Item::Close(3)), Pushed::Queued);
+        assert_eq!(deferred.push(Item::Close(3)), Pushed::Coalesced);
+        assert_eq!(deferred.push(Item::Close(4)), Pushed::Queued);
+        // Order is kept; a coalesced layout keeps its place with the latest
+        // value.
+        assert_eq!(
+            deferred.take(),
+            [
+                Item::Click(1),
+                Item::Layout(144),
+                Item::Repaint,
+                Item::Close(3),
+                Item::Close(4)
+            ]
+        );
         assert!(deferred.take().is_empty());
     }
 }

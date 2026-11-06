@@ -60,7 +60,7 @@ use windows::{
                 GetWindowLongPtrW, GetWindowTextW, IDC_ARROW, LoadCursorW, MSG, PostMessageW,
                 PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
                 SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND,
                 WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
                 WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN,
                 WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
@@ -802,6 +802,12 @@ impl AppState {
 }
 
 fn open_from_dialog(hwnd: HWND) {
+    // WM_OPEN_DIALOG dispatched by a nested pump while an outer frame holds
+    // the state: open the dialog from the message loop instead.
+    if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !crate::reentry::is_free(&state)) {
+        input::defer_open_dialog();
+        return;
+    }
     // No AppState borrow is held: the dialog runs a nested modal loop.
     match show_open_dialog(hwnd) {
         Ok(paths) => {
@@ -1049,6 +1055,15 @@ unsafe extern "system" fn window_proc(
             apply_render_results(hwnd);
             LRESULT(0)
         }
+        // WM_CLOSE dispatched by a nested pump while an outer frame holds
+        // the state: close from the message loop (WM_DESTROY needs it).
+        WM_CLOSE
+            if unsafe { app_state_handle(hwnd) }
+                .is_some_and(|state| !crate::reentry::is_free(&state)) =>
+        {
+            input::defer_close_window();
+            LRESULT(0)
+        }
         WM_DESTROY => {
             if let Some(state) = unsafe { app_state_handle(hwnd) } {
                 close_state(&state);
@@ -1105,7 +1120,7 @@ unsafe extern "system" fn tab_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            input::on_tab_mouse_move(hwnd, (lparam.0 as i16) as i32);
+            input::on_tab_mouse_move(hwnd, (lparam.0 as i16) as i32, wparam.0);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1140,12 +1155,13 @@ fn paint_tabs(hwnd: HWND) {
             .unwrap_or(false);
     if !free {
         // Painted while an outer frame holds the state: validate the update
-        // region only; the next tab refresh repaints the strip.
+        // region only and repaint the strip from the message loop.
         let mut paint = PAINTSTRUCT::default();
         unsafe {
             let _ = BeginPaint(hwnd, &mut paint);
             let _ = EndPaint(hwnd, &paint);
         }
+        input::defer_repaint();
         return;
     }
     let (tabs, selected, focus_visible, colors, dpi, theme) = {
@@ -1233,22 +1249,34 @@ fn native_color(spec: ColorSpec) -> COLORREF {
 }
 
 fn route_native_key(hwnd: HWND, key: u16) -> bool {
-    // A key dispatched by a nested modal loop while an outer frame holds
-    // the state is left to default processing.
-    if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !crate::reentry::is_free(&state)) {
-        return false;
-    }
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    route_native_chord(hwnd, key, ctrl, shift)
+}
+
+/// Runs a native shortcut with the modifiers as pressed. While an outer
+/// frame holds the state (a key dispatched by a nested modal loop) a key
+/// that maps to a shell command is queued and runs from the message loop.
+fn route_native_chord(hwnd: HWND, key: u16, ctrl: bool, shift: bool) -> bool {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return false;
+    };
     if !ctrl && !shift && matches!(key, 0x25 | 0x27) {
-        let tab_strip = unsafe { app_state_handle(hwnd) }
-            .and_then(|state| state.borrow().controls.map(|controls| controls.tabs));
+        // Left and Right belong to the tab strip only while it has focus.
+        let tab_strip =
+            crate::reentry::read(&state, |state| state.controls.map(|c| c.tabs)).flatten();
         if tab_strip.is_none() || Some(unsafe { GetFocus() }) != tab_strip {
             return false;
         }
     }
-    route_key(KeyChord::new(key, ctrl, shift, false))
-        .is_some_and(|command| execute_command(hwnd, command))
+    let Some(command) = route_key(KeyChord::new(key, ctrl, shift, false)) else {
+        return false;
+    };
+    if !crate::reentry::is_free(&state) {
+        input::defer_native_key(key, ctrl, shift);
+        return true;
+    }
+    execute_command(hwnd, command)
 }
 
 fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
@@ -2011,10 +2039,12 @@ fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
     if !selected {
         return false;
     }
-    refresh_tabs(&state, Some(id));
-    if !crate::reentry::is_free(&state) {
-        // The strip could only validate its paint: repaint from the loop.
-        input::defer_repaint();
+    if crate::reentry::is_free(&state) {
+        refresh_tabs(&state, Some(id));
+    } else {
+        // The strip cannot repaint now: the repaint and ElementSelected
+        // follow together from the loop, so clients observe agreement.
+        input::defer_selected(id);
     }
     let posted = unsafe {
         PostMessageW(

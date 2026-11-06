@@ -771,6 +771,14 @@ pub(super) fn handle_message(
         // valid for the duration of this message.
         WM_DRAWITEM => unsafe { (lparam.0 as *const DRAWITEMSTRUCT).as_ref() }
             .and_then(|item| on_draw_item(hwnd, item)),
+        // Dispatched by a nested pump while an outer frame holds the state:
+        // run from the message loop instead (input's deferred work).
+        WM_CHROME_ACTION | WM_CHROME_WORKER
+            if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) =>
+        {
+            super::input::defer_chrome(message == WM_CHROME_WORKER);
+            Some(LRESULT(0))
+        }
         WM_CHROME_ACTION => {
             run_actions(hwnd);
             Some(LRESULT(0))
@@ -847,10 +855,10 @@ pub(super) fn route_accelerator(hwnd: HWND, chord: ShellAccelerator) {
 }
 
 /// Selection or tab set changed: refresh the outline and history buttons.
-pub(super) fn tabs_changed(state: &Rc<RefCell<AppState>>) {
-    if let Ok(mut state) = state.try_borrow_mut() {
-        state.chrome.post(ChromeAction::Sync);
-    }
+pub(super) fn tabs_changed(_state: &Rc<RefCell<AppState>>) {
+    // The action queue lives outside the state: this never borrows it, so
+    // a refresh from a reentrant path is not lost.
+    queue_action(ChromeAction::Sync);
 }
 
 /// Applies a render result's chrome effects before window.rs hosts it.
@@ -1260,7 +1268,7 @@ pub(super) fn readable_on(background: ColorSpec, foreground: ColorSpec) -> Color
 // Actions and commands (message loop, no borrow held).
 // ---------------------------------------------------------------------------
 
-fn run_actions(hwnd: HWND) {
+pub(super) fn run_actions(hwnd: HWND) {
     ACTION_POSTED.with(|posted| posted.set(false));
     while let Some(action) = next_action() {
         run_action(hwnd, action);
@@ -1789,6 +1797,11 @@ fn set_theme(hwnd: HWND, theme: ThemePreference) {
 
 /// Splitter drag start (.NET `SidebarResizeHandle_PointerPressed`).
 pub(super) fn begin_sidebar_drag(hwnd: HWND) {
+    // A press while an outer frame holds the state starts no drag (the
+    // splitter keeps its capture until the release, which ends nothing).
+    if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) {
+        return;
+    }
     let visible = state_of(hwnd).is_some_and(|state| {
         let portable = Rc::clone(&state.borrow().portable);
         portable.borrow().sidebar_visible()
@@ -1799,7 +1812,9 @@ pub(super) fn begin_sidebar_drag(hwnd: HWND) {
 
 /// .NET `UpdateSidebarWidth`: the pane width follows the pointer.
 pub(super) fn drag_sidebar(hwnd: HWND) {
-    let Some(state) = state_of(hwnd) else {
+    // Moves while an outer frame holds the state are ignored; the next move
+    // continues the drag from the pointer position.
+    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
         return;
     };
     let (dragging, dpi) = {
@@ -1832,6 +1847,11 @@ pub(super) fn drag_sidebar(hwnd: HWND) {
 
 /// .NET `StopSidebarResize`: saves the width.
 pub(super) fn end_sidebar_drag(hwnd: HWND) {
+    if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) {
+        // Never left dragging: the end runs from the message loop.
+        super::input::defer_sidebar_drag_end();
+        return;
+    }
     with_chrome(hwnd, |chrome| {
         if chrome.dragging {
             chrome.dragging = false;
@@ -1846,6 +1866,10 @@ pub(super) fn resize_sidebar_by_key(hwnd: HWND, step: SidebarResize) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
+    if !crate::reentry::is_free(&state) {
+        super::input::defer_sidebar_key(step);
+        return;
+    }
     let portable = Rc::clone(&state.borrow().portable);
     if !portable.borrow().sidebar_visible() {
         return;
@@ -1860,7 +1884,7 @@ pub(super) fn resize_sidebar_by_key(hwnd: HWND, step: SidebarResize) {
     reflow(hwnd, dpi);
 }
 
-fn apply_worker_results(hwnd: HWND) {
+pub(super) fn apply_worker_results(hwnd: HWND) {
     let Some(state) = state_of(hwnd) else {
         return;
     };

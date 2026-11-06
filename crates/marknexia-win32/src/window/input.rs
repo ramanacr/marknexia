@@ -26,12 +26,13 @@ use std::{
 use marknexia_webview::protocol::{HostToPage, PageToHost};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_MENU},
-    WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SendMessageW, WM_APP},
+    WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SendMessageW, WM_APP, WM_CLOSE},
 };
 
 use super::*;
 use crate::{
     accessibility::{TabHit, close_button_slot, hit_test_tab, native::CloseTab, tab_index_at},
+    chrome_model::SidebarResize,
     dragdrop::{self, DropAction, DropQueue},
     find::{
         DOCUMENT_LOADING, FIND_UNAVAILABLE, FindCommand, FindModel, FindStart,
@@ -39,7 +40,7 @@ use crate::{
         route_find_key,
     },
     layout::Dip,
-    reentry::{self, Deferred},
+    reentry::{self, Admission, Deferred, Pushed, Queued},
     single_instance::{
         self, KEY_VARIABLE,
         native::{ActivationQueue, ActivationServer, Claim, PrimaryInstance, ShellStartupProbe},
@@ -54,14 +55,27 @@ const WM_CLOSE_TAB_REQUEST: u32 = WM_APP + 0x101;
 const WM_DROPS_CLASSIFIED: u32 = WM_APP + 0x102;
 /// Posted by an activation resolution thread: resolved paths are queued.
 const WM_ACTIVATION_RESOLVED: u32 = WM_APP + 0x103;
-/// Posted when work was deferred: run it once the outer call returns.
-const WM_DEFERRED_CLOSE: u32 = WM_APP + 0x104;
-/// Deferred work kept at once; more is dropped (it is user input that
-/// arrived while the shell was busy).
+/// Posted (with the token) when deferred work is queued: it only wakes the
+/// message loop, whose tail runs the work (`run_deferred`).
+const WM_INPUT_WAKE: u32 = WM_APP + 0x104;
+/// Bounded deferred input kept at once (keys, commands, drops, presses);
+/// more is dropped and logged. Idempotent work coalesces and critical work
+/// (closes, selections, button-ups) is never dropped.
 const MAX_DEFERRED: usize = 64;
 
+/// A tab-strip button event that arrived while the state was busy: the
+/// strip, the position, and the tab under it on arrival (when the state
+/// could be read). On replay the event is dropped when another tab is at
+/// that position by then.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Click {
+    strip: isize,
+    x: i32,
+    tab: Option<TabId>,
+}
+
 /// Work that arrived while an outer frame held an `AppState` borrow.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Work {
     Message(u32, WPARAM),
     Command(WPARAM),
@@ -74,21 +88,76 @@ enum Work {
     Selection(u64),
     /// A UIA Select that arrived while the state was busy.
     AutomationSelect(TabId),
+    /// A UIA Select applied while an outer frame held a shared borrow: the
+    /// repaint and `ElementSelected` follow together from the loop.
+    Selected(TabId),
     /// The tab strip painted while busy (validate only): repaint it.
     Repaint,
-    /// Tab-strip pointer input that arrived while the state was busy, in
-    /// order: (strip window, x).
-    TabDown(isize, i32),
-    TabUp(isize, i32),
-    TabMiddle(isize, i32),
+    TabDown(Click),
+    TabUp(Click),
+    TabMiddle(Click),
+    CaptureLost(isize),
+    /// A native shortcut (key, Ctrl, Shift as pressed).
+    NativeKey(u16, bool, bool),
     Reflow(u32),
     RenderResults,
     Theme,
+    OpenDialog,
+    ChromeActions,
+    ChromeWorker,
+    SidebarDragEnd,
+    SidebarKey(SidebarResize),
+    /// `WM_CLOSE` dispatched inside a nested pump.
+    CloseWindow,
+}
+
+impl Queued for Work {
+    fn admission(&self) -> Admission {
+        match self {
+            Self::RefreshFind
+            | Self::Repaint
+            | Self::Reflow(_)
+            | Self::RenderResults
+            | Self::Theme
+            | Self::OpenDialog
+            | Self::ChromeActions
+            | Self::ChromeWorker
+            | Self::SidebarDragEnd
+            | Self::CloseWindow => Admission::Coalesce,
+            // Message kinds only drain queues or name a tab to close, so
+            // identical messages coalesce and their count stays bounded.
+            Self::Message(..)
+            | Self::Invalidate(_)
+            | Self::Close(_)
+            | Self::Selection(_)
+            | Self::AutomationSelect(_)
+            | Self::Selected(_)
+            | Self::TabUp(_)
+            | Self::CaptureLost(_) => Admission::Critical,
+            Self::Command(_)
+            | Self::Find(_)
+            | Self::Drop(_)
+            | Self::TabDown(_)
+            | Self::TabMiddle(_)
+            | Self::NativeKey(..)
+            | Self::SidebarKey(_) => Admission::Bounded,
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Reflow(_), Self::Reflow(_)) => true,
+            _ => self == other,
+        }
+    }
 }
 
 thread_local! {
     static DEFERRED: Deferred<Work> = const { Deferred::new(MAX_DEFERRED) };
+    /// True from posting `WM_INPUT_WAKE` until `run_deferred` starts.
+    static WAKE_POSTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Copies kept outside the state, readable while it is borrowed.
+    static WINDOW: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static TOKEN: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static FIND_EDIT: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
@@ -105,9 +174,52 @@ pub(super) fn defer_automation_select(tab: TabId) {
     defer(Work::AutomationSelect(tab));
 }
 
+/// `window.rs`: a UIA Select already applied to the portable state while
+/// an outer frame held a shared borrow; the repaint and `ElementSelected`
+/// run together from the loop.
+pub(super) fn defer_selected(tab: TabId) {
+    defer(Work::Selected(tab));
+}
+
 /// `window.rs`: repaint the tab strip from the message loop.
 pub(super) fn defer_repaint() {
     defer(Work::Repaint);
+}
+
+/// `window.rs`: a native shortcut pressed while an outer frame held the
+/// state.
+pub(super) fn defer_native_key(key: u16, ctrl: bool, shift: bool) {
+    defer(Work::NativeKey(key, ctrl, shift));
+}
+
+/// `window.rs`: the Open dialog requested while an outer frame held the
+/// state.
+pub(super) fn defer_open_dialog() {
+    defer(Work::OpenDialog);
+}
+
+/// `window.rs`: `WM_CLOSE` while an outer frame held the state.
+pub(super) fn defer_close_window() {
+    defer(Work::CloseWindow);
+}
+
+/// `chrome.rs`: chrome actions or worker results while busy.
+pub(super) fn defer_chrome(worker: bool) {
+    defer(if worker {
+        Work::ChromeWorker
+    } else {
+        Work::ChromeActions
+    });
+}
+
+/// `chrome.rs`: the end of a splitter drag while busy.
+pub(super) fn defer_sidebar_drag_end() {
+    defer(Work::SidebarDragEnd);
+}
+
+/// `chrome.rs`: a splitter key while busy.
+pub(super) fn defer_sidebar_key(step: SidebarResize) {
+    defer(Work::SidebarKey(step));
 }
 
 /// True while an outer frame holds the state behind `strip`'s parent.
@@ -134,10 +246,25 @@ pub(super) fn defer_theme() {
     defer(Work::Theme);
 }
 
+/// Queues `work` and wakes the loop once per batch: one `WM_INPUT_WAKE`
+/// while none is outstanding. Dropped input is logged.
 fn defer(work: Work) {
-    DEFERRED.with(|deferred| {
-        let _ = deferred.push(work);
-    });
+    let label = format!("{work:?}");
+    let pushed = DEFERRED.with(|deferred| deferred.push(work));
+    if pushed == Pushed::Dropped {
+        eprintln!("marknexia: deferred input dropped (queue full): {label}");
+        return;
+    }
+    if !WAKE_POSTED.with(std::cell::Cell::get) {
+        let (window, token) = (
+            WINDOW.with(std::cell::Cell::get),
+            TOKEN.with(std::cell::Cell::get),
+        );
+        if window != 0 && token != 0 {
+            WAKE_POSTED.with(|posted| posted.set(true));
+            post_to_window(window, WM_INPUT_WAKE, token);
+        }
+    }
 }
 
 /// True while an outer frame holds an `AppState` borrow.
@@ -145,15 +272,18 @@ fn busy(state: &Rc<RefCell<AppState>>) -> bool {
     !reentry::is_free(state)
 }
 
-/// Runs deferred work; called with no borrow held (top of the loop). Work
-/// that still cannot run (the state is busy again, or the WebView session
-/// is checked out) is queued again by its handler.
+/// Runs deferred work. Called only from the tail of the top-level message
+/// loop, and only when no borrow is held and the WebView session is not
+/// checked out; nested pumps never run it (`WM_INPUT_WAKE` only wakes the
+/// loop). Work that still cannot run is queued again by its handler.
 pub(super) fn run_deferred(hwnd: HWND) {
-    // Still inside the outer frame (a wake-up dispatched by a nested pump):
-    // leave the work for `after_poll` instead of re-queueing it in a loop.
-    if handle(hwnd).is_none_or(|state| busy(&state)) {
+    let ready = handle(hwnd).is_some_and(|state| {
+        reentry::read(&state, |state| !state.webview_checked_out).unwrap_or(false) && !busy(&state)
+    });
+    if !ready {
         return;
     }
+    WAKE_POSTED.with(|posted| posted.set(false));
     let work = DEFERRED.with(Deferred::take);
     for item in work {
         match item {
@@ -176,7 +306,7 @@ pub(super) fn run_deferred(hwnd: HWND) {
                 }
             }
             Work::Close(tab) => {
-                let _ = close_requested(hwnd, tab, false);
+                let _ = close_requested(hwnd, tab);
             }
             Work::Drop(path) => on_dropped_path(hwnd, path),
             Work::Selection(raw) => apply_automation_selection(hwnd, raw),
@@ -186,14 +316,26 @@ pub(super) fn run_deferred(hwnd: HWND) {
                     let _ = select_from_automation(hwnd, tab);
                 }
             }
+            Work::Selected(tab) => {
+                if let Some(state) = handle(hwnd) {
+                    // Only while that tab is still the active one: a later
+                    // selection raised its own event.
+                    let active = active_tab(&state) == Some(tab);
+                    refresh_tabs(&state, active.then_some(tab));
+                }
+            }
             Work::Repaint => {
                 if let Some(state) = handle(hwnd) {
                     refresh_tabs(&state, None);
                 }
             }
-            Work::TabDown(strip, x) => on_tab_button_down(HWND(strip as *mut c_void), x),
-            Work::TabUp(strip, x) => on_tab_button_up(HWND(strip as *mut c_void), x),
-            Work::TabMiddle(strip, x) => on_tab_middle_click(HWND(strip as *mut c_void), x),
+            Work::TabDown(click) => replay_click(click, ClickKind::Down),
+            Work::TabUp(click) => replay_click(click, ClickKind::Up),
+            Work::TabMiddle(click) => replay_click(click, ClickKind::Middle),
+            Work::CaptureLost(strip) => on_tab_capture_lost(HWND(strip as *mut c_void)),
+            Work::NativeKey(key, ctrl, shift) => {
+                let _ = route_native_chord(hwnd, key, ctrl, shift);
+            }
             Work::Reflow(dpi) => reflow(hwnd, dpi),
             Work::RenderResults => apply_render_results(hwnd),
             Work::Theme => {
@@ -201,7 +343,86 @@ pub(super) fn run_deferred(hwnd: HWND) {
                 // SAFETY: plain DPI query on this thread's window.
                 reflow(hwnd, unsafe { GetDpiForWindow(hwnd) }.max(96));
             }
+            Work::OpenDialog => open_from_dialog(hwnd),
+            Work::ChromeActions => super::chrome::run_actions(hwnd),
+            Work::ChromeWorker => super::chrome::apply_worker_results(hwnd),
+            Work::SidebarDragEnd => super::chrome::end_sidebar_drag(hwnd),
+            Work::SidebarKey(step) => super::chrome::resize_sidebar_by_key(hwnd, step),
+            Work::CloseWindow => {
+                // SAFETY: posts to this thread's own window; no pointers.
+                let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClickKind {
+    Down,
+    Up,
+    Middle,
+}
+
+/// The tab under `x` in `strip` now, if the state can be read.
+fn tab_at(strip: HWND, x: i32) -> Option<TabId> {
+    // SAFETY: `strip` is this thread's tab strip.
+    let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
+    let state = handle(parent)?;
+    let mut client = RECT::default();
+    unsafe { GetClientRect(strip, &mut client) }.ok()?;
+    let tabs: Vec<TabId> = reentry::read(&state, |state| {
+        reentry::read(&state.portable, |app| {
+            app.tabs().tabs().iter().map(|tab| tab.id()).collect()
+        })
+    })
+    .flatten()?;
+    tab_index_at(client.right - client.left, tabs.len(), x).map(|index| tabs[index])
+}
+
+/// Records a button event that arrived while busy.
+fn defer_click(strip: HWND, x: i32, kind: ClickKind) {
+    let click = Click {
+        strip: strip.0 as isize,
+        x,
+        tab: tab_at(strip, x),
+    };
+    defer(match kind {
+        ClickKind::Down => Work::TabDown(click),
+        ClickKind::Up => Work::TabUp(click),
+        ClickKind::Middle => Work::TabMiddle(click),
+    });
+}
+
+/// Replays a queued button event, unless the tab it hit has moved away
+/// from that position since (a button-up always replays: it only ends a
+/// press, and the press itself checks its tab).
+fn replay_click(click: Click, kind: ClickKind) {
+    let strip = HWND(click.strip as *mut c_void);
+    let moved = click
+        .tab
+        .is_some_and(|tab| tab_at(strip, click.x) != Some(tab));
+    match kind {
+        ClickKind::Up => on_tab_button_up(strip, click.x),
+        _ if moved => eprintln!("marknexia: queued tab click dropped (the tab moved)"),
+        ClickKind::Down => press_tab(strip, click.x, logical_left_button_down()),
+        ClickKind::Middle => on_tab_middle_click(strip, click.x),
+    }
+}
+
+/// The logical left button (swapped buttons honored) is down now.
+fn logical_left_button_down() -> bool {
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
+        WindowsAndMessaging::SM_SWAPBUTTON,
+    };
+    // SAFETY: plain metric and key-state queries.
+    unsafe {
+        let key = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+            VK_RBUTTON
+        } else {
+            VK_LBUTTON
+        };
+        GetAsyncKeyState(i32::from(key.0)) < 0
     }
 }
 /// The find box's control ID (`initialize` creates it).
@@ -321,6 +542,7 @@ pub(super) fn initialize(
         .is_ok()
     });
     TOKEN.with(|cell| cell.set(token));
+    WINDOW.with(|cell| cell.set(hwnd.0 as isize));
     FIND_EDIT.with(|cell| cell.set(controls.edit.0 as isize));
     let mut state = state.borrow_mut();
     state.input.message_token = token;
@@ -427,7 +649,7 @@ pub(super) fn handles(message: u32) -> bool {
             | WM_CLOSE_TAB_REQUEST
             | WM_DROPS_CLASSIFIED
             | WM_ACTIVATION_RESOLVED
-            | WM_DEFERRED_CLOSE
+            | WM_INPUT_WAKE
     )
 }
 
@@ -441,9 +663,8 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
     if token == 0 || lparam.0 != token {
         return LRESULT(0);
     }
-    if message == WM_DEFERRED_CLOSE {
-        // The wake-up for deferred work.
-        run_deferred(hwnd);
+    if message == WM_INPUT_WAKE {
+        // Only wakes the message loop; its tail runs the deferred work.
         return LRESULT(0);
     }
     let Some(state) = handle(hwnd) else {
@@ -458,7 +679,7 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
         WM_ACTIVATION_RESOLVED => on_activation_resolved(hwnd),
         WM_CLOSE_TAB_REQUEST => {
             if let Some(tab) = tab_by_raw(&state, wparam.0 as u64) {
-                let _ = close_requested(hwnd, tab, true);
+                let _ = close_requested(hwnd, tab);
             }
         }
         WM_DROPS_CLASSIFIED => on_drops_classified(hwnd),
@@ -467,24 +688,17 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
     LRESULT(0)
 }
 
-/// A UIA close: runs now, or is deferred while an outer frame holds the
-/// state or the WebView session. `wake` posts the tokened wake-up, so the
-/// close runs as soon as the outer call returns (`after_poll` retries it
-/// too). Returns true once the close ran or was queued.
-fn close_requested(hwnd: HWND, tab: TabId, wake: bool) -> bool {
+/// A UIA close: runs now when nothing holds the state or the WebView
+/// session; otherwise it is queued (never dropped), the loop is woken, and
+/// the tail of the top-level message loop runs it. A tab closed meanwhile is
+/// skipped. Returns true once the close ran or was queued.
+fn close_requested(hwnd: HWND, tab: TabId) -> bool {
     let Some(state) = handle(hwnd) else {
         return false;
     };
     let checked_out = reentry::read(&state, |state| state.webview_checked_out);
-    if checked_out != Some(false) {
+    if busy(&state) || checked_out != Some(false) {
         defer(Work::Close(tab));
-        if wake {
-            post_to_window(
-                hwnd.0 as isize,
-                WM_DEFERRED_CLOSE,
-                TOKEN.with(std::cell::Cell::get),
-            );
-        }
         return true;
     }
     tab_by_raw(&state, tab.get()).is_some() && close_tab(hwnd, tab)
@@ -993,9 +1207,9 @@ fn strip(strip: HWND) -> Option<Strip> {
     })
 }
 
-/// `None` also while an outer frame holds the state. Button input checks
-/// that first and is queued (`strip_busy`); only drag moves and capture loss
-/// are ignored then (a drag continues with the next move).
+/// `None` also while an outer frame holds the state. Button input and
+/// capture loss check that first and are queued (`strip_busy`); only drag
+/// moves are ignored then (a drag continues with the next move).
 fn strip_context(strip: HWND) -> Option<(HWND, Rc<RefCell<AppState>>, i32, i32)> {
     // SAFETY: `strip` is this thread's tab strip.
     let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(strip) }.ok()?;
@@ -1019,13 +1233,21 @@ fn tab_ids(state: &Rc<RefCell<AppState>>) -> Vec<TabId> {
 /// `WM_LBUTTONDOWN` on the tab strip: a body press selects (as before) and
 /// may start a drag; a close-button press closes on release.
 pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
-    // A click is never lost: while busy it is queued with its position, and
-    // its button-up after it, so a click (or a close-button click) completes
-    // from the message loop. Only drag moves are dropped meanwhile.
+    // A click is not lost: while busy it is queued with its position and
+    // the tab under it, and its button-up after it, so a click (or a
+    // close-button click) completes from the message loop. Drag moves that
+    // arrive meanwhile are dropped; the next move continues the drag.
     if strip_busy(strip_window) {
-        defer(Work::TabDown(strip_window.0 as isize, x));
+        defer_click(strip_window, x, ClickKind::Down);
         return;
     }
+    press_tab(strip_window, x, true);
+}
+
+/// Records a press at `x` and, for a body press, selects the tab. With
+/// `capture` false (a replayed press whose button is already up) no
+/// capture is taken: the queued button-up completes it as a click.
+fn press_tab(strip_window: HWND, x: i32, capture: bool) {
     let Some(Strip {
         parent,
         state,
@@ -1055,8 +1277,10 @@ pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
         x,
         dragging: false,
     });
-    // SAFETY: this thread's window; capture ends in WM_LBUTTONUP.
-    let _ = unsafe { SetCapture(strip) };
+    if capture {
+        // SAFETY: this thread's window; capture ends in WM_LBUTTONUP.
+        let _ = unsafe { SetCapture(strip) };
+    }
     if close {
         let portable = Rc::clone(&state.borrow().portable);
         portable.borrow_mut().note_pointer_input();
@@ -1069,7 +1293,12 @@ pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
 
 /// `WM_MOUSEMOVE`: past the system drag distance, the pressed tab follows
 /// the pointer (.NET `CanReorderTabs`).
-pub(super) fn on_tab_mouse_move(strip: HWND, x: i32) {
+pub(super) fn on_tab_mouse_move(strip: HWND, x: i32, buttons: usize) {
+    /// `MK_LBUTTON`: moves without the button never drag.
+    const MK_LBUTTON: usize = 0x0001;
+    if buttons & MK_LBUTTON == 0 {
+        return;
+    }
     let Some((_, state, width, _)) = strip_context(strip) else {
         return;
     };
@@ -1104,7 +1333,7 @@ pub(super) fn on_tab_mouse_move(strip: HWND, x: i32) {
 /// and ended on the same close button.
 pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
     if strip_busy(strip_window) {
-        defer(Work::TabUp(strip_window.0 as isize, x));
+        defer_click(strip_window, x, ClickKind::Up);
         return;
     }
     let Some(Strip {
@@ -1136,7 +1365,7 @@ pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
 /// closable WinUI `TabViewItem`.
 pub(super) fn on_tab_middle_click(strip_window: HWND, x: i32) {
     if strip_busy(strip_window) {
-        defer(Work::TabMiddle(strip_window.0 as isize, x));
+        defer_click(strip_window, x, ClickKind::Middle);
         return;
     }
     let Some(Strip {
@@ -1161,6 +1390,11 @@ pub(super) fn on_tab_middle_click(strip_window: HWND, x: i32) {
 
 /// `WM_CAPTURECHANGED`: a lost capture cancels the press.
 pub(super) fn on_tab_capture_lost(strip: HWND) {
+    if strip_busy(strip) {
+        // Ends the press from the loop, in order with queued clicks.
+        defer(Work::CaptureLost(strip.0 as isize));
+        return;
+    }
     if let Some((_, state, _, _)) = strip_context(strip) {
         state.borrow_mut().input.tab_press = None;
     }
@@ -1259,11 +1493,6 @@ fn on_dropped_path(hwnd: HWND, path: String) {
     if busy(&state) {
         // OLE can call Drop inside a nested pump.
         defer(Work::Drop(path));
-        post_to_window(
-            hwnd.0 as isize,
-            WM_DEFERRED_CLOSE,
-            TOKEN.with(std::cell::Cell::get),
-        );
         return;
     }
     let path = match dragdrop::gate(&path) {

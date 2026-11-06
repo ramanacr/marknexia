@@ -536,16 +536,13 @@ fn guarded_move(process_id: u32, x: i32, y: i32) {
     unsafe { SetCursorPos(x, y) }.expect("SetCursorPos");
 }
 
-/// Releases the left button when dropped, also after a failed assertion, so
-/// no button stays down in the shell. The button-up is sent only while the
-/// shell (`self.0`) still owns the foreground; otherwise nothing is sent.
-struct LeftButtonGuard(u32);
+/// Releases the left button when dropped, also after a failed assertion.
+/// The button-up is always sent: a stuck button is worse than a stray
+/// button-up, which types and clicks nothing.
+struct LeftButtonGuard;
 
 impl Drop for LeftButtonGuard {
     fn drop(&mut self) {
-        if foreground_owner() != self.0 {
-            return;
-        }
         let input = [mouse(MOUSEEVENTF_LEFTUP)];
         let _ = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
     }
@@ -572,7 +569,7 @@ fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
     let id = shell.shell.id();
     guarded_move(id, start, y);
     guarded_send(id, MOUSEEVENTF_LEFTDOWN);
-    let button = LeftButtonGuard(id);
+    let button = LeftButtonGuard;
     // The shell reports the press: it selects the pressed tab.
     wait_for("the press to select the first tab", || {
         (shell.selected_name().as_deref() == Some(names[0].as_str())).then_some(())
