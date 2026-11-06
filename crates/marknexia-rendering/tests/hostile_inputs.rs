@@ -451,27 +451,32 @@ fn remote_sources_dotnet_leaks_are_removed() {
     }
 }
 
+/// Covers only the sanitized page the host serves, before any runtime runs:
+/// source markup stays text and the runtime tag comes only from the
+/// template. What the Mermaid runtime does with click bindings and init
+/// directives is checked natively in `marknexia-webview`
+/// `session::native_tests::native_mermaid_runtime_renders_and_falls_back`.
 #[test]
-fn hostile_diagram_and_math_sources_stay_inert() {
+fn hostile_sources_stay_inert_in_the_served_body() {
     const RUNTIME_TAG: &str = "<script src=\"https://marknexia.assets/mermaid.min.js\"";
     let cases = [
         (
-            "mermaid-breakout",
+            "body-mermaid-breakout",
             "```mermaid\n</pre></div></div><script>alert(1)</script><img src=x onerror=alert(2)>\n```\n",
             true,
         ),
         (
-            "mermaid-runtime-tag-in-source",
+            "body-mermaid-runtime-tag-in-source",
             "```mermaid\n<script src=\"https://marknexia.assets/mermaid.min.js\"></script>\n```\n",
             true,
         ),
         (
-            "mermaid-click-callback",
+            "body-mermaid-click-callback",
             "```mermaid\ngraph TD\nA-->B\nclick A callback \"javascript:alert(1)\"\n```\n",
             true,
         ),
         (
-            "mermaid-init-directive",
+            "body-mermaid-init-directive",
             "```mermaid\n%%{init: {\"securityLevel\": \"loose\"}}%%\ngraph TD\nA[\"<img src=x onerror=alert(1)>\"]\n```\n",
             true,
         ),
@@ -513,7 +518,7 @@ fn hostile_diagram_and_math_sources_stay_inert() {
 }
 
 #[test]
-fn math_expansion_flood_renders_or_fails_closed() {
+fn math_expansion_floods_render_within_the_page_limit() {
     // `\frac` and `\sqrt` grow about tenfold in the math pass (REND-1).
     let four = 4 * ONE_MIB;
     for (name, unit) in [
@@ -521,7 +526,24 @@ fn math_expansion_flood_renders_or_fails_closed() {
         ("math-sqrt-flood", "$\\sqrt[3]{x}$ "),
         ("math-display-flood", "$$\\frac{\\alpha}{\\beta}$$ "),
     ] {
-        let source = unit.repeat((four - 16) / unit.len());
-        let _ = render_bounded(name, &source);
+        let count = (four - 16) / unit.len();
+        let source = unit.repeat(count);
+        // Each flood fits: about 35 to 60 MB of page, under the 128 MiB limit.
+        let document = render_bounded(name, &source)
+            .unwrap_or_else(|error| panic!("{name}: expected a rendered page, got {error:?}"));
+        let page_bytes = document.page_bytes();
+        assert!(
+            (16 * ONE_MIB..=RenderLimits::DEFAULT_MAX_RENDERED_HTML_BYTES).contains(&page_bytes),
+            "{name}: {page_bytes}"
+        );
+        assert_eq!(
+            document
+                .body()
+                .as_str()
+                .matches("class=\"marknexia-math\" role=\"math\"")
+                .count(),
+            count,
+            "{name}: every span rendered"
+        );
     }
 }
