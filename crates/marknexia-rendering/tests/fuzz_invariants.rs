@@ -79,6 +79,17 @@ const TOKENS: &[&str] = &[
     "\u{1}",
     "\u{b}",
     "\u{c}",
+    // Phase 3: Mermaid runtime and math inputs.
+    "<script src=\"https://marknexia.assets/mermaid.min.js\" nonce=\"x\"></script>",
+    "<div class=\"marknexia-diagram marknexia-mermaid\" id=\"mermaid-1\">",
+    "<div class=\"math\">",
+    "$$\n",
+    "\\left(",
+    "\\right.",
+    "\\text{",
+    "\\alpha",
+    "\u{1d465}",
+    "graph TD\nA-->B\n",
 ];
 
 struct XorShift(u64);
@@ -148,7 +159,28 @@ fn random_documents_keep_the_fuzz_invariants() {
             let body = document.body().as_str();
             assert!(body.len() <= MAX_HTML_OUTPUT_BYTES);
             assert!(document.page_bytes() <= limits.max_rendered_html_bytes);
-            assert_eq!(document.page_html().len(), document.page_bytes());
+            let page = document.page_html();
+            assert_eq!(page.len(), document.page_bytes());
+            // The page loads the Mermaid runtime once, after the body, exactly
+            // when a diagram shell was emitted; raw HTML cannot add it.
+            const RUNTIME_TAG: &str = "<script src=\"https://marknexia.assets/mermaid.min.js\"";
+            const BODY_OPEN: &str = "<div class=\"markdown-body\">\n";
+            let tags = page.matches(RUNTIME_TAG).count();
+            assert_eq!(
+                tags,
+                usize::from(document.has_mermaid()),
+                "#{iteration}: {input:?}"
+            );
+            if tags == 1 {
+                let body_end = page.find(BODY_OPEN).unwrap() + BODY_OPEN.len() + body.len();
+                assert!(page.find(RUNTIME_TAG).is_some_and(|tag| tag >= body_end));
+            }
+            if !context.enable_diagrams || limits.max_diagram_count == 0 {
+                assert!(!document.has_mermaid(), "#{iteration}: {input:?}");
+            }
+            // A shell can still vanish in sanitizing (inside raw `<script>`
+            // or a comment), so `has_mermaid` does not imply a visible shell;
+            // .NET decides `hasMermaid` before sanitizing too.
             assert!(
                 !body.to_ascii_lowercase().contains("<script"),
                 "#{iteration}: {input:?}"

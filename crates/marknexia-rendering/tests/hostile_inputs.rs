@@ -450,3 +450,78 @@ fn remote_sources_dotnet_leaks_are_removed() {
         assert!(!body.contains("h.test"), "{source} -> {body}");
     }
 }
+
+#[test]
+fn hostile_diagram_and_math_sources_stay_inert() {
+    const RUNTIME_TAG: &str = "<script src=\"https://marknexia.assets/mermaid.min.js\"";
+    let cases = [
+        (
+            "mermaid-breakout",
+            "```mermaid\n</pre></div></div><script>alert(1)</script><img src=x onerror=alert(2)>\n```\n",
+            true,
+        ),
+        (
+            "mermaid-runtime-tag-in-source",
+            "```mermaid\n<script src=\"https://marknexia.assets/mermaid.min.js\"></script>\n```\n",
+            true,
+        ),
+        (
+            "mermaid-click-callback",
+            "```mermaid\ngraph TD\nA-->B\nclick A callback \"javascript:alert(1)\"\n```\n",
+            true,
+        ),
+        (
+            "mermaid-init-directive",
+            "```mermaid\n%%{init: {\"securityLevel\": \"loose\"}}%%\ngraph TD\nA[\"<img src=x onerror=alert(1)>\"]\n```\n",
+            true,
+        ),
+        (
+            "raw-runtime-tag",
+            "<script src=\"https://marknexia.assets/mermaid.min.js\"></script>\n\n<div class=\"marknexia-diagram marknexia-mermaid\" id=\"mermaid-1\"><pre class=\"mermaid\">graph TD</pre></div>\n",
+            false,
+        ),
+        (
+            "math-text-markup",
+            "$\\text{<img src=x onerror=alert(1)>}$ and $\\operatorname{</span><script>x</script>}$\n",
+            false,
+        ),
+        (
+            "math-raw-block-breakout",
+            "<div class=\"math\">$$</div><script>alert(1)</script>$$</div>\n",
+            false,
+        ),
+        (
+            "math-delimiters",
+            "$\\left< a \\right> \\left& b \\right\"$ and $a^\\\"$\n",
+            false,
+        ),
+    ];
+    for (name, source, has_mermaid) in cases {
+        let document = render_bounded(name, source).expect("renders");
+        let body = document.body().as_str().to_ascii_lowercase();
+        // Markup in a source stays text: no live attribute survives.
+        assert!(!body.contains(" onerror=\""), "{name}: {body}");
+        assert!(!body.contains("=\"javascript:"), "{name}: {body}");
+        assert_eq!(document.has_mermaid(), has_mermaid, "{name}");
+        let page = document.page_html();
+        assert_eq!(
+            page.matches(RUNTIME_TAG).count(),
+            usize::from(has_mermaid),
+            "{name}: the runtime tag comes only from the template"
+        );
+    }
+}
+
+#[test]
+fn math_expansion_flood_renders_or_fails_closed() {
+    // `\frac` and `\sqrt` grow about tenfold in the math pass (REND-1).
+    let four = 4 * ONE_MIB;
+    for (name, unit) in [
+        ("math-frac-flood", "$\\frac{a}{b}$ "),
+        ("math-sqrt-flood", "$\\sqrt[3]{x}$ "),
+        ("math-display-flood", "$$\\frac{\\alpha}{\\beta}$$ "),
+    ] {
+        let source = unit.repeat((four - 16) / unit.len());
+        let _ = render_bounded(name, &source);
+    }
+}

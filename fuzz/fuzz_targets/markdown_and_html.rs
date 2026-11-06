@@ -92,7 +92,28 @@ fuzz_target!(|bytes: &[u8]| {
         let body = document.body().as_str();
         assert!(body.len() <= MAX_HTML_OUTPUT_BYTES);
         assert!(document.page_bytes() <= limits.max_rendered_html_bytes);
-        assert_eq!(document.page_html().len(), document.page_bytes());
+        let page = document.page_html();
+        assert_eq!(page.len(), document.page_bytes());
+
+        // Mermaid runtime (Phase 3): the page loads the pinned runtime once,
+        // after the body, exactly when a diagram shell was emitted (the
+        // WebView broker serves it only then). The sanitized body cannot
+        // carry the tag, so raw HTML cannot load the runtime.
+        const RUNTIME_TAG: &str = "<script src=\"https://marknexia.assets/mermaid.min.js\"";
+        const BODY_OPEN: &str = "<div class=\"markdown-body\">\n";
+        let tags = page.matches(RUNTIME_TAG).count();
+        assert_eq!(tags, usize::from(document.has_mermaid()));
+        if tags == 1 {
+            let body_end =
+                page.find(BODY_OPEN).expect("template body") + BODY_OPEN.len() + body.len();
+            assert!(page.find(RUNTIME_TAG).is_some_and(|tag| tag >= body_end));
+        }
+        if !context.enable_diagrams || limits.max_diagram_count == 0 {
+            assert!(!document.has_mermaid());
+        }
+        // A shell can still vanish in sanitizing (inside raw `<script>` or a
+        // comment), so `has_mermaid` does not imply a visible shell; .NET
+        // decides `hasMermaid` before sanitizing too.
         let again = render_policy(remote)
             .sanitize_fragment(body)
             .expect("rendered body must be accepted again");

@@ -261,3 +261,55 @@ fn the_mermaid_runtime_is_served_only_when_enabled_and_only_as_a_script() {
         );
     }
 }
+
+#[test]
+fn every_single_edit_of_the_runtime_uri_is_denied() {
+    use marknexia_webview::broker::MERMAID_RUNTIME_URI;
+    let enabled = broker().with_mermaid_runtime(true);
+    let decide = |uri: &str| {
+        enabled.resolve(&BrokerRequest {
+            method: "GET",
+            uri,
+            controller_tab_id: 7,
+            kind: ResourceKind::Script,
+        })
+    };
+    let chars: Vec<char> = MERMAID_RUNTIME_URI.chars().collect();
+    let mut variants = Vec::new();
+    for index in 0..=chars.len() {
+        for inserted in ['/', '.', '%', '?', '#', '\\', ' ', '\0', 'A', 'a', 'é'] {
+            let mut edited = chars.clone();
+            edited.insert(index, inserted);
+            variants.push(edited.into_iter().collect::<String>());
+        }
+        if index < chars.len() {
+            let mut deleted = chars.clone();
+            deleted.remove(index);
+            variants.push(deleted.into_iter().collect());
+            let mut upper = chars.clone();
+            upper[index] = upper[index].to_ascii_uppercase();
+            variants.push(upper.into_iter().collect());
+            let encoded = format!(
+                "{}%{:02X}{}",
+                chars[..index].iter().collect::<String>(),
+                u32::from(chars[index]),
+                chars[index + 1..].iter().collect::<String>()
+            );
+            variants.push(encoded);
+        }
+    }
+    let mut checked = 0;
+    for uri in variants.iter().filter(|uri| *uri != MERMAID_RUNTIME_URI) {
+        assert_ne!(
+            decide(uri),
+            BrokerDecision::BundledRuntime(marknexia_webview::broker::BundledRuntime::Mermaid),
+            "{uri:?}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 500, "{checked}");
+    assert_eq!(
+        decide(MERMAID_RUNTIME_URI),
+        BrokerDecision::BundledRuntime(marknexia_webview::broker::BundledRuntime::Mermaid)
+    );
+}
