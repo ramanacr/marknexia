@@ -25,9 +25,10 @@ use windows::{
 use super::{
     child_style,
     chrome::{
-        ChromeControls, ID_BACK, ID_FORWARD, ID_OPEN_FOLDER, ID_RELOAD, ID_THEME, ID_THEME_LABEL,
-        ID_TOGGLE_SIDEBAR, MENU_ABOUT, MENU_CLOSE_TAB, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER,
-        MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_TOGGLE_SIDEBAR, dip, send, set_bounds,
+        ChromeControls, ID_BACK, ID_FIND, ID_FORWARD, ID_OPEN_FOLDER, ID_RELOAD, ID_THEME,
+        ID_THEME_LABEL, ID_TOGGLE_SIDEBAR, MENU_ABOUT, MENU_CLOSE_TAB, MENU_FIND, MENU_HELP,
+        MENU_OPEN_FILE, MENU_OPEN_FOLDER, MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_TOGGLE_SIDEBAR,
+        dip, send, set_bounds,
     },
     create_child, fill, native_color,
 };
@@ -52,7 +53,7 @@ struct ToolButton {
     width: u32,
 }
 
-const BUTTONS: [ToolButton; 5] = [
+const BUTTONS: [ToolButton; 6] = [
     ToolButton {
         id: ID_TOGGLE_SIDEBAR,
         name: w!("Toggle sidebar"),
@@ -88,6 +89,14 @@ const BUTTONS: [ToolButton; 5] = [
         label: Some("Folder"),
         width: 104,
     },
+    // .NET `SearchToggleButton`, left of the theme selector.
+    ToolButton {
+        id: ID_FIND,
+        name: w!("Find in document"),
+        glyph: '\u{E721}',
+        label: None,
+        width: 44,
+    },
 ];
 
 /// Width of the existing "Open Markdown" button (`ShellControls::command`).
@@ -104,6 +113,7 @@ pub(super) struct Toolbar {
     pub forward: HWND,
     pub reload: HWND,
     pub folder: HWND,
+    pub find: HWND,
     pub theme_label: HWND,
     pub theme: HWND,
 }
@@ -151,6 +161,7 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<Toolbar, super
         forward: buttons[2],
         reload: buttons[3],
         folder: buttons[4],
+        find: buttons[5],
         theme_label,
         theme,
     })
@@ -179,6 +190,7 @@ pub(super) fn create_menu(parent: HWND) -> Option<HMENU> {
         let _ = AppendMenuW(file, MF_STRING, MENU_CLOSE_TAB, w!("&Close tab\tCtrl+W"));
         let view = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(view, MF_STRING, MENU_TOGGLE_SIDEBAR, w!("Toggle &sidebar"));
+        let _ = AppendMenuW(view, MF_STRING, MENU_FIND, w!("&Find in document\tCtrl+F"));
         let _ = AppendMenuW(view, MF_STRING, MENU_RELOAD, w!("&Reload document\tF5"));
         let settings = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(
@@ -253,12 +265,27 @@ pub(super) fn layout(controls: &ChromeControls, open: HWND, bar: PixelRect, dpi:
         },
     );
     let label_width = dip(THEME_LABEL_WIDTH, dpi);
+    let label_x = theme_x.saturating_sub(label_width);
     set_bounds(
         toolbar.theme_label,
         PixelRect {
-            x: theme_x.saturating_sub(label_width),
+            x: label_x,
             y: bar.y,
             width: label_width,
+            height,
+        },
+    );
+    // The find toggle sits left of the theme selector, as in .NET.
+    let find_width = dip(BUTTONS[5].width, dpi);
+    set_bounds(
+        toolbar.find,
+        PixelRect {
+            x: label_x
+                .saturating_sub(dip(GAP, dpi))
+                .saturating_sub(find_width)
+                .max(x),
+            y: bar.y,
+            width: find_width,
             height,
         },
     );

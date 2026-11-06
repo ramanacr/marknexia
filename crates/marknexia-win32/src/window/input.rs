@@ -16,7 +16,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use marknexia_core::text::eq_ignore_case;
 use marknexia_webview::protocol::{HostToPage, PageToHost};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_MENU},
@@ -72,11 +71,6 @@ pub(super) struct InputState {
     /// True while the shell itself sets the find box text, so `EN_CHANGE`
     /// does not count as user input.
     find_text_programmatic: bool,
-    /// Each document tab's path, for .NET's "already open" check.
-    tab_paths: BTreeMap<u64, PathBuf>,
-    /// The folder dropped last (.NET `_activeRepositoryRoot`). The sidebar
-    /// shows it once the repository tree is wired.
-    repository_root: Option<PathBuf>,
     drops: DropQueue,
     /// Validated page messages, queued by the page observer during
     /// `WebViewSession::poll` and drained after the session is restored.
@@ -101,7 +95,6 @@ pub(super) struct InputState {
 impl InputState {
     fn forget_tab(&mut self, tab_id: u64) {
         self.find.forget(tab_id);
-        self.tab_paths.remove(&tab_id);
     }
 }
 
@@ -216,17 +209,6 @@ pub(super) fn page_observer(state: &Rc<RefCell<AppState>>) -> Rc<dyn Fn(PageToHo
     })
 }
 
-/// Records the startup documents' paths (for the "already open" check).
-pub(super) fn remember_startup_paths(
-    state: &Rc<RefCell<AppState>>,
-    documents: &[(TabId, PathBuf)],
-) {
-    let mut state = state.borrow_mut();
-    for (tab_id, path) in documents {
-        state.input.tab_paths.insert(tab_id.get(), path.clone());
-    }
-}
-
 /// Starts the activation server once the window exists.
 pub(super) fn serve_activations(hwnd: HWND, primary: Option<PrimaryInstance>) {
     let (Some(primary), Some(state)) = (primary, handle(hwnd)) else {
@@ -256,12 +238,6 @@ const SINGLE_INSTANCE_UNAVAILABLE: &str =
 pub(super) fn shutdown(state: &Rc<RefCell<AppState>>) {
     let server = state.borrow_mut().input.activation_server.take();
     drop(server);
-}
-
-/// The folder most recently dropped onto the shell.
-#[allow(dead_code)] // Read by the repository sidebar once it is wired.
-pub(super) fn repository_root(state: &Rc<RefCell<AppState>>) -> Option<PathBuf> {
-    state.borrow().input.repository_root.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +316,10 @@ pub(super) fn on_command(hwnd: HWND, wparam: WPARAM) -> bool {
         (find_native::PREVIOUS_ID, 0) => FindCommand::Previous,
         (find_native::NEXT_ID, 0) => FindCommand::Next,
         (find_native::CLOSE_ID, 0) => FindCommand::Close,
+        // The toolbar toggle and View > Find in document (`toolbar.rs`).
+        _ if (id == super::chrome::ID_FIND || id == super::chrome::MENU_FIND) && code == 0 => {
+            FindCommand::Toggle
+        }
         _ if id == FIND_EDIT_ID && code == find_native::EN_CHANGE => {
             on_find_text_changed(hwnd);
             return true;
@@ -386,8 +366,8 @@ pub(super) fn route_key(hwnd: HWND, target: HWND, key: u16) -> bool {
 }
 
 /// A chord the WebView handed back (Ctrl+F, F3, Shift+F3).
-pub(super) fn route_accelerator(hwnd: HWND, key: u16, ctrl: bool, shift: bool) -> bool {
-    match route_find_key(key, ctrl, shift, false, false) {
+pub(super) fn route_accelerator(hwnd: HWND, key: u16, ctrl: bool, shift: bool, alt: bool) -> bool {
+    match route_find_key(key, ctrl, shift, alt, false) {
         Some(command) => {
             run_find_command(hwnd, command);
             true
@@ -1018,31 +998,13 @@ pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: C
 /// case-insensitive) selects its tab instead of opening another. Returns
 /// true when it did.
 pub(super) fn select_open_document(hwnd: HWND, state: &Rc<RefCell<AppState>>, path: &Path) -> bool {
-    let Some(text) = path.to_str() else {
-        return false;
-    };
-    let existing = {
-        let state = state.borrow();
-        state
-            .input
-            .tab_paths
-            .iter()
-            .find(|(_, open)| open.to_str().is_some_and(|open| eq_ignore_case(open, text)))
-            .map(|(tab, _)| *tab)
-    };
+    // The chrome records every tab's location when its render starts.
+    let existing = state.borrow().chrome.tab_for_path(path);
     let Some(existing) = existing.and_then(|raw| tab_by_raw(state, raw)) else {
         return false;
     };
     let _ = select_tab_id(hwnd, existing.get(), false);
     true
-}
-
-pub(super) fn remember_path(state: &Rc<RefCell<AppState>>, tab: TabId, path: &Path) {
-    state
-        .borrow_mut()
-        .input
-        .tab_paths
-        .insert(tab.get(), path.to_path_buf());
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,14 +1053,15 @@ fn on_drops_classified(hwnd: HWND) {
     let actions = state.borrow().input.drops.drain();
     for action in actions {
         match action {
-            DropAction::OpenDocument(path) => open_document(hwnd, path),
+            // .NET `OpenDocumentInTabAsync`: the chrome's open path (file
+            // check, "already open", recent files, repository detection).
+            DropAction::OpenDocument(path) => super::chrome::open_or_select(hwnd, path),
             DropAction::NotMarkdown => show_notice(&state, dragdrop::NOT_MARKDOWN),
-            DropAction::OpenRepository { root, readme } => {
+            // .NET `OpenRepositoryFolderAsync`: the chrome's repository path
+            // (tree, recent folders, saved root, README).
+            DropAction::OpenRepository { root, .. } => {
                 let root = std::path::absolute(&root).unwrap_or(root);
-                state.borrow_mut().input.repository_root = Some(root);
-                if let Some(readme) = readme {
-                    open_document(hwnd, readme);
-                }
+                super::chrome::open_repository(hwnd, &root);
             }
         }
     }
@@ -1176,7 +1139,7 @@ fn on_activation_resolved(hwnd: HWND) {
     for path in paths {
         // Already gated in the probe; checked again before opening.
         match crate::documents::check_document_path(&path) {
-            Ok(()) => open_document(hwnd, PathBuf::from(path)),
+            Ok(()) => super::chrome::open_or_select(hwnd, PathBuf::from(path)),
             Err(_) => show_notice(&state, dragdrop::REFUSED),
         }
     }

@@ -272,6 +272,7 @@ fn chrome_controls_are_native_named_and_meet_the_44_dip_target() {
         "Forward",
         "Reload document",
         "Open repository folder",
+        "Find in document",
     ] {
         let element = shell.wait(UIA_ButtonControlTypeId, button);
         assert_target(&element, minimum, true);

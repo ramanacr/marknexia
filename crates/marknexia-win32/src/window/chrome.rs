@@ -89,6 +89,8 @@ pub(super) const ID_RELOAD: usize = 2004;
 pub(super) const ID_OPEN_FOLDER: usize = 2005;
 pub(super) const ID_THEME_LABEL: usize = 2006;
 pub(super) const ID_THEME: usize = 2007;
+/// input: the find toggle (.NET `SearchToggleButton`); handled by `input`.
+pub(super) const ID_FIND: usize = 2008;
 pub(super) const ID_SIDEBAR_HEADER: usize = 2010;
 pub(super) const ID_OUTLINE: usize = 2011;
 pub(super) const ID_TREE: usize = 2012;
@@ -101,6 +103,8 @@ pub(super) const MENU_OPEN_FOLDER: usize = 2102;
 pub(super) const MENU_CLOSE_TAB: usize = 2103;
 pub(super) const MENU_TOGGLE_SIDEBAR: usize = 2111;
 pub(super) const MENU_RELOAD: usize = 2112;
+/// input: View > Find in document; handled by `input`.
+pub(super) const MENU_FIND: usize = 2113;
 pub(super) const MENU_REMOTE_ASSETS: usize = 2121;
 pub(super) const MENU_HELP: usize = 2131;
 pub(super) const MENU_ABOUT: usize = 2132;
@@ -371,6 +375,15 @@ impl ChromeState {
     }
 
     /// .NET `RenderContext.AllowRemoteAssets` for new renders.
+    /// input: the open tab showing `path` (ordinal, case-insensitive), for
+    /// .NET's "already open" check in every open path.
+    pub(super) fn tab_for_path(&self, path: &Path) -> Option<u64> {
+        self.locations
+            .iter()
+            .find(|(_, location)| same_document_path(location.path(), path))
+            .map(|(tab, _)| *tab)
+    }
+
     pub(super) fn allow_remote_assets(&self) -> bool {
         self.allow_remote_assets
     }
@@ -1282,13 +1295,14 @@ fn with_controls(state: &Rc<RefCell<AppState>>, apply: impl FnOnce(&ChromeContro
     }
 }
 
-fn all_windows(c: &ChromeControls) -> [HWND; 14] {
+fn all_windows(c: &ChromeControls) -> [HWND; 15] {
     [
         c.toolbar.toggle,
         c.toolbar.back,
         c.toolbar.forward,
         c.toolbar.reload,
         c.toolbar.folder,
+        c.toolbar.find,
         c.toolbar.theme_label,
         c.toolbar.theme,
         c.sidebar.header,
@@ -1317,6 +1331,7 @@ fn order_controls(c: &ChromeControls, shell: ShellControls) {
         c.toolbar.reload,
         shell.command,
         c.toolbar.folder,
+        c.toolbar.find,
         c.toolbar.theme_label,
         c.toolbar.theme,
         shell.tabs,
@@ -1470,7 +1485,7 @@ fn outline_jump(hwnd: HWND, index: usize) {
 /// .NET `OpenDocumentInTabAsync(path)` from the recent list, the tree and
 /// a repository README: a missing file is reported; an open document is
 /// selected and scrolled to its top; otherwise a new tab opens.
-fn open_or_select(hwnd: HWND, path: PathBuf) {
+pub(super) fn open_or_select(hwnd: HWND, path: PathBuf) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
@@ -1556,7 +1571,7 @@ fn finish_open(hwnd: HWND, path: PathBuf, exists: bool) {
 
 /// .NET `OpenRepositoryFolderAsync`: the folder passes the root gate here;
 /// its existence and README are checked on a worker.
-fn open_repository(hwnd: HWND, folder: &Path) {
+pub(super) fn open_repository(hwnd: HWND, folder: &Path) {
     let Some(state) = state_of(hwnd) else {
         return;
     };

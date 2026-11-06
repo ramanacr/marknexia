@@ -468,6 +468,35 @@ fn find_in_page_counts_and_steps_through_rendered_matches() {
     });
 }
 
+/// The toolbar's find toggle (`ID_FIND`) and the bar's close button.
+const FIND_TOGGLE_ID: u32 = 2008;
+const FIND_CLOSE_ID: u32 = 1008;
+
+#[test]
+#[ignore = "requires MARKNEXIA_SHELL_EXE and an interactive desktop"]
+fn the_toolbar_opens_the_find_bar_and_its_close_button_closes_it() {
+    let shell = launch(&[], &unique_instance_key(), 2);
+    let visible = |id: u32| {
+        by_control_id(&shell.automation, &shell.root, id).is_some_and(|element| {
+            unsafe { element.CurrentIsOffscreen() }.is_ok_and(|offscreen| !offscreen.as_bool())
+        })
+    };
+    assert!(!visible(FIND_EDIT_ID), "the find bar starts hidden");
+    let toggle =
+        by_control_id(&shell.automation, &shell.root, FIND_TOGGLE_ID).expect("find toggle");
+    assert_eq!(name(&toggle), "Find in document");
+    invoke(&toggle);
+    wait_for("the visible find bar", || {
+        visible(FIND_EDIT_ID).then_some(())
+    });
+    let close = by_control_id(&shell.automation, &shell.root, FIND_CLOSE_ID).expect("close");
+    assert_eq!(name(&close), "Close find bar");
+    invoke(&close);
+    wait_for("the hidden find bar", || {
+        (!visible(FIND_EDIT_ID)).then_some(())
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 4. Drag reorder (synthetic mouse input)
 // ---------------------------------------------------------------------------

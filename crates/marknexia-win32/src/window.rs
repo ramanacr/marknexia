@@ -424,7 +424,6 @@ fn initialize(hwnd: HWND, instance: HINSTANCE, paths: Vec<PathBuf>) -> Result<()
         let mut state = state.borrow_mut();
         state.startup = StartupTracker::new(document_mode, startup_tabs);
     }
-    input::remember_startup_paths(&state, &startup_documents);
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
     }
@@ -831,7 +830,6 @@ fn open_document(hwnd: HWND, path: PathBuf) {
         refresh_status(&state);
         return;
     };
-    input::remember_path(&state, tab_id, &path);
     start_render(hwnd, &state, tab_id.get(), path);
     // The new tab has no document yet: hide the previous controller.
     let _ = select_webview(&state, tab_id.get());
@@ -1465,7 +1463,7 @@ fn poll_webview(hwnd: HWND) {
     input::after_poll(hwnd);
     // Shell chords pressed inside the document run here, outside COM.
     for chord in accelerators {
-        if input::route_accelerator(hwnd, chord.virtual_key, chord.ctrl, chord.shift) {
+        if input::route_accelerator(hwnd, chord.virtual_key, chord.ctrl, chord.shift, chord.alt) {
             continue;
         }
         if let Some(command) = route_key(KeyChord::new(
