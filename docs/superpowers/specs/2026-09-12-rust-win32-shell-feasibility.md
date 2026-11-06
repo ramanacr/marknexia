@@ -451,3 +451,50 @@ need CI or an unlocked interactive desktop. State: *compiled*, not yet
   contents (so `repository-scan` stays uncollectable).
 - ARM64 runtime on real hardware, and all release gates: packaging, size,
   performance on a quiet machine, and parity.
+
+## Phase 2 shell chrome (2026-11-06, lane `ramana_rust_p2_chrome`)
+
+Plan tasks 1, 2 and 6 (`docs/superpowers/plans/2026-11-06-rust-win32-production.md`).
+Observable differences from .NET are in
+`compat/decisions/shell-chrome-differences.md` (CHROME-1 to CHROME-10,
+proposed).
+
+- **Implemented.**
+  - Toolbar of owner-drawn native buttons (window text = the .NET
+    automation name, face = the .NET glyph) and a theme combo box; a native
+    menu bar with File, View, Settings and Help.
+  - Sidebar: a `SysTabControl32` view selector (Outline, Repository, Recent
+    files), an owner-drawn outline list box, a `SysTreeView32` repository
+    tree filled lazily on expansion, a recent-files list box, and a 6-DIP
+    splitter that resizes by pointer and keyboard.
+  - Diagnostics bar with severity, glyph and Close button.
+  - Settings loaded at startup and saved on change through
+    `marknexia_files::settings_store`; corrupt, unreadable and newer files
+    are reported in the diagnostics bar.
+  - The executable embeds a Common Controls 6.0 manifest (`build.rs`
+    linker arguments, binaries only), so visual styles and the comctl32 v6
+    UIA proxies apply to every standard control.
+- **Hooks.** `window.rs` keeps the chrome behind lines marked `chrome:`. No
+  `AppState` borrow is held while a control is sent a message, a dialog
+  runs, or WebView2 is called; control notifications queue an action and
+  post `WM_APP+0x40`. The UIA tab provider, the deferred WebView switch and
+  `StartupTracker` are unchanged.
+- **Bridge.** Outline jumps and restored locations call
+  `window.marknexiaBridge.scrollToAnchor` through `WebViewHost::scroll_to_anchor`
+  (`ExecuteScript`, JSON-encoded argument, no completion handler).
+- **Remote images.** The setting reaches `RenderContext::allow_remote_assets`
+  (`RemoteImagePolicy::AllowHttps`). `HostDocument::from_rendered` now
+  accepts the template's remote-images policy too; before this, enabling
+  the setting would have failed every render with `IdentityMismatch`. The
+  broker still denies network requests (CHROME-7).
+- **Compiled, not native-tested.** `tests/native_chrome.rs` holds five
+  ignored tests (UIA names and 44-DIP targets of the chrome, sidebar toggle
+  persistence, repository restore and lazy tree, corrupt-settings warning
+  and dismissal, Enter on a heading then Alt+Left). They were not run: the
+  workstation was locked (foreground `LockApp`). They need CI or an
+  unlocked desktop.
+- **Headless-tested.** `tests/chrome_model.rs` (modes, width, accelerators,
+  history, diagnostics, tree flattening, layout), the outline and remote
+  image setting in `tests/documents.rs`, the remote-images header policy in
+  `marknexia-webview/tests/rendered_document.rs`, and the new accelerator
+  chords and scroll script in `marknexia-webview/tests/accelerators.rs`.
