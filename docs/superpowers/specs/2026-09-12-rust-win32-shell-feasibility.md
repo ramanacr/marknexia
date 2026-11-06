@@ -399,12 +399,9 @@ need CI or an unlocked interactive desktop. State: *compiled*, not yet
    `closing_a_tab_raises_a_structure_event_and_leaves_no_stale_child`:
    - It registers an `IUIAutomationStructureChangedEventHandler`
      (windows-rs `#[implement]`) on the `TabControl` with `TreeScope_Subtree`.
-   - It closes the active tab. The provider exposes no UIA close affordance:
-     `SelectionItem` only, no `Invoke` pattern and no close-button child. The
-     test asserts that. It then uses the Ctrl+W fallback through `SendInput`,
-     only after it asserts that the launched shell owns the foreground. The
-     synthetic Alt activation runs only when `CI=true` and
-     `GITHUB_ACTIONS=true`.
+   - It closes the active tab through UIA: `Invoke` on the tab's only child,
+     the `Close Tab` button. (Until the input lane it used Ctrl+W through
+     `SendInput` behind the foreground guard.) No synthetic input is sent.
    - It asserts a `ChildRemoved` or `ChildrenInvalidated` event whose sender
      is the `TabControl`, one `TabItem` fewer (FindAll and the raw-view
      walker agree), the survivor's name, and `UIA_E_ELEMENTNOTAVAILABLE`
@@ -430,6 +427,35 @@ need CI or an unlocked interactive desktop. State: *compiled*, not yet
      (`WM_SETTINGCHANGE` / `WM_SYSCOLORCHANGE` and repaint) needs a change to
      a system setting. It is deferred to manual or production verification.
 
+## Phase 2 input lane (written 2026-11-06, awaiting a native run)
+
+Plan Phase 2 tasks 3, 4 and 5. State: *implemented, compiled and
+headless-tested*; not yet *native-tested* (foreground `LockApp`). The gate
+`uia-native-input` (`tests/native_input.rs`) runs them in CI. Differences
+from .NET: `compat/decisions/shell-input.md` (proposed).
+
+- **Find in page.** Ctrl+F (toggle), Enter / Shift+Enter in the find box,
+  F3 / Shift+F3, Escape; a native find bar (label, box, count, previous,
+  next, close). Typed bridge messages `find` / `clearFind` and
+  `findResult` / `findUnavailable` (protocol 1, tab and epoch bound,
+  strictly validated) through an adapter injected with
+  `AddScriptToExecuteOnDocumentCreated`; the page bytes and `bridge.js`
+  are unchanged. *Unverified natively:* that the injected adapter runs
+  under the page CSP and receives `PostWebMessageAsJson` messages.
+- **Drag and drop.** `WM_DROPFILES`; the first item passes the document path
+  gate, then is classified off the UI thread (Markdown file, folder as
+  repository root plus `README.md`, other file). Not covered natively: a
+  real OLE drag needs a cross-process drag source.
+- **Single instance.** Named mutex plus a same-user, same-session named pipe
+  with a strict activation message; `StartupFileResolver` resolution with
+  the Win32 short-name expansion; `MARKNEXIA_INSTANCE_KEY` isolates test
+  launches (`tests/support/shell.rs`, the perf collector and the shell
+  check set a unique key).
+- **Tabs.** Painted close buttons, middle-click close, drag reorder with
+  `ChildrenReordered`, and a UIA `Close Tab` button (Invoke) under each
+  `TabItem`. `native_accessibility.rs` now closes through Invoke, without
+  synthetic keys.
+
 ## Implemented, awaiting native verification
 
 - **Structure events.** `ChildrenInvalidated` on tab close is now asserted by
@@ -447,8 +473,9 @@ need CI or an unlocked interactive desktop. State: *compiled*, not yet
   example when the user clicks into the document.
 - Page-to-host bridge actions (links, copy), the Mermaid runtime and local
   images; the large-document scenario (sanitizer budget).
-- Drag and drop, association activation, and the repository sidebar
-  contents (so `repository-scan` stays uncollectable).
+- Drag and drop and association activation natively (implemented, see the
+  input lane above), and the repository sidebar contents (so
+  `repository-scan` stays uncollectable).
 - ARM64 runtime on real hardware, and all release gates: packaging, size,
   performance on a quiet machine, and parity.
 
