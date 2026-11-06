@@ -63,9 +63,9 @@ use windows::{
                 WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
                 WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
                 WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
-                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+                WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+                WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -1101,6 +1101,10 @@ unsafe extern "system" fn tab_proc(
         }
         WM_CAPTURECHANGED => {
             input::on_tab_capture_lost(hwnd);
+            LRESULT(0)
+        }
+        WM_MBUTTONUP => {
+            input::on_tab_middle_click(hwnd, (lparam.0 as i16) as i32);
             LRESULT(0)
         }
         WM_PAINT => {

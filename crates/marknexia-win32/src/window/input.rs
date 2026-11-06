@@ -780,6 +780,22 @@ pub(super) fn on_tab_button_up(strip: HWND, x: i32) {
     }
 }
 
+/// `WM_MBUTTONUP`: a middle click anywhere on a tab closes it, like a
+/// closable WinUI `TabViewItem`.
+pub(super) fn on_tab_middle_click(strip: HWND, x: i32) {
+    let Some((parent, state, width, height)) = strip_context(strip) else {
+        return;
+    };
+    let tabs = tab_ids(&state);
+    if let Some(TabHit::Body(index) | TabHit::Close(index)) =
+        hit_test_tab(width, height, tabs.len(), x)
+    {
+        let portable = Rc::clone(&state.borrow().portable);
+        portable.borrow_mut().note_pointer_input();
+        let _ = close_tab(parent, tabs[index]);
+    }
+}
+
 /// `WM_CAPTURECHANGED`: a lost capture cancels the press.
 pub(super) fn on_tab_capture_lost(strip: HWND) {
     if let Some((_, state, _, _)) = strip_context(strip) {
