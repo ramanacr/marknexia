@@ -441,3 +441,20 @@ fn trusted_and_generated_documents_never_get_the_runtime() {
     });
     assert_eq!(response.status, 403);
 }
+
+#[test]
+fn a_page_with_a_text_diagram_is_hosted_without_the_mermaid_runtime() {
+    // Rust edition only (compat/decisions/text-diagrams.md, TDG-7): the
+    // stylesheet grows inside the template's `<style>` element and the page
+    // still passes the host's identity and policy checks.
+    let identity = identity(0x51);
+    let rendered = render("```diagram\na --> b\n|\nv\nc\n```\n", identity);
+    assert_eq!(rendered.text_diagrams(), 1);
+    assert!(!rendered.has_mermaid());
+    let document = HostDocument::from_rendered(3, 1, "x.md", rendered, &identity, false).unwrap();
+    assert!(!document.loads_mermaid_runtime());
+    let page = html(&document);
+    let style_end = page.find("\n  </style>\n</head>\n<body>\n").unwrap();
+    assert!(page[..style_end].contains("/* Text diagrams (Rust edition, TDG-7) */"));
+    assert!(page[style_end..].contains("<svg class=\"marknexia-text-diagram-svg\""));
+}

@@ -132,6 +132,8 @@ pub(crate) struct PageHead {
     content_security_policy: String,
     nonce: String,
     mermaid_script: bool,
+    /// Append the text-diagram stylesheet (Rust edition, TDG-7).
+    text_diagram_css: bool,
 }
 
 impl PageHead {
@@ -141,6 +143,7 @@ impl PageHead {
         directory_segments: &[&str],
         identity: &PageIdentity,
         mermaid_script: bool,
+        text_diagram_css: bool,
     ) -> Self {
         let theme = match theme {
             AppTheme::Dark => "dark",
@@ -183,6 +186,7 @@ impl PageHead {
             content_security_policy,
             nonce,
             mermaid_script,
+            text_diagram_css,
         }
     }
 
@@ -195,6 +199,9 @@ impl PageHead {
         sink.put(&self.content_security_policy);
         sink.put("\" />\n  <style>\n");
         sink.put(GITHUB_MARKDOWN_CSS);
+        if self.text_diagram_css {
+            sink.put(crate::textdiagram::TEXT_DIAGRAM_CSS);
+        }
         sink.put("\n  </style>\n</head>\n<body>\n  <div class=\"markdown-body\">\n");
         sink.put(body);
         sink.put("\n  </div>\n");
@@ -241,8 +248,15 @@ mod tests {
     #[test]
     fn counter_matches_written_length() {
         let identity = PageIdentity::new([1; 16], [2; 16]).unwrap();
-        for mermaid in [false, true] {
-            let head = PageHead::new(AppTheme::Dark, true, &["a b", "c"], &identity, mermaid);
+        for (mermaid, text_diagrams) in [(false, false), (true, false), (false, true)] {
+            let head = PageHead::new(
+                AppTheme::Dark,
+                true,
+                &["a b", "c"],
+                &identity,
+                mermaid,
+                text_diagrams,
+            );
             let mut page = String::new();
             head.write("<p>x</p>", &mut page);
             let mut counter = Counter(0);

@@ -190,6 +190,8 @@ pub enum ChromeCommand {
     CloseTab,
     ToggleSidebar,
     ToggleRemoteAssets,
+    /// View > Render text diagrams (Rust edition only, TDG-8).
+    ToggleTextDiagrams,
     SetTheme(ThemePreference),
     ShowHelp,
     ShowAbout,
@@ -298,6 +300,16 @@ pub fn remote_assets_notice(enabled: bool) -> &'static str {
         "Remote images are enabled for documents rendered from now on."
     } else {
         "Remote images are blocked by default."
+    }
+}
+
+/// The notice after View > Render text diagrams (Rust edition only, TDG-8).
+#[must_use]
+pub fn text_diagrams_notice(enabled: bool) -> &'static str {
+    if enabled {
+        "Text diagrams are drawn for documents rendered from now on."
+    } else {
+        "Text diagrams are shown as code for documents rendered from now on."
     }
 }
 

@@ -45,8 +45,48 @@ fn reads_the_dotnet_document_as_schema_version_1() {
             repository_root: Some("C:\\workspace".into()),
             recent_files: vec!["C:\\docs\\README.md".into()],
             recent_folders: vec!["C:\\workspace".into()],
+            render_text_diagrams: true,
         }
     );
+}
+
+#[test]
+fn render_text_diagrams_is_a_lenient_rust_only_property() {
+    assert!(AppSettings::default().render_text_diagrams);
+    assert!(
+        !parse(r#"{"RenderTextDiagrams": false}"#)
+            .unwrap()
+            .render_text_diagrams
+    );
+    assert!(
+        parse(r#"{"RenderTextDiagrams": true}"#)
+            .unwrap()
+            .render_text_diagrams
+    );
+    // .NET ignores the property, so a value of the wrong type never rejects
+    // the document: it keeps the default.
+    for value in ["1", "\"false\"", "null", "[]", "{}"] {
+        let settings = parse(&format!(r#"{{"Theme": 2, "RenderTextDiagrams": {value}}}"#)).unwrap();
+        assert!(settings.render_text_diagrams, "{value}");
+        assert_eq!(settings.theme, ThemePreference::Dark, "{value}");
+    }
+    // Last wins, as for the .NET properties.
+    assert!(
+        !parse(r#"{"RenderTextDiagrams": true, "RenderTextDiagrams": false}"#)
+            .unwrap()
+            .render_text_diagrams
+    );
+    // Written after the .NET properties, and read back.
+    let settings = AppSettings {
+        render_text_diagrams: false,
+        ..AppSettings::default()
+    };
+    let text = String::from_utf8(serialize_settings(&settings)).unwrap();
+    assert!(
+        text.ends_with("\"RecentFolders\": [],\n  \"RenderTextDiagrams\": false\n}"),
+        "{text}"
+    );
+    assert_eq!(parse(&text).unwrap(), settings);
 }
 
 #[test]

@@ -36,8 +36,8 @@ use super::{
         ChromeControls, ID_BACK, ID_BRAND_NAME, ID_BRAND_TAGLINE, ID_FIND, ID_FORWARD,
         ID_OPEN_FOLDER, ID_RELOAD, ID_THEME, ID_THEME_LABEL, ID_TOGGLE_SIDEBAR, MENU_ABOUT,
         MENU_CHECK_UPDATES, MENU_CLOSE_TAB, MENU_FIND, MENU_HELP, MENU_OPEN_FILE, MENU_OPEN_FOLDER,
-        MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TOGGLE_SIDEBAR, MENU_TROUBLESHOOTING, dip,
-        send, set_bounds, show, wide,
+        MENU_RELOAD, MENU_REMOTE_ASSETS, MENU_SBOM, MENU_TEXT_DIAGRAMS, MENU_TOGGLE_SIDEBAR,
+        MENU_TROUBLESHOOTING, dip, send, set_bounds, show, wide,
     },
     create_child, fill, native_color,
 };
@@ -323,6 +323,14 @@ pub(super) fn create_menu(parent: HWND, updates_enabled: bool) -> Option<HMENU> 
         let _ = AppendMenuW(view, MF_STRING, MENU_TOGGLE_SIDEBAR, w!("Toggle &sidebar"));
         let _ = AppendMenuW(view, MF_STRING, MENU_FIND, w!("&Find in document\tCtrl+F"));
         let _ = AppendMenuW(view, MF_STRING, MENU_RELOAD, w!("&Reload document\tF5"));
+        // Rust edition only (TDG-8); the check mark follows the setting.
+        let _ = AppendMenuW(view, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(
+            view,
+            MF_STRING,
+            MENU_TEXT_DIAGRAMS,
+            w!("Render &text diagrams"),
+        );
         let settings = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(
             settings,

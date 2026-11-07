@@ -435,6 +435,8 @@ pub fn build_document_with_outline(
     // The .NET `AllowRemoteAssets` setting selects the sanitizer's
     // `RemoteImagePolicy` (`AllowHttps` or `Blank`).
     context.allow_remote_assets = job.allow_remote_assets;
+    // Rust edition only: the "Render text diagrams" setting (TDG-8).
+    context.enable_text_diagrams = job.render_text_diagrams;
     // Closing the tab or starting a newer render for it sets the job's flag;
     // the render then stops at its next poll (between stages, inside the
     // sanitizer and inside highlighting) instead of finishing for nothing.
@@ -615,6 +617,9 @@ pub struct RenderJob {
     pub theme: AppTheme,
     /// .NET `RenderContext.AllowRemoteAssets` (the persisted setting).
     pub allow_remote_assets: bool,
+    /// `RenderContext::enable_text_diagrams` (the persisted
+    /// `RenderTextDiagrams` setting, Rust edition only).
+    pub render_text_diagrams: bool,
     pub cancelled: Arc<AtomicBool>,
 }
 

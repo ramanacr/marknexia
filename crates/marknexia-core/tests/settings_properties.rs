@@ -121,6 +121,7 @@ impl Rng {
             repository_root: self.bool().then(|| self.path()),
             recent_files: self.paths(),
             recent_folders: self.paths(),
+            render_text_diagrams: self.bool(),
         }
     }
 }

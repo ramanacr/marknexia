@@ -17,6 +17,7 @@ use crate::{
         escape_data_string, escaped_data_string_len, find_ci, html_decode, html_encode,
         html_encoded_len, skip_space, starts_with_ci,
     },
+    textdiagram::Converter,
 };
 
 /// A pass's output would exceed its byte budget. Passes check an estimate
@@ -121,19 +122,25 @@ fn code_block_minimum(code: &str, language: &str) -> usize {
 /// Step 2, `HighlightCodeBlocks`:
 /// `<pre><code(?:\s+class="language-([a-zA-Z0-9_\+#\-]+)")?>([\s\S]*?)</code></pre>`.
 /// Highlighting regex work polls `cancel` (about every 65,536 steps).
+///
+/// Before a block is highlighted, `diagrams` may turn it into a text diagram
+/// (Rust edition, TDG-1); `cancel` is polled before each conversion.
 pub(crate) fn highlight_code_blocks_cancellable(
     html: String,
     limit: usize,
+    diagrams: &mut Converter,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<String, HighlightError> {
-    let spliced = highlight_code_blocks_in(&html, limit, cancel)?;
+    let spliced = highlight_code_blocks_in(&html, limit, diagrams, cancel)?;
     Ok(spliced.unwrap_or(html))
 }
 
-/// [`highlight_code_blocks_cancellable`] without cancellation.
+/// [`highlight_code_blocks_cancellable`] without cancellation or text
+/// diagrams.
 #[cfg(test)]
 pub(crate) fn highlight_code_blocks(html: String, limit: usize) -> Result<String, Overflow> {
-    highlight_code_blocks_cancellable(html, limit, &|| false).map_err(|_| Overflow)
+    highlight_code_blocks_cancellable(html, limit, &mut Converter::new(false), &|| false)
+        .map_err(|_| Overflow)
 }
 
 impl From<Overflow> for HighlightError {
@@ -145,6 +152,7 @@ impl From<Overflow> for HighlightError {
 fn highlight_code_blocks_in(
     html: &str,
     limit: usize,
+    diagrams: &mut Converter,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Option<String>, HighlightError> {
     const OPEN: &str = "<pre><code";
@@ -171,6 +179,17 @@ fn highlight_code_blocks_in(
         if !language.eq_ignore_ascii_case("mermaid") {
             let code = html_decode(&html[content_start..content_end]);
             let remaining = splicer.remaining(start)?;
+            let converted = diagrams
+                .convert(&code, language, cancel)
+                .map_err(|_| HighlightError::Cancelled)?;
+            if let Some(shell) = converted {
+                if shell.len() > remaining {
+                    return Err(HighlightError::Overflow);
+                }
+                splicer.replace(start, end, &shell)?;
+                search = end;
+                continue;
+            }
             if code_block_minimum(&code, language) > remaining {
                 return Err(HighlightError::Overflow);
             }
