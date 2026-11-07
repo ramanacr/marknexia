@@ -363,6 +363,11 @@ html.marknexia-diagram-expanded body {
   width: max-content;
   min-width: 100%;
   transform-origin: 0 0;
+}
+
+/* A composited layer only while dragging; at rest the canvas is painted
+   (and its vector content rasterised) at the current zoom. */
+.marknexia-diagram-viewport.is-panning .marknexia-diagram-canvas {
   will-change: transform;
 }
 

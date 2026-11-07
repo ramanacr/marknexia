@@ -245,7 +245,7 @@ fn shell(code: &str, id: &str, drawing: &Drawing) -> String {
 
 /// The page CSS for text diagrams. The template adds it after the bundled
 /// stylesheet only when a page has a text diagram, so pages without one
-/// keep the .NET bytes. Strokes use `currentColor`, which follows the
+/// keep the bundled stylesheet bytes. Strokes use `currentColor`, which follows the
 /// theme's foreground colour and the forced colours of high-contrast mode.
 pub(crate) const TEXT_DIAGRAM_CSS: &str = "
 /* Text diagrams (Rust edition, TDG-7) */

@@ -6,6 +6,14 @@
 //! approval", for a record added later) records that exact candidate, case,
 //! field, expected value and actual value in a `parity-allowance` block.
 //! Stale allowances fail too.
+//!
+//! The bundled `github-markdown.css` and `bridge.js` are the .NET assets
+//! plus the exact edits that `parity-asset-patch` blocks record (under the
+//! same statuses): each block names the asset, a `find` text that must
+//! occur exactly once and its `replace` text. The bundled asset must equal
+//! the .NET asset with every recorded edit applied, and in each frozen page
+//! the embedded .NET asset is replaced by that patched text before the
+//! comparison, so a page may differ from .NET only by recorded edits.
 
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
@@ -25,6 +33,9 @@ const APPROVED_STATUS: &str = "approved — owner decision 2026-11-06 (G0)";
 const APPROVED_LATER_STATUS: &str = "approved — owner decision 2026-11-07";
 const ALLOWANCE_STATUSES: [&str; 3] = [APPROVED_STATUS, APPROVED_LATER_STATUS, PROPOSED_STATUS];
 const ALLOWANCE_OPEN: &str = "<!-- parity-allowance";
+const ASSET_PATCH_OPEN: &str = "<!-- parity-asset-patch";
+/// The bundled assets that the frozen pages embed.
+const ASSETS: [&str; 2] = ["github-markdown.css", "bridge.js"];
 const CASE_COUNT: usize = 7;
 
 /// Distinctive template secrets, replaced by `{volatile}` exactly where the
@@ -215,22 +226,44 @@ fn status_line(text: &str) -> Option<&str> {
     statuses.next().is_none().then_some(status)
 }
 
-fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String> {
-    let mut allowances = Vec::new();
+/// The bodies of the comment blocks that start with `open`.
+fn comment_blocks<'a>(decision: &str, text: &'a str, open: &str) -> Result<Vec<&'a str>, String> {
+    let mut bodies = Vec::new();
     let mut rest = text;
-    while let Some(start) = rest.find(ALLOWANCE_OPEN) {
-        let body_start = start + ALLOWANCE_OPEN.len();
+    while let Some(start) = rest.find(open) {
+        let body_start = start + open.len();
         let end = rest[body_start..]
             .find("-->")
-            .ok_or_else(|| format!("{decision}: unterminated parity-allowance"))?;
-        let body = &rest[body_start..body_start + end];
+            .ok_or_else(|| format!("{decision}: unterminated {}", &open[5..]))?;
+        bodies.push(&rest[body_start..body_start + end]);
         rest = &rest[body_start + end + 3..];
-        let field = |name: &str| -> Result<String, String> {
-            body.lines()
-                .find_map(|line| line.trim().strip_prefix(&format!("{name}:")))
-                .map(|value| value.trim().to_owned())
-                .ok_or_else(|| format!("{decision}: allowance missing `{name}`"))
-        };
+    }
+    Ok(bodies)
+}
+
+/// The value of a `name: value` line in a block body.
+fn block_field(decision: &str, body: &str, name: &str) -> Result<String, String> {
+    body.lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{name}:")))
+        .map(|value| value.trim().to_owned())
+        .ok_or_else(|| format!("{decision}: block missing `{name}`"))
+}
+
+/// Blocks count only in a record with exactly one accepted status line.
+fn require_status(decision: &str, text: &str) -> Result<(), String> {
+    if status_line(text).is_some_and(|status| ALLOWANCE_STATUSES.contains(&status)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
+        ))
+    }
+}
+
+fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String> {
+    let mut allowances = Vec::new();
+    for body in comment_blocks(decision, text, ALLOWANCE_OPEN)? {
+        let field = |name: &str| block_field(decision, body, name);
         let value = |name: &str| -> Result<Option<Value>, String> {
             let raw = field(name)?;
             if raw == "absent" {
@@ -249,17 +282,53 @@ fn parse_allowances(decision: &str, text: &str) -> Result<Vec<Allowance>, String
             actual: value("actual")?,
         });
     }
-    if !allowances.is_empty()
-        && !status_line(text).is_some_and(|status| ALLOWANCE_STATUSES.contains(&status))
-    {
-        return Err(format!(
-            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
-        ));
+    if !allowances.is_empty() {
+        require_status(decision, text)?;
     }
     Ok(allowances)
 }
 
-fn decision_allowances() -> Vec<Allowance> {
+/// A recorded edit of a bundled asset relative to the .NET asset.
+#[derive(Clone, Debug, PartialEq)]
+struct AssetPatch {
+    decision: String,
+    asset: String,
+    find: String,
+    replace: String,
+}
+
+fn parse_asset_patches(decision: &str, text: &str) -> Result<Vec<AssetPatch>, String> {
+    let mut patches = Vec::new();
+    for body in comment_blocks(decision, text, ASSET_PATCH_OPEN)? {
+        let text_field = |name: &str| -> Result<String, String> {
+            serde_json::from_str::<String>(&block_field(decision, body, name)?)
+                .map_err(|error| format!("{decision}: `{name}` is not a JSON string: {error}"))
+        };
+        let asset = block_field(decision, body, "asset")?;
+        if !ASSETS.contains(&asset.as_str()) {
+            return Err(format!("{decision}: unknown asset `{asset}`"));
+        }
+        let (find, replace) = (text_field("find")?, text_field("replace")?);
+        if find.is_empty() || find == replace {
+            return Err(format!(
+                "{decision}: empty or no-op asset patch for {asset}"
+            ));
+        }
+        patches.push(AssetPatch {
+            decision: decision.to_owned(),
+            asset,
+            find,
+            replace,
+        });
+    }
+    if !patches.is_empty() {
+        require_status(decision, text)?;
+    }
+    Ok(patches)
+}
+
+/// Every decision record as (file name, text), in file-name order.
+fn decision_files() -> Vec<(String, String)> {
     let mut entries: Vec<_> = fs::read_dir(repository_root().join("compat/decisions"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -268,11 +337,97 @@ fn decision_allowances() -> Vec<Allowance> {
     entries.sort();
     entries
         .into_iter()
-        .flat_map(|path| {
+        .map(|path| {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            parse_allowances(&name, &fs::read_to_string(&path).unwrap()).unwrap()
+            (name, fs::read_to_string(&path).unwrap())
         })
         .collect()
+}
+
+fn decision_allowances() -> Vec<Allowance> {
+    decision_files()
+        .iter()
+        .flat_map(|(name, text)| parse_allowances(name, text).unwrap())
+        .collect()
+}
+
+fn decision_asset_patches() -> Vec<AssetPatch> {
+    decision_files()
+        .iter()
+        .flat_map(|(name, text)| parse_asset_patches(name, text).unwrap())
+        .collect()
+}
+
+/// `source` with the patches for `asset` applied in order. Each `find` must
+/// occur exactly once in the text it is applied to, so a stale or ambiguous
+/// patch fails.
+fn apply_asset_patches(
+    asset: &str,
+    source: &str,
+    patches: &[AssetPatch],
+) -> Result<String, String> {
+    let mut text = source.to_owned();
+    for patch in patches.iter().filter(|patch| patch.asset == asset) {
+        match text.matches(patch.find.as_str()).count() {
+            1 => text = text.replacen(patch.find.as_str(), &patch.replace, 1),
+            count => {
+                return Err(format!(
+                    "{}: {asset} patch `find` occurs {count} times, not once: {:?}",
+                    patch.decision,
+                    patch.find.chars().take(80).collect::<String>()
+                ));
+            }
+        }
+    }
+    Ok(text)
+}
+
+/// The .NET oracle asset, newline-normalized.
+fn dotnet_asset(name: &str) -> String {
+    let path = repository_root()
+        .join("src/Marknexia.Rendering/Assets")
+        .join(name);
+    // Fail loudly: a missing oracle asset must not let a check pass silently.
+    let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{name}: cannot read the .NET oracle asset {} ({error}); the bundled copy \
+             cannot be verified without it",
+            path.display()
+        )
+    });
+    source.trim_start_matches('\u{feff}').replace("\r\n", "\n")
+}
+
+/// (.NET asset, .NET asset with the recorded patches) for each changed asset.
+fn patched_assets() -> Vec<(String, String)> {
+    let patches = decision_asset_patches();
+    ASSETS
+        .iter()
+        .map(|name| {
+            let source = dotnet_asset(name);
+            let patched = apply_asset_patches(name, &source, &patches).unwrap();
+            (source, patched)
+        })
+        .filter(|(source, patched)| source != patched)
+        .collect()
+}
+
+/// The frozen page with each embedded .NET asset replaced by its patched
+/// text, or `None` when the page embeds no changed asset.
+fn patch_expected_page(case: &str, page: &str, assets: &[(String, String)]) -> Option<String> {
+    let mut page = page.to_owned();
+    let mut changed = false;
+    for (source, patched) in assets {
+        match page.matches(source.as_str()).count() {
+            0 => {}
+            1 => {
+                page = page.replacen(source.as_str(), patched, 1);
+                changed = true;
+            }
+            count => panic!("{case}: a .NET asset is embedded {count} times"),
+        }
+    }
+    changed.then_some(page)
 }
 
 fn gate(
@@ -360,13 +515,22 @@ fn run_suite<E: MarkdownEngine>(candidate: &str, engine: fn() -> E) {
         CASE_COUNT,
         "expected {CASE_COUNT} unique rendering cases"
     );
+    let assets = patched_assets();
     let mut mismatches = Vec::new();
     let mut exact = Vec::new();
+    let mut asset_patched = 0;
     for case in &cases {
-        let fixture: Value =
+        let mut fixture: Value =
             serde_json::from_slice(&fs::read(fixture_root().join(case)).unwrap()).unwrap();
         assert_eq!(fixture["schemaVersion"], "marknexia-parity-v1");
         assert_eq!(fixture["area"], "rendering");
+        let patched = fixture["expected"]["html"]
+            .as_str()
+            .and_then(|page| patch_expected_page(case, page, &assets));
+        if let Some(page) = patched {
+            fixture["expected"]["html"] = Value::String(page);
+            asset_patched += 1;
+        }
         let actual = render_case(engine(), &fixture);
         let before = mismatches.len();
         differences(
@@ -395,7 +559,7 @@ fn run_suite<E: MarkdownEngine>(candidate: &str, engine: fn() -> E) {
         )
     });
     println!(
-        "{candidate} rendering parity: {} cases, {} exact, {} mismatches, {allowed} covered by proposed decisions",
+        "{candidate} rendering parity: {} cases, {} exact, {} mismatches, {allowed} covered by proposed decisions, {asset_patched} compared with recorded asset patches",
         cases.len(),
         exact.len(),
         mismatches.len()
@@ -467,6 +631,8 @@ fn allowances_accept_the_g0_approved_status() {
 fn bundled_assets_match_the_dotnet_sources() {
     // The frozen fixtures embed these assets at their oracle revision; the
     // .NET working copy may use CRLF, so compare newline-normalized text.
+    // The bundled copy is the .NET asset plus exactly the recorded patches.
+    let patches = decision_asset_patches();
     for (name, bundled) in [
         (
             "github-markdown.css",
@@ -475,18 +641,42 @@ fn bundled_assets_match_the_dotnet_sources() {
         ("bridge.js", include_str!("../assets/bridge.js")),
     ] {
         assert!(!bundled.contains('\r'), "{name} must be stored with LF");
-        let path = repository_root()
-            .join("src/Marknexia.Rendering/Assets")
-            .join(name);
-        // Fail loudly: a missing oracle asset must not let this pass silently.
-        let source = fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!(
-                "{name}: cannot read the .NET oracle asset {} ({error}); the bundled copy \
-                 cannot be verified without it",
-                path.display()
-            )
-        });
-        let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-        assert_eq!(source, bundled, "{name} drifted from {}", path.display());
+        let expected = apply_asset_patches(name, &dotnet_asset(name), &patches).unwrap();
+        assert_eq!(
+            expected, bundled,
+            "{name} drifted from the .NET asset with the recorded parity-asset-patch edits"
+        );
     }
+}
+
+#[test]
+fn asset_patches_apply_exactly_once_under_an_accepted_status() {
+    let block = "<!-- parity-asset-patch\nasset: bridge.js\nfind: \"b\"\nreplace: \"B\"\n-->";
+    let proposed = format!("Status: **{PROPOSED_STATUS}**\n{block}");
+    let patches = parse_asset_patches("d.md", &proposed).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(
+        apply_asset_patches("bridge.js", "abc", &patches).unwrap(),
+        "aBc"
+    );
+    // Another asset is untouched.
+    assert_eq!(
+        apply_asset_patches("github-markdown.css", "bb", &patches).unwrap(),
+        "bb"
+    );
+    // A stale (absent) or ambiguous (repeated) find fails.
+    assert!(apply_asset_patches("bridge.js", "ac", &patches).is_err());
+    assert!(apply_asset_patches("bridge.js", "abcb", &patches).is_err());
+    // A patch needs an accepted status, a known asset and a real edit.
+    assert!(parse_asset_patches("d.md", block).is_err());
+    assert!(parse_asset_patches("d.md", &proposed.replace("bridge.js", "x.js")).is_err());
+    assert!(parse_asset_patches("d.md", &proposed.replace("\"B\"", "\"b\"")).is_err());
+    assert!(parse_asset_patches("d.md", &proposed.replace("\"B\"", "B")).is_err());
+    // A frozen page has each changed asset replaced once.
+    let assets = vec![("abc".to_owned(), "aBc".to_owned())];
+    assert_eq!(
+        patch_expected_page("k", "<style>abc</style>", &assets).as_deref(),
+        Some("<style>aBc</style>")
+    );
+    assert_eq!(patch_expected_page("k", "<p></p>", &assets), None);
 }
