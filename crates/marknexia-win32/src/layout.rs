@@ -16,6 +16,15 @@ impl Dip {
     pub const COMPACT_BREAKPOINT: Self = Self(720);
     /// The .NET `CompactWindow` `OpenPaneLength`.
     pub const COMPACT_SIDEBAR_WIDTH: Self = Self(240);
+    /// The status bar: one caption line (12 DIPs), not an interaction
+    /// target (.NET has no status bar; CHROME-16).
+    pub const STATUS_HEIGHT: Self = Self(24);
+    /// Document tab width bounds (.NET `TabWidthMode="SizeToContent"`
+    /// gives tabs of about this size): a tab is at most `TAB_MAX_WIDTH`
+    /// wide; with many tabs they shrink equally, below `TAB_MIN_WIDTH` too,
+    /// so every tab stays reachable without scrolling.
+    pub const TAB_MIN_WIDTH: Self = Self(120);
+    pub const TAB_MAX_WIDTH: Self = Self(240);
 
     pub fn to_pixels(self, dpi: u32) -> u32 {
         self.0.saturating_mul(dpi).saturating_add(BASE_DPI - 1) / BASE_DPI
@@ -138,17 +147,9 @@ impl ShellLayout {
         let content_top = command_height.saturating_add(tab_height);
 
         let available_below_top = request.client_height.saturating_sub(content_top);
-        let status_height = available_below_top.min(target);
+        let status_height = available_below_top.min(Dip::STATUS_HEIGHT.to_pixels(request.dpi));
         let remaining_above_status = available_below_top.saturating_sub(status_height);
-        let find_height = if request.find_bar_visible {
-            remaining_above_status.min(target)
-        } else {
-            0
-        };
-        let content_bottom = request
-            .client_height
-            .saturating_sub(status_height)
-            .saturating_sub(find_height);
+        let content_bottom = request.client_height.saturating_sub(status_height);
 
         let sidebar_width = if request.sidebar_visible {
             request
@@ -160,13 +161,24 @@ impl ShellLayout {
         let content_width = request.client_width.saturating_sub(sidebar_width);
         let content_height = content_bottom.saturating_sub(content_top);
         let splitter_width = sidebar_width.min(Dip::SPLITTER_WIDTH.to_pixels(request.dpi));
-        let diagnostics_height = if request.diagnostics_visible {
-            content_height.min(target)
+        // The find bar is the first row of the document column (.NET
+        // `SearchBarGrid`, row 0 above the document), then the diagnostics
+        // bar (.NET `DiagnosticInfoBar`), then the document.
+        let find_height = if request.find_bar_visible {
+            remaining_above_status.min(target)
         } else {
             0
         };
-        let document_top = content_top.saturating_add(diagnostics_height);
-        let document_height = content_height.saturating_sub(diagnostics_height);
+        let diagnostics_top = content_top.saturating_add(find_height);
+        let diagnostics_height = if request.diagnostics_visible {
+            content_height.saturating_sub(find_height).min(target)
+        } else {
+            0
+        };
+        let document_top = diagnostics_top.saturating_add(diagnostics_height);
+        let document_height = content_height
+            .saturating_sub(find_height)
+            .saturating_sub(diagnostics_height);
 
         Self {
             command_bar: PixelRect {
@@ -194,7 +206,7 @@ impl ShellLayout {
             },
             find_bar: PixelRect {
                 x: sidebar_width,
-                y: content_bottom,
+                y: content_top,
                 width: content_width,
                 height: find_height,
             },
@@ -212,7 +224,7 @@ impl ShellLayout {
             },
             diagnostics: PixelRect {
                 x: sidebar_width,
-                y: content_top,
+                y: diagnostics_top,
                 width: content_width,
                 height: diagnostics_height,
             },

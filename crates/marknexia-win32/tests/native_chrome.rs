@@ -981,7 +981,8 @@ fn the_compact_layout_collapses_labels_and_closes_the_pane() {
     let folder = shell.wait_id("2005", UIA_ButtonControlTypeId, "Open repository folder");
     let theme = shell.wait_id("2007", UIA_ComboBoxControlTypeId, "Theme");
     assert!((width_of(&folder) - 96.0 * scale).abs() <= 2.0);
-    assert!((width_of(&theme) - 110.0 * scale).abs() <= 2.0);
+    // The wide field shows "Theme: Light" (150 DIPs; CHROME-19).
+    assert!((width_of(&theme) - 150.0 * scale).abs() <= 2.0);
 
     // Below 720 DIPs: .NET `CompactWindow`.
     shell.resize(600.0, 700.0);

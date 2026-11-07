@@ -128,6 +128,25 @@ pub fn tab_slot(total_width: i32, count: usize, index: usize) -> Option<(i32, i3
     Some((left, right))
 }
 
+/// The width that `count` tabs occupy in a strip `total_width` pixels wide
+/// when no tab may be wider than `max_tab` pixels (`Dip::TAB_MAX_WIDTH` at
+/// the current DPI). Pass the result to [`tab_slot`], [`tab_index_at`] and
+/// [`hit_test_tab`] as their `total_width`: the tabs then sit at the start
+/// of the strip, each at most `max_tab` wide, and shrink equally when they
+/// do not fit. The rest of the strip is empty. Painting, hit testing and
+/// the UIA bounds all use it, so they agree.
+#[must_use]
+pub fn tabs_extent(total_width: i32, count: usize, max_tab: i32) -> i32 {
+    let total = total_width.max(0);
+    let Ok(count) = i32::try_from(count) else {
+        return total;
+    };
+    if count == 0 {
+        return 0;
+    }
+    total.min(max_tab.max(1).saturating_mul(count))
+}
+
 /// The close button of a tab slot `left..right` in a strip `height` pixels
 /// high: a square of the strip height at the slot's right edge. It must be at
 /// least `minimum` pixels (the 44-DIP target at the current DPI) and at most
@@ -175,6 +194,10 @@ pub fn hit_test_tab(
     count: usize,
     x: i32,
 ) -> Option<TabHit> {
+    if x < 0 || x >= total_width {
+        // The empty strip after the last tab.
+        return None;
+    }
     let index = tab_index_at(total_width, count, x)?;
     let (left, right) = tab_slot(total_width, count, index)?;
     match close_button_slot(left, right, height, minimum) {
@@ -233,7 +256,7 @@ pub mod native {
     // crate depends on windows-core directly.
     use windows_core::{BOOL, Error, HRESULT, IUnknown, Interface, Result, implement};
 
-    use super::{close_button_slot, tab_slot};
+    use super::{close_button_slot, tab_slot, tabs_extent};
     use crate::{
         app::AppState,
         layout::{Dip, PixelRect},
@@ -391,7 +414,13 @@ pub mod native {
                 .position(|tab| tab.id == id)
                 .ok_or_else(|| Error::from(ELEMENT_NOT_AVAILABLE))?;
             let host = self.host_rect()?;
-            let (left, right) = tab_slot(host.right - host.left, tabs.len(), index)
+            let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
+            let extent = tabs_extent(
+                host.right - host.left,
+                tabs.len(),
+                Dip::TAB_MAX_WIDTH.to_pixels(dpi) as i32,
+            );
+            let (left, right) = tab_slot(extent, tabs.len(), index)
                 .ok_or_else(|| Error::from(ELEMENT_NOT_AVAILABLE))?;
             Ok(UiaRect {
                 left: f64::from(host.left + left),

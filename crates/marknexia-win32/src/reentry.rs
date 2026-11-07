@@ -18,6 +18,17 @@ pub fn is_free<T>(cell: &RefCell<T>) -> bool {
     cell.try_borrow_mut().is_ok()
 }
 
+/// True when neither `outer` nor the cell that `inner` selects inside it is
+/// borrowed: the shell state and the portable state it shares
+/// (`Rc<RefCell<_>>` inside the outer `RefCell`). An entry point that may
+/// touch either checks this, because an outer frame can hold the inner
+/// cell while the outer one is free (CI run 42356283206: a reentrant tab
+/// close read the portable state while an outer frame held it mutably).
+#[must_use]
+pub fn is_free_nested<T, U>(outer: &RefCell<T>, inner: fn(&T) -> &RefCell<U>) -> bool {
+    is_free(outer) && read(outer, |value| is_free(inner(value))).unwrap_or(false)
+}
+
 /// Runs `work` with a shared borrow, or returns `None` while a mutable
 /// borrow is outstanding.
 pub fn read<T, R>(cell: &RefCell<T>, work: impl FnOnce(&T) -> R) -> Option<R> {
@@ -205,6 +216,84 @@ mod tests {
             close_handler(&state, &deferred, tab);
         }
         assert_eq!(state.borrow().closes, [7, 8]);
+        assert!(deferred.is_empty());
+    }
+
+    /// The shell's shape: the portable tab state is an `Rc<RefCell<_>>`
+    /// inside the outer state. CI run 42356283206 crashed when a close
+    /// read the inner state while an outer frame held it mutably, with
+    /// the outer state free. Close and select must defer, then run.
+    struct Shell {
+        portable: std::rc::Rc<RefCell<crate::app::AppState>>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ShellWork {
+        Close(crate::tabs::TabId),
+        Select(crate::tabs::TabId),
+    }
+
+    impl Queued for ShellWork {
+        fn admission(&self) -> Admission {
+            Admission::Critical
+        }
+
+        fn same(&self, other: &Self) -> bool {
+            self == other
+        }
+    }
+
+    fn portable(shell: &Shell) -> &RefCell<crate::app::AppState> {
+        &shell.portable
+    }
+
+    fn run_shell(shell: &RefCell<Shell>, deferred: &Deferred<ShellWork>, work: ShellWork) {
+        if !is_free_nested(shell, portable) {
+            let _ = deferred.push(work);
+            return;
+        }
+        let app = std::rc::Rc::clone(&shell.borrow().portable);
+        let mut app = app.borrow_mut();
+        match work {
+            ShellWork::Close(tab) => assert!(app.close_tab(tab)),
+            ShellWork::Select(tab) => assert!(app.select_tab(tab)),
+        }
+    }
+
+    #[test]
+    fn close_and_select_defer_while_the_inner_portable_state_is_borrowed() {
+        let mut app = crate::app::AppState::new();
+        let first = app.open_tab("first.md").unwrap();
+        let second = app.open_tab("second.md").unwrap();
+        let third = app.open_tab("third.md").unwrap();
+        let inner = std::rc::Rc::new(RefCell::new(app));
+        let shell = RefCell::new(Shell {
+            portable: std::rc::Rc::clone(&inner),
+        });
+        let deferred = Deferred::new(8);
+        {
+            // An outer frame holds the inner state mutably; the outer
+            // state is free (the crash's shape).
+            let _held = inner.borrow_mut();
+            assert!(is_free(&shell));
+            assert!(!is_free_nested(&shell, portable));
+            run_shell(&shell, &deferred, ShellWork::Close(second));
+            run_shell(&shell, &deferred, ShellWork::Select(first));
+        }
+        {
+            // A shared inner borrow defers too: the handlers write.
+            let _held = inner.borrow();
+            run_shell(&shell, &deferred, ShellWork::Select(third));
+        }
+        assert_eq!(deferred.len(), 3);
+        assert!(is_free_nested(&shell, portable));
+        for work in deferred.take() {
+            run_shell(&shell, &deferred, work);
+        }
+        let app = inner.borrow();
+        let ids: Vec<_> = app.tabs().tabs().iter().map(|tab| tab.id()).collect();
+        assert_eq!(ids, [first, third]);
+        assert_eq!(app.active_tab(), Some(third));
         assert!(deferred.is_empty());
     }
 

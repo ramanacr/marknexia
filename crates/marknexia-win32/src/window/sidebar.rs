@@ -10,22 +10,24 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-            DrawFocusRect, DrawTextW, EndPaint, HFONT, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
-            ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            BeginPaint, DT_BOTTOM, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
+            DT_SINGLELINE, DT_TOP, DT_VCENTER, DrawFocusRect, DrawTextW, EndPaint, HFONT, HGDIOBJ,
+            InvalidateRect, PAINTSTRUCT, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
+            TRANSPARENT,
         },
         UI::{
             Controls::{
-                DRAWITEMSTRUCT, HTREEITEM, ODS_FOCUS, ODS_SELECTED, TCITEMW, TVI_LAST, TVI_ROOT,
-                TVIF_CHILDREN, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
-                TVITEMEXW_CHILDREN, TVITEMW,
+                DRAWITEMSTRUCT, HTREEITEM, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, TCITEMW,
+                TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
+                TVINSERTSTRUCTW_0, TVITEMEXW_CHILDREN, TVITEMW,
             },
             Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture},
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
                 DefWindowProcW, GetClientRect, GetCursorPos, GetParent, IDC_SIZEWE, LoadCursorW,
-                RegisterClassW, SetCursor, WINDOW_STYLE, WM_CAPTURECHANGED, WM_KEYDOWN,
-                WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-                WM_SETFOCUS, WNDCLASSW, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+                RegisterClassW, SetCursor, WINDOW_STYLE, WM_CAPTURECHANGED, WM_ERASEBKGND,
+                WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
+                WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WNDCLASSW, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -40,11 +42,12 @@ use super::{
         set_bounds, wide,
     },
     create_child, fill, native_color,
+    style::{self, SidebarColors},
 };
 use crate::{
     chrome_model::{OutlineEntry, SidebarMode, TreeNode, sidebar_resize_key},
     layout::PixelRect,
-    theme::Palette,
+    theme::ColorSpec,
 };
 
 pub(super) const SPLITTER_CLASS: PCWSTR = w!("MarknexiaRustSplitter");
@@ -63,7 +66,6 @@ const LBS_HASSTRINGS: u32 = 0x40;
 const LBS_NOINTEGRALHEIGHT: u32 = 0x100;
 const WS_VSCROLL: u32 = 0x0020_0000;
 const TVS_HASBUTTONS: u32 = 0x1;
-const TVS_HASLINES: u32 = 0x2;
 const TVS_LINESATROOT: u32 = 0x4;
 const TVS_SHOWSELALWAYS: u32 = 0x20;
 const LB_ADDSTRING: u32 = 0x0180;
@@ -87,6 +89,17 @@ const TVHT_ONITEM: u32 = 0x46;
 /// Height of the heading row above the list, in DIPs: it holds the
 /// 44-DIP row action button.
 const HEADER_HEIGHT: u32 = 44;
+/// The left inset of the heading and of the list text, in DIPs, so both
+/// start on the same line (.NET `DocumentMapHeader` margin 16).
+const TEXT_INSET: u32 = 16;
+/// Repository tree rows (WinUI `TreeViewItem` is 32 DIPs; CHROME-18).
+const TREE_ROW: u32 = 32;
+const TVS_FULLROWSELECT: u32 = 0x1000;
+const TVS_TRACKSELECT: u32 = 0x200;
+const TVM_SETINDENT: u32 = 0x1107;
+const TVM_SETEXTENDEDSTYLE: u32 = 0x112C;
+/// `TVS_EX_DOUBLEBUFFER | TVS_EX_FADEINOUTEXPANDOS`.
+const TREE_EXTENDED: isize = 0x4 | 0x40;
 const BS_OWNERDRAW: u32 = 0x0B;
 
 /// The view selector (.NET `SidebarModeSelector`, a two-tab `TabView`; the
@@ -172,12 +185,15 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
         w!("SysTreeView32"),
         w!("Repository files"),
         WINDOW_STYLE(
+            // Explorer-style rows: chevrons, no lines, full-row hover and
+            // selection (the theme draws them).
             WS_CHILD.0
                 | WS_TABSTOP.0
                 | TVS_HASBUTTONS
-                | TVS_HASLINES
                 | TVS_LINESATROOT
-                | TVS_SHOWSELALWAYS,
+                | TVS_SHOWSELALWAYS
+                | TVS_FULLROWSELECT
+                | TVS_TRACKSELECT,
         ),
         ID_TREE as isize,
     )?;
@@ -186,9 +202,17 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<SidebarControl
         instance,
         w!("LISTBOX"),
         w!("Recent Markdown files"),
-        WINDOW_STYLE(list_style),
+        // Owner-drawn (name above folder); the item text, which names the
+        // UI Automation item, stays the full path.
+        WINDOW_STYLE(list_style | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS),
         ID_RECENT as isize,
     )?;
+    send(
+        tree,
+        TVM_SETEXTENDEDSTYLE,
+        TREE_EXTENDED as usize,
+        TREE_EXTENDED,
+    );
     // The .NET row buttons (CHROME-3), one per view: each acts on the
     // selected row of its list. Shown with their view by `layout`.
     let action = |name: PCWSTR, id: usize| {
@@ -255,6 +279,7 @@ pub(super) fn layout(
 ) {
     let width = sidebar.width.saturating_sub(splitter.width);
     let target = dip(44, dpi);
+    // The tab items keep the 44-DIP target; the divider sits below them.
     let selector_height = sidebar.height.min(target.saturating_add(dip(4, dpi)));
     set_bounds(
         selector,
@@ -264,7 +289,8 @@ pub(super) fn layout(
             ..sidebar
         },
     );
-    let item_width = width.saturating_sub(dip(4, dpi)) / 3;
+    // Equal pivot items across the pane (the painted labels are centred).
+    let item_width = width / 3;
     send(
         selector,
         TCM_SETITEMSIZE,
@@ -275,11 +301,14 @@ pub(super) fn layout(
         .height
         .saturating_sub(selector_height)
         .min(dip(HEADER_HEIGHT, dpi));
-    let header_inset = dip(16, dpi).min(width);
-    // The row action button sits at the right end of the heading row.
+    let header_inset = dip(TEXT_INSET, dpi).min(width);
+    // The row action button sits at the right end of the heading row,
+    // inside the pane, on the pane color.
     let action = target.min(header_height).min(width);
     let action_rect = PixelRect {
-        x: sidebar.x.saturating_add(width.saturating_sub(action)),
+        x: sidebar
+            .x
+            .saturating_add(width.saturating_sub(action).saturating_sub(dip(4, dpi))),
         y: sidebar.y.saturating_add(selector_height),
         width: action,
         height: action,
@@ -289,7 +318,9 @@ pub(super) fn layout(
         PixelRect {
             x: sidebar.x.saturating_add(header_inset),
             y: sidebar.y.saturating_add(selector_height),
-            width: width.saturating_sub(header_inset).saturating_sub(action),
+            width: action_rect
+                .x
+                .saturating_sub(sidebar.x.saturating_add(header_inset)),
             height: header_height,
         },
     );
@@ -317,10 +348,18 @@ pub(super) fn layout(
     }
     set_bounds(controls.splitter, splitter);
     chrome::show(controls.splitter, splitter.width > 0);
+    // Outline and recent rows keep the 44-DIP target (the accessibility
+    // gate measures outline items); tree rows are 32 DIPs (CHROME-18).
     let item = isize::try_from(target).unwrap_or(44);
     send(controls.outline, LB_SETITEMHEIGHT, 0, item);
     send(controls.recent, LB_SETITEMHEIGHT, 0, item);
-    send(controls.tree, TVM_SETITEMHEIGHT, target as usize, 0);
+    send(
+        controls.tree,
+        TVM_SETITEMHEIGHT,
+        dip(TREE_ROW, dpi) as usize,
+        0,
+    );
+    send(controls.tree, TVM_SETINDENT, dip(12, dpi) as usize, 0);
 }
 
 fn make_lparam(low: u32, high: u32) -> isize {
@@ -486,34 +525,90 @@ pub(super) fn tree_item_at_cursor(tree: HWND) -> HTREEITEM {
     }
 }
 
-/// Paints one outline row: indented by heading level, selection and focus
-/// visible in every theme (system colors in high contrast).
-pub(super) fn draw_outline_item(item: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, dpi: u32) {
-    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
-    let (background, foreground) = if selected {
-        (colors.accent, colors.on_accent)
-    } else {
-        (
-            colors.surface,
-            chrome::readable_on(colors.surface, colors.text),
-        )
-    };
-    let dc = item.hDC;
-    let rect = item.rcItem;
-    fill(dc, &rect, native_color(background));
-    let Ok(index) = usize::try_from(item.itemID as i32) else {
-        return;
-    };
-    let length = send(item.hwndItem, LB_GETTEXTLEN, index, 0).0;
+/// The text of list item `index`, from the list box (`LBS_HASSTRINGS`).
+fn list_text(list: HWND, index: usize) -> Vec<u16> {
+    let length = send(list, LB_GETTEXTLEN, index, 0).0;
     let Ok(length) = usize::try_from(length) else {
-        return;
+        return Vec::new();
     };
     let mut text = vec![0_u16; length + 1];
-    let copied = send(item.hwndItem, LB_GETTEXT, index, text.as_mut_ptr() as isize).0;
+    let copied = send(list, LB_GETTEXT, index, text.as_mut_ptr() as isize).0;
     text.truncate(usize::try_from(copied).unwrap_or(0));
+    text
+}
+
+/// The row background shared by the sidebar lists (.NET `ListViewItem`):
+/// the pane color, a rounded hover or selection fill inset 4 DIPs, and a
+/// 3-DIP accent pill at the left of the selected row. Returns the text
+/// color for the row.
+fn draw_row(item: &DRAWITEMSTRUCT, colors: SidebarColors, dpi: u32) -> ColorSpec {
+    let px = |value: u32| i32::try_from(dip(value, dpi)).unwrap_or(0);
+    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let hot = i32::try_from(item.itemID).ok() == style::hot(item.hwndItem);
+    let dc = item.hDC;
+    let rect = item.rcItem;
+    fill(dc, &rect, native_color(colors.background));
+    let row = style::inset(&rect, px(4), px(2));
+    if selected {
+        style::fill_round(dc, &row, native_color(colors.selected), px(4));
+        let pill_height = px(16).min(row.bottom - row.top);
+        let top = row.top + (row.bottom - row.top - pill_height) / 2;
+        style::fill_round(
+            dc,
+            &RECT {
+                left: row.left,
+                top,
+                right: row.left + px(3),
+                bottom: top + pill_height,
+            },
+            native_color(colors.accent),
+            px(1),
+        );
+    } else if hot {
+        style::fill_round(dc, &row, native_color(colors.hover), px(4));
+    }
+    if item.itemState.0 & ODS_FOCUS.0 != 0 && item.itemState.0 & ODS_NOFOCUSRECT.0 == 0 {
+        // SAFETY: the DC is valid for WM_DRAWITEM.
+        let _ = unsafe { DrawFocusRect(dc, &row) };
+    }
+    if selected {
+        colors.selected_text
+    } else {
+        colors.text
+    }
+}
+
+/// Paints one outline row: indented 14 DIPs per heading level after a
+/// 16-DIP inset (the heading text's inset), hover and selection visible
+/// in every theme (system colors in high contrast). Headings below level
+/// two use the muted text color, so the levels read apart.
+pub(super) fn draw_outline_item(
+    item: &DRAWITEMSTRUCT,
+    colors: SidebarColors,
+    font: HFONT,
+    dpi: u32,
+) {
+    let Ok(index) = usize::try_from(item.itemID as i32) else {
+        fill(item.hDC, &item.rcItem, native_color(colors.background));
+        return;
+    };
+    let text_color = draw_row(item, colors, dpi);
+    let mut text = list_text(item.hwndItem, index);
     let indent = u32::try_from(item.itemData).unwrap_or(0);
-    let left = rect.left + i32::try_from(dip(8 + indent, dpi)).unwrap_or(0);
-    let mut area = RECT { left, ..rect };
+    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let foreground = if indent >= 28 && !selected {
+        colors.muted
+    } else {
+        text_color
+    };
+    let rect = item.rcItem;
+    let left = rect.left + i32::try_from(dip(TEXT_INSET + indent, dpi)).unwrap_or(0);
+    let mut area = RECT {
+        left,
+        right: rect.right - i32::try_from(dip(8, dpi)).unwrap_or(0),
+        ..rect
+    };
+    let dc = item.hDC;
     // SAFETY: the DC is valid for WM_DRAWITEM; the previous font is
     // restored before returning.
     unsafe {
@@ -527,10 +622,275 @@ pub(super) fn draw_outline_item(item: &DRAWITEMSTRUCT, colors: Palette, font: HF
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
         SelectObject(dc, previous);
-        if item.itemState.0 & ODS_FOCUS.0 != 0 {
-            let _ = DrawFocusRect(dc, &rect);
+    }
+}
+
+/// Paints one recent file: the file name (body text) above its folder
+/// (caption, muted, ellipsis in the middle of the path). The item text,
+/// which is also its accessible name, stays the full path.
+pub(super) fn draw_recent_item(
+    item: &DRAWITEMSTRUCT,
+    colors: SidebarColors,
+    fonts: (HFONT, HFONT),
+    dpi: u32,
+) {
+    const DT_PATH_ELLIPSIS: u32 = 0x4000;
+    let Ok(index) = usize::try_from(item.itemID as i32) else {
+        fill(item.hDC, &item.rcItem, native_color(colors.background));
+        return;
+    };
+    let text_color = draw_row(item, colors, dpi);
+    let path = String::from_utf16_lossy(&list_text(item.hwndItem, index));
+    let (name, folder) = recent_parts(&path);
+    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let rect = item.rcItem;
+    let px = |value: u32| i32::try_from(dip(value, dpi)).unwrap_or(0);
+    let middle = rect.top + (rect.bottom - rect.top) / 2;
+    let left = rect.left + px(TEXT_INSET);
+    let right = rect.right - px(8);
+    let dc = item.hDC;
+    // SAFETY: the DC is valid for WM_DRAWITEM; the previous font is
+    // restored before returning.
+    unsafe {
+        SetBkMode(dc, TRANSPARENT);
+        let previous = SelectObject(dc, HGDIOBJ(fonts.0.0));
+        SetTextColor(dc, native_color(text_color));
+        let mut name: Vec<u16> = name.encode_utf16().collect();
+        let mut area = RECT {
+            left,
+            top: rect.top,
+            right,
+            bottom: middle + px(2),
+        };
+        DrawTextW(
+            dc,
+            &mut name,
+            &mut area,
+            DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        SelectObject(dc, HGDIOBJ(fonts.1.0));
+        SetTextColor(
+            dc,
+            native_color(if selected { text_color } else { colors.muted }),
+        );
+        let mut folder: Vec<u16> = folder.encode_utf16().collect();
+        let mut area = RECT {
+            left,
+            top: middle + px(2),
+            right,
+            bottom: rect.bottom,
+        };
+        DrawTextW(
+            dc,
+            &mut folder,
+            &mut area,
+            DT_LEFT
+                | DT_TOP
+                | DT_SINGLELINE
+                | DT_NOPREFIX
+                | windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(DT_PATH_ELLIPSIS),
+        );
+        SelectObject(dc, previous);
+    }
+}
+
+/// A recent file's name and its folder (the full path when it has no
+/// separator).
+pub(super) fn recent_parts(path: &str) -> (String, String) {
+    match path.rfind(['\\', '/']) {
+        Some(split) if split + 1 < path.len() => {
+            let folder = &path[..split];
+            // A drive root keeps its separator ("C:\").
+            let folder = if folder.ends_with(':') {
+                format!("{folder}\\")
+            } else {
+                folder.to_owned()
+            };
+            (path[split + 1..].to_owned(), folder)
+        }
+        _ => (path.to_owned(), String::new()),
+    }
+}
+
+/// Gives the view selector its flat pivot look (`paint_selector`) and
+/// hover tracking. The control stays a native tab control: selection,
+/// keys and the UI Automation tab items are the platform's.
+pub(super) fn flatten_selector(selector: HWND) {
+    // SAFETY: subclasses a control of this thread; removed at WM_NCDESTROY.
+    let _ = unsafe { SetWindowSubclass(selector, Some(selector_proc), SELECTOR_SUBCLASS, 0) };
+    style::track_hover(selector, style::HoverKind::Tabs);
+}
+
+const SELECTOR_SUBCLASS: usize = 0x4D58_5356;
+
+unsafe extern "system" fn selector_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match message {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            if !paint_selector(hwnd) {
+                // SAFETY: default painting when the state is busy.
+                return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            }
+            LRESULT(0)
+        }
+        WM_SETFOCUS | WM_KILLFOCUS => {
+            // SAFETY: default processing, then a repaint request.
+            let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            result
+        }
+        WM_NCDESTROY => {
+            // SAFETY: removes this procedure from its own window.
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(selector_proc), SELECTOR_SUBCLASS) };
+            unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+        }
+        // SAFETY: default processing of the subclassed control.
+        _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// Paints the view selector as a flat pivot: the pane color, each view's
+/// label centred in its tab, the selected label in the text color with a
+/// 3-DIP accent underline, hover as a subtle rounded fill, and a focus
+/// rectangle while keyboard cues are shown. High contrast: Window,
+/// WindowText and Highlight. Returns false (nothing painted) while the
+/// shell state is busy.
+fn paint_selector(hwnd: HWND) -> bool {
+    const TCM_GETITEMCOUNT: u32 = 0x1304;
+    const TCM_GETITEMRECT: u32 = 0x130A;
+    const TCM_GETCURSEL: u32 = 0x130B;
+    const WM_QUERYUISTATE: u32 = 0x0129;
+    const UISF_HIDEFOCUS: isize = 0x1;
+    // SAFETY: the parent is the shell window on this thread.
+    let Some(state) = (unsafe { GetParent(hwnd) })
+        .ok()
+        .and_then(|parent| unsafe { app_state_handle(parent) })
+    else {
+        return false;
+    };
+    let Some((theme, colors, font, dpi)) = state.try_borrow().ok().and_then(|state| {
+        let font = state.chrome.text_fonts()?.0;
+        Some((state.theme, super::palette(state.theme), font, state.dpi))
+    }) else {
+        return false;
+    };
+    drop(state);
+    let sidebar = style::sidebar_colors(theme, colors);
+    let indicator = style::indicator(theme, colors);
+    let px = |value: u32| i32::try_from(dip(value, dpi)).unwrap_or(0);
+    // Control queries first: no paint DC is open while messages are sent.
+    let count = usize::try_from(send(hwnd, TCM_GETITEMCOUNT, 0, 0).0).unwrap_or(0);
+    let selected = usize::try_from(send(hwnd, TCM_GETCURSEL, 0, 0).0).ok();
+    let items: Vec<RECT> = (0..count)
+        .map(|index| {
+            let mut rect = RECT::default();
+            send(
+                hwnd,
+                TCM_GETITEMRECT,
+                index,
+                std::ptr::from_mut(&mut rect) as isize,
+            );
+            rect
+        })
+        .collect();
+    let cues = send(hwnd, WM_QUERYUISTATE, 0, 0).0 & UISF_HIDEFOCUS == 0;
+    // SAFETY: reads this thread's focus window.
+    let focused = unsafe { GetFocus() } == hwnd;
+    let hot = style::hot(hwnd);
+    let mut paint = PAINTSTRUCT::default();
+    // SAFETY: BeginPaint/EndPaint pair for this window's WM_PAINT.
+    let dc = unsafe { BeginPaint(hwnd, &mut paint) };
+    let mut client = RECT::default();
+    // SAFETY: plain query of this thread's window.
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
+    fill(dc, &client, native_color(sidebar.background));
+    // The divider under the pivot.
+    fill(
+        dc,
+        &RECT {
+            top: client.bottom - 1,
+            ..client
+        },
+        native_color(sidebar.border),
+    );
+    // SAFETY: the paint DC is valid until EndPaint; the previous font is
+    // restored below.
+    let previous = unsafe {
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, HGDIOBJ(font.0))
+    };
+    for (index, rect) in items.iter().enumerate() {
+        let Some(mode) = SidebarMode::from_index(index) else {
+            continue;
+        };
+        let is_selected = selected == Some(index);
+        let body = RECT {
+            bottom: client.bottom - 1,
+            ..*rect
+        };
+        if hot == i32::try_from(index).ok() && !is_selected {
+            style::fill_round(
+                dc,
+                &style::inset(&body, px(2), px(6)),
+                native_color(sidebar.hover),
+                px(4),
+            );
+        }
+        let mut label: Vec<u16> = mode.label().encode_utf16().collect();
+        let mut measure = body;
+        // SAFETY: as above; DT_CALCRECT only measures.
+        unsafe {
+            DrawTextW(
+                dc,
+                &mut label,
+                &mut measure,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            SetTextColor(
+                dc,
+                native_color(if is_selected {
+                    sidebar.text
+                } else {
+                    sidebar.muted
+                }),
+            );
+            let mut area = body;
+            DrawTextW(
+                dc,
+                &mut label,
+                &mut area,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+        if is_selected {
+            let width = (measure.right - measure.left).min(body.right - body.left);
+            let center = (body.left + body.right) / 2;
+            let bar = RECT {
+                left: center - width / 2,
+                right: center - width / 2 + width,
+                top: body.bottom - px(3),
+                bottom: body.bottom,
+            };
+            style::fill_round(dc, &bar, native_color(indicator), px(1));
+            if focused && cues {
+                // SAFETY: as above.
+                let _ = unsafe { DrawFocusRect(dc, &style::inset(&body, px(2), px(4))) };
+            }
         }
     }
+    // SAFETY: restores the font and ends the paint started above.
+    unsafe {
+        SelectObject(dc, previous);
+        let _ = EndPaint(hwnd, &paint);
+    }
+    true
 }
 
 /// The resize handle (.NET `SidebarResizeHandle`): drag with the pointer,
@@ -604,34 +964,37 @@ unsafe extern "system" fn splitter_proc(
     }
 }
 
-/// A border line on the sidebar edge; the whole handle in the accent color
+/// The pane color with a one-pixel divider on the sidebar edge; the whole handle in the accent color
 /// while it has keyboard focus (Highlight in high contrast).
 fn paint_splitter(hwnd: HWND, parent: Option<HWND>) {
     let colors = parent
         // SAFETY: as in `splitter_proc`.
         .and_then(|parent| unsafe { app_state_handle(parent) })
         .and_then(|state| {
-            state
-                .try_borrow()
-                .ok()
-                .map(|state| super::palette(state.theme))
+            state.try_borrow().ok().map(|state| {
+                let colors = super::palette(state.theme);
+                (colors, style::sidebar_colors(state.theme, colors))
+            })
         });
     let mut paint = PAINTSTRUCT::default();
     // SAFETY: BeginPaint/EndPaint pair for this window's WM_PAINT.
     let dc = unsafe { BeginPaint(hwnd, &mut paint) };
     let mut client = RECT::default();
-    if let (Some(colors), Ok(())) = (colors, unsafe { GetClientRect(hwnd, &mut client) }) {
+    if let (Some((colors, sidebar)), Ok(())) = (colors, unsafe { GetClientRect(hwnd, &mut client) })
+    {
         // SAFETY: reads this thread's focus window.
         let focused = unsafe { GetFocus() } == hwnd;
         if focused {
             fill(dc, &client, native_color(colors.accent));
         } else {
-            fill(dc, &client, native_color(colors.surface));
+            // The pane color, then the one-pixel divider between the pane
+            // and the document (.NET pane `BorderThickness="0,0,1,0"`).
+            fill(dc, &client, native_color(sidebar.background));
             let line = RECT {
                 left: client.right - 1,
                 ..client
             };
-            fill(dc, &line, native_color(colors.border));
+            fill(dc, &line, native_color(sidebar.border));
         }
     }
     // SAFETY: ends the paint started above.

@@ -13,7 +13,8 @@
 //!
 //! Every entry point (window message, command, key, UIA close, drop
 //! callback, poll hook) first checks that no outer frame holds an
-//! `AppState` borrow (`crate::reentry::is_free`). While one does, the work
+//! `AppState` borrow or a borrow of the portable state inside it
+//! (`shell_free`, `crate::reentry::is_free_nested`). While one does, the work
 //! is queued in a thread-local list outside the state and runs from
 //! `after_poll`, at the top of the message loop. A reentrant path never
 //! panics.
@@ -31,7 +32,9 @@ use windows::Win32::UI::{
 
 use super::*;
 use crate::{
-    accessibility::{TabHit, close_button_slot, hit_test_tab, native::CloseTab, tab_index_at},
+    accessibility::{
+        TabHit, close_button_slot, hit_test_tab, native::CloseTab, tab_index_at, tabs_extent,
+    },
     chrome_model::SidebarResize,
     dragdrop::{self, DropAction, DropQueue},
     find::{
@@ -109,6 +112,9 @@ enum Work {
     SidebarKey(SidebarResize),
     /// `WM_CLOSE` dispatched inside a nested pump.
     CloseWindow,
+    /// An open of an already open document whose tab lookup found the
+    /// state busy (`select_open_document`).
+    Open(PathBuf),
 }
 
 impl Queued for Work {
@@ -132,6 +138,7 @@ impl Queued for Work {
             | Self::Selection(_)
             | Self::AutomationSelect(_)
             | Self::Selected(_)
+            | Self::Open(_)
             | Self::CaptureLost(_) => Admission::Critical,
             // Two clicks need two button-ups.
             Self::TabUp(_) => Admission::Keep,
@@ -316,7 +323,7 @@ fn defer(work: Work) {
 
 /// True while an outer frame holds an `AppState` borrow.
 fn busy(state: &Rc<RefCell<AppState>>) -> bool {
-    !reentry::is_free(state)
+    !super::shell_free(state)
 }
 
 /// Runs deferred work. Called only from the tail of the top-level message
@@ -359,7 +366,8 @@ pub(super) fn run_deferred(hwnd: HWND) {
             Work::Selection(raw) => apply_automation_selection(hwnd, raw),
             // A tab closed since the request is dropped.
             Work::AutomationSelect(tab) => {
-                if handle(hwnd).is_some_and(|state| tab_by_raw(&state, tab.get()).is_some()) {
+                // A busy lookup lets the selection itself defer again.
+                if handle(hwnd).is_some_and(|state| tab_by_raw(&state, tab.get()) != Ok(None)) {
                     let _ = select_from_automation(hwnd, tab);
                 }
             }
@@ -367,8 +375,12 @@ pub(super) fn run_deferred(hwnd: HWND) {
                 if let Some(state) = handle(hwnd) {
                     // Only while that tab is still the active one: a later
                     // selection raised its own event.
-                    let active = active_tab(&state) == Some(tab);
-                    refresh_tabs(&state, active.then_some(tab));
+                    match active_tab(&state) {
+                        Ok(active) => {
+                            refresh_tabs(&state, (active == Some(tab)).then_some(tab));
+                        }
+                        Err(Busy) => defer(Work::Selected(tab)),
+                    }
                 }
             }
             Work::Repaint => {
@@ -395,6 +407,7 @@ pub(super) fn run_deferred(hwnd: HWND) {
             Work::ChromeWorker => super::chrome::apply_worker_results(hwnd),
             Work::SidebarDragEnd => super::chrome::end_sidebar_drag(hwnd),
             Work::SidebarKey(step) => super::chrome::resize_sidebar_by_key(hwnd, step),
+            Work::Open(path) => super::open_document(hwnd, path),
             Work::CloseWindow => {
                 // The state is free here: close now, synchronously, and run
                 // nothing after it (the window is going away).
@@ -429,7 +442,15 @@ fn tab_at(strip: HWND, x: i32) -> Option<TabId> {
     })
     .flatten()
     .or_else(|| TAB_ORDER.with(|order| order.try_borrow().ok().map(|order| order.clone())))?;
-    tab_index_at(client.right - client.left, tabs.len(), x).map(|index| tabs[index])
+    // SAFETY: plain query on this thread's window.
+    let dpi = unsafe { GetDpiForWindow(strip) }.max(96);
+    let extent = tabs_extent(client.right - client.left, tabs.len(), max_tab(dpi));
+    tab_index_at(extent, tabs.len(), x).map(|index| tabs[index])
+}
+
+/// The widest document tab in pixels (`Dip::TAB_MAX_WIDTH`).
+fn max_tab(dpi: u32) -> i32 {
+    i32::try_from(Dip::TAB_MAX_WIDTH.to_pixels(dpi)).unwrap_or(i32::MAX)
 }
 
 /// Records a button event that arrived while busy.
@@ -533,19 +554,34 @@ fn handle(hwnd: HWND) -> Option<Rc<RefCell<AppState>>> {
     unsafe { app_state_handle(hwnd) }
 }
 
-fn active_tab(state: &Rc<RefCell<AppState>>) -> Option<TabId> {
-    let portable = Rc::clone(&state.borrow().portable);
-    portable.borrow().active_tab()
+/// The shell or the portable state inside it is borrowed by an outer frame:
+/// the caller defers its work (`Deferred`) instead of dropping it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Busy;
+
+/// Reads the portable state without a borrow conflict: `Err(Busy)` while
+/// an outer frame holds the shell state mutably or the portable state
+/// mutably (CI run 42356283206).
+fn with_portable<R>(
+    state: &Rc<RefCell<AppState>>,
+    read: impl FnOnce(&crate::app::AppState) -> R,
+) -> Result<R, Busy> {
+    let portable = reentry::read(state, |state| Rc::clone(&state.portable)).ok_or(Busy)?;
+    reentry::read(&portable, read).ok_or(Busy)
 }
 
-fn tab_by_raw(state: &Rc<RefCell<AppState>>, raw: u64) -> Option<TabId> {
-    let portable = Rc::clone(&state.borrow().portable);
-    let app = portable.borrow();
-    app.tabs()
-        .tabs()
-        .iter()
-        .find(|tab| tab.id().get() == raw)
-        .map(|tab| tab.id())
+fn active_tab(state: &Rc<RefCell<AppState>>) -> Result<Option<TabId>, Busy> {
+    with_portable(state, crate::app::AppState::active_tab)
+}
+
+fn tab_by_raw(state: &Rc<RefCell<AppState>>, raw: u64) -> Result<Option<TabId>, Busy> {
+    with_portable(state, |app| {
+        app.tabs()
+            .tabs()
+            .iter()
+            .find(|tab| tab.id().get() == raw)
+            .map(|tab| tab.id())
+    })
 }
 
 fn show_notice(state: &Rc<RefCell<AppState>>, text: &str) {
@@ -733,11 +769,13 @@ pub(super) fn on_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
     match message {
         WM_ACTIVATION_REQUEST => on_activation(hwnd),
         WM_ACTIVATION_RESOLVED => on_activation_resolved(hwnd),
-        WM_CLOSE_TAB_REQUEST => {
-            if let Some(tab) = tab_by_raw(&state, wparam.0 as u64) {
+        WM_CLOSE_TAB_REQUEST => match tab_by_raw(&state, wparam.0 as u64) {
+            Ok(Some(tab)) => {
                 let _ = close_requested(hwnd, tab);
             }
-        }
+            Ok(None) => {}
+            Err(Busy) => defer(Work::Message(message, wparam)),
+        },
         WM_DROPS_CLASSIFIED => on_drops_classified(hwnd),
         _ => {}
     }
@@ -757,7 +795,14 @@ fn close_requested(hwnd: HWND, tab: TabId) -> bool {
         defer(Work::Close(tab));
         return true;
     }
-    tab_by_raw(&state, tab.get()).is_some() && close_tab(hwnd, tab)
+    match tab_by_raw(&state, tab.get()) {
+        Ok(Some(_)) => close_tab(hwnd, tab),
+        Ok(None) => false,
+        Err(Busy) => {
+            defer(Work::Close(tab));
+            true
+        }
+    }
 }
 
 /// `WM_COMMAND` from the find box (`EN_CHANGE`) and the find buttons
@@ -821,12 +866,17 @@ pub(super) fn route_key(hwnd: HWND, target: HWND, key: u16) -> bool {
     if edit == 0 {
         return false;
     }
+    // Enter counts only in the visible find box: F6 can focus the hidden
+    // box, and Enter there must not open the bar.
+    // SAFETY: plain query of this thread's window.
+    let in_find_box = target.0 as isize == edit
+        && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(target) }.as_bool();
     let command = route_find_key(
         key,
         down(VK_CONTROL.0),
         down(VK_SHIFT.0),
         down(VK_MENU.0),
-        target.0 as isize == edit,
+        in_find_box,
     );
     command.is_some_and(|command| {
         run_find_entry(hwnd, command);
@@ -901,6 +951,10 @@ fn close_search(hwnd: HWND) {
     let Some((state, controls)) = find_context(hwnd) else {
         return;
     };
+    let Ok(active) = active_tab(&state) else {
+        defer(Work::Find(FindCommand::Close));
+        return;
+    };
     // SAFETY: reads this thread's focus.
     let focused = unsafe { GetFocus() };
     let had_focus = [
@@ -913,7 +967,7 @@ fn close_search(hwnd: HWND) {
     set_find_bar_visible(hwnd, &state, false);
     set_find_text(&state, controls.edit, "");
     controls.set_count("");
-    if let Some(tab) = active_tab(&state).map(TabId::get) {
+    if let Some(tab) = active.map(TabId::get) {
         state.borrow_mut().input.find.close(tab);
         let _ = post_to_page(&state, tab, |document_epoch| HostToPage::ClearFind {
             protocol: PROTOCOL,
@@ -935,8 +989,17 @@ fn find_in_document(hwnd: HWND, backwards: bool) {
     let Some((state, controls)) = find_context(hwnd) else {
         return;
     };
-    let Some(tab) = active_tab(&state).map(TabId::get) else {
-        return;
+    let tab = match active_tab(&state) {
+        Ok(Some(tab)) => tab.get(),
+        Ok(None) => return,
+        Err(Busy) => {
+            defer(Work::Find(if backwards {
+                FindCommand::Previous
+            } else {
+                FindCommand::Next
+            }));
+            return;
+        }
     };
     let query = controls.query();
     let start = state.borrow_mut().input.find.begin(tab, &query);
@@ -992,9 +1055,18 @@ fn on_find_text_changed(hwnd: HWND) {
     if state.borrow().input.find_text_programmatic {
         return;
     }
-    if let Some(tab) = active_tab(&state).map(TabId::get) {
-        let query = controls.query();
-        state.borrow_mut().input.find.set_query(tab, &query);
+    match active_tab(&state) {
+        Ok(Some(tab)) => {
+            let query = controls.query();
+            state.borrow_mut().input.find.set_query(tab.get(), &query);
+        }
+        Ok(None) => {}
+        Err(Busy) => {
+            // The text change is applied again from the message loop.
+            let code = find_native::EN_CHANGE as usize;
+            defer(Work::Command(WPARAM((code << 16) | FIND_EDIT_ID)));
+            return;
+        }
     }
     controls.set_count("");
 }
@@ -1008,7 +1080,11 @@ pub(super) fn refresh_find(state: &Rc<RefCell<AppState>>) {
     let Some(controls) = state.borrow().input.find_controls else {
         return;
     };
-    let active = active_tab(state).map(TabId::get);
+    let Ok(active) = active_tab(state) else {
+        defer(Work::RefreshFind);
+        return;
+    };
+    let active = active.map(TabId::get);
     let (query, text) = {
         let state = state.borrow();
         (
@@ -1041,11 +1117,16 @@ pub(super) fn after_poll(hwnd: HWND) {
     let Some((state, controls)) = find_context(hwnd) else {
         return;
     };
+    // Read before the queue is drained: a busy state leaves the messages
+    // for the next turn.
+    let Ok(active) = active_tab(&state) else {
+        return;
+    };
+    let active = active.map(TabId::get);
     let messages: Vec<PageToHost> = {
         let queue = Rc::clone(&state.borrow().input.page_messages);
         queue.borrow_mut().drain(..).collect()
     };
-    let active = active_tab(&state).map(TabId::get);
     let visible = find_bar_visible(&state);
     for message in messages {
         let text = match message {
@@ -1133,17 +1214,49 @@ pub(super) fn draw_find_button(hwnd: HWND, item: &DRAWITEMSTRUCT) -> bool {
     if !controls.is_button(item.hwndItem) {
         return false;
     }
-    let colors = palette(borrowed.theme);
+    let theme = borrowed.theme;
+    let colors = palette(theme);
     let dpi = borrowed.dpi;
+    let fonts = borrowed.chrome.button_fonts();
     drop(borrowed);
-    let colors = ButtonColors {
-        face: native_color(colors.elevated),
-        pressed: native_color(colors.accent_pressed),
-        text: native_color(colors.text),
-        on_pressed: native_color(colors.on_accent),
-        border: native_color(colors.border),
+    // .NET glyphs: ChevronUp (E70E), ChevronDown (E70D), Cancel (E711).
+    let glyph = if item.hwndItem == controls.previous {
+        '\u{E70E}'
+    } else if item.hwndItem == controls.next {
+        '\u{E70D}'
+    } else {
+        '\u{E711}'
     };
-    find_native::draw_button(&controls, item, &colors, dpi)
+    match fonts {
+        Some(fonts) => {
+            super::toolbar::draw_button(
+                item,
+                theme,
+                colors,
+                colors.surface,
+                glyph,
+                None,
+                fonts,
+                dpi,
+            );
+            true
+        }
+        None => {
+            let colors = ButtonColors {
+                face: native_color(colors.elevated),
+                pressed: native_color(colors.accent_pressed),
+                text: native_color(colors.text),
+                on_pressed: native_color(colors.on_accent),
+                border: native_color(colors.border),
+            };
+            find_native::draw_button(&controls, item, &colors, dpi)
+        }
+    }
+}
+
+/// chrome: the find bar's edit, label and count windows (fonts, colors).
+pub(super) fn find_windows(state: &Rc<RefCell<AppState>>) -> Option<FindControls> {
+    reentry::read(state, |state| state.input.find_controls).flatten()
 }
 
 /// `reflow` hook: lays out the find bar inside the shell layout's rect.
@@ -1171,7 +1284,15 @@ pub(super) fn close_tab(hwnd: HWND, tab: TabId) -> bool {
         return true;
     }
     // An outer call holds the session: the document cannot be removed now.
-    if state.borrow().webview_checked_out || tab_by_raw(&state, tab.get()).is_none() {
+    match tab_by_raw(&state, tab.get()) {
+        Ok(Some(_)) => {}
+        Ok(None) => return false,
+        Err(Busy) => {
+            defer(Work::Close(tab));
+            return true;
+        }
+    }
+    if state.borrow().webview_checked_out {
         return false;
     }
     let raw = tab.get();
@@ -1248,6 +1369,15 @@ struct Strip {
     width: i32,
     height: i32,
     minimum: i32,
+    /// The widest tab in pixels (`Dip::TAB_MAX_WIDTH`).
+    max_tab: i32,
+}
+
+impl Strip {
+    /// The width the tabs occupy (`tabs_extent`), for the geometry helpers.
+    fn extent(&self, count: usize) -> i32 {
+        tabs_extent(self.width, count, self.max_tab)
+    }
 }
 
 fn strip(strip: HWND) -> Option<Strip> {
@@ -1260,6 +1390,7 @@ fn strip(strip: HWND) -> Option<Strip> {
         width,
         height,
         minimum: Dip::INTERACTION_TARGET.to_pixels(dpi) as i32,
+        max_tab: max_tab(dpi),
     })
 }
 
@@ -1304,18 +1435,19 @@ pub(super) fn on_tab_button_down(strip_window: HWND, x: i32) {
 /// `capture` false (a replayed press whose button is already up) no
 /// capture is taken: the queued button-up completes it as a click.
 fn press_tab(strip_window: HWND, x: i32, capture: bool) {
-    let Some(Strip {
-        parent,
-        state,
-        width,
-        height,
-        minimum,
-    }) = strip(strip_window)
-    else {
+    let Some(geometry) = strip(strip_window) else {
         return;
     };
     let strip = strip_window;
-    let tabs = tab_ids(&state);
+    let tabs = tab_ids(&geometry.state);
+    let width = geometry.extent(tabs.len());
+    let Strip {
+        parent,
+        state,
+        height,
+        minimum,
+        ..
+    } = geometry;
     let Some(hit) = hit_test_tab(width, height, minimum, tabs.len(), x) else {
         return;
     };
@@ -1376,6 +1508,9 @@ pub(super) fn on_tab_mouse_move(strip: HWND, x: i32, buttons: usize) {
         state.borrow_mut().input.tab_press = Some(press);
     }
     let tabs = tab_ids(&state);
+    // SAFETY: plain query on this thread's window.
+    let dpi = unsafe { GetDpiForWindow(strip) }.max(96);
+    let width = tabs_extent(width, tabs.len(), max_tab(dpi));
     let (Some(destination), Some(current)) = (
         tab_index_at(width, tabs.len(), x),
         tabs.iter().position(|tab| *tab == press.tab),
@@ -1394,16 +1529,18 @@ pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
         defer_click(strip_window, x, ClickKind::Up);
         return;
     }
-    let Some(Strip {
-        parent,
-        state,
-        width,
-        height,
-        minimum,
-    }) = strip(strip_window)
-    else {
+    let Some(geometry) = strip(strip_window) else {
         return;
     };
+    let tabs = tab_ids(&geometry.state);
+    let width = geometry.extent(tabs.len());
+    let Strip {
+        parent,
+        state,
+        height,
+        minimum,
+        ..
+    } = geometry;
     let press = state.borrow_mut().input.tab_press.take();
     // SAFETY: releases this thread's capture; WM_CAPTURECHANGED runs here
     // and finds no press.
@@ -1411,7 +1548,6 @@ pub(super) fn on_tab_button_up(strip_window: HWND, x: i32) {
     let Some(press) = press.filter(|press| press.close) else {
         return;
     };
-    let tabs = tab_ids(&state);
     if let Some(TabHit::Close(index)) = hit_test_tab(width, height, minimum, tabs.len(), x)
         && tabs[index] == press.tab
     {
@@ -1426,17 +1562,18 @@ pub(super) fn on_tab_middle_click(strip_window: HWND, x: i32) {
         defer_click(strip_window, x, ClickKind::Middle);
         return;
     }
-    let Some(Strip {
-        parent,
-        state,
-        width,
-        height,
-        minimum,
-    }) = strip(strip_window)
-    else {
+    let Some(geometry) = strip(strip_window) else {
         return;
     };
-    let tabs = tab_ids(&state);
+    let tabs = tab_ids(&geometry.state);
+    let width = geometry.extent(tabs.len());
+    let Strip {
+        parent,
+        state,
+        height,
+        minimum,
+        ..
+    } = geometry;
     if let Some(TabHit::Body(index) | TabHit::Close(index)) =
         hit_test_tab(width, height, minimum, tabs.len(), x)
     {
@@ -1458,35 +1595,44 @@ pub(super) fn on_tab_capture_lost(strip: HWND) {
     }
 }
 
-/// The tab title color. The active tab uses the accent, except in high
-/// contrast, where the accent is `Highlight` but the fill is `ButtonFace`:
-/// there the title stays `ButtonText` on `ButtonFace`, a system pair that
-/// always contrasts.
+/// The tab title color: the text color on the active tab (its accent
+/// underline marks it), the secondary text color on the others. High
+/// contrast keeps `ButtonText` on `ButtonFace` (the palette's text on the
+/// tab fill), a system pair that always contrasts.
 pub(super) fn tab_text_color(
     theme: EffectiveTheme,
     colors: crate::theme::Palette,
     active: bool,
 ) -> ColorSpec {
-    if active && theme != EffectiveTheme::HighContrast {
-        colors.accent
-    } else {
-        colors.text
+    match theme {
+        EffectiveTheme::HighContrast => colors.text,
+        _ if active => colors.text,
+        _ => colors.text_secondary,
     }
 }
 
-/// Paints a tab's title, clipped before its close button, and the close
-/// glyph. Text starts where it did before close buttons existed.
-pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: COLORREF, dpi: u32) {
-    use windows::Win32::Graphics::Gdi::{DT_END_ELLIPSIS, DT_NOPREFIX};
+/// Paints a tab's title (body font, vertically centred, ellipsis), clipped
+/// before its close button, and the close glyph inside the tab: a 10-DIP
+/// cross centred in the 44-DIP target, on a rounded 28-DIP hover face when
+/// `close_hover` gives its color.
+pub(super) fn paint_tab_content(
+    dc: HDC,
+    rect: &RECT,
+    title: &str,
+    text_color: COLORREF,
+    close_hover: Option<COLORREF>,
+    dpi: u32,
+) {
+    use windows::Win32::Graphics::Gdi::{DT_END_ELLIPSIS, DT_NOPREFIX, DT_VCENTER};
     let scale = |dip: u32| (dip.saturating_mul(dpi) / 96) as i32;
     let minimum = Dip::INTERACTION_TARGET.to_pixels(dpi) as i32;
     let close = close_button_slot(rect.left, rect.right, rect.bottom - rect.top, minimum);
     let mut text_rect = RECT {
-        left: rect.left.saturating_add(scale(12)),
-        top: rect.top.saturating_add(scale(12)),
+        left: rect.left.saturating_add(scale(14)),
+        top: rect.top.saturating_add(scale(2)),
         right: close
             .map_or(rect.right, |(left, _)| left)
-            .saturating_sub(scale(4)),
+            .saturating_sub(scale(2)),
         bottom: rect.bottom,
     };
     let mut text: Vec<u16> = title.encode_utf16().collect();
@@ -1499,23 +1645,39 @@ pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: C
                 dc,
                 &mut text,
                 &mut text_rect,
-                DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
         }
     }
     if let Some((left, right)) = close {
         let glyph = RECT {
             left,
-            top: rect.top,
+            top: rect.top.saturating_add(scale(2)),
             right,
             bottom: rect.bottom,
         };
+        if let Some(face) = close_hover {
+            let half = scale(14);
+            let cx = (glyph.left + glyph.right) / 2;
+            let cy = (glyph.top + glyph.bottom) / 2;
+            super::style::fill_round(
+                dc,
+                &RECT {
+                    left: cx - half,
+                    top: cy - half,
+                    right: cx + half,
+                    bottom: cy + half,
+                },
+                face,
+                scale(4),
+            );
+        }
         find_native::draw_glyph(
             dc,
             &glyph,
             Glyph::Cross,
             text_color,
-            scale(10),
+            scale(9),
             scale(1).max(1),
         );
     }
@@ -1531,8 +1693,14 @@ pub(super) fn paint_tab_content(dc: HDC, rect: &RECT, title: &str, text_color: C
 pub(super) fn select_open_document(hwnd: HWND, state: &Rc<RefCell<AppState>>, path: &Path) -> bool {
     // The chrome records every tab's location when its render starts.
     let existing = reentry::read(state, |state| state.chrome.tab_for_path(path)).flatten();
-    let Some(existing) = existing.and_then(|raw| tab_by_raw(state, raw)) else {
-        return false;
+    let existing = match existing.map(|raw| tab_by_raw(state, raw)) {
+        Some(Ok(Some(existing))) => existing,
+        Some(Err(Busy)) => {
+            // Opened from the message loop: it selects the tab then.
+            defer(Work::Open(path.to_path_buf()));
+            return true;
+        }
+        _ => return false,
     };
     let _ = select_tab_id(hwnd, existing.get(), false);
     true

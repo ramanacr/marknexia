@@ -73,6 +73,44 @@ fn close_buttons_sit_at_the_slot_end_and_hit_testing_agrees() {
     assert_eq!(tab_index_at(400, 0, 10), None);
 }
 
+/// Tabs are at most `Dip::TAB_MAX_WIDTH` wide and sit at the start of the
+/// strip; with many tabs they shrink equally. The empty strip after the
+/// last tab is no tab (no selection, no close), but drag destinations
+/// still clamp to the last tab.
+#[test]
+fn tab_widths_are_clamped_and_the_empty_strip_is_not_a_tab() {
+    use marknexia_win32::{
+        accessibility::{TabHit, close_button_slot, hit_test_tab, tab_index_at, tabs_extent},
+        layout::Dip,
+    };
+    for (dpi, max) in [(96_u32, 240_i32), (144, 360), (192, 480)] {
+        assert_eq!(Dip::TAB_MAX_WIDTH.to_pixels(dpi) as i32, max);
+        let height = Dip::INTERACTION_TARGET.to_pixels(dpi) as i32;
+        // One document in a 1920-pixel strip: one tab of the maximum width.
+        let extent = tabs_extent(1920, 1, max);
+        assert_eq!(extent, max, "{dpi} DPI");
+        assert_eq!(tab_slot(extent, 1, 0), Some((0, max)));
+        assert_eq!(
+            hit_test_tab(extent, height, height, 1, max - 1),
+            Some(TabHit::Close(0))
+        );
+        assert_eq!(hit_test_tab(extent, height, height, 1, max), None);
+        assert_eq!(hit_test_tab(extent, height, height, 1, 1500), None);
+        assert_eq!(tab_index_at(extent, 1, 1500), Some(0));
+        // Two documents: two tabs of the maximum width, not half the strip.
+        let extent = tabs_extent(1920, 2, max);
+        assert_eq!(tab_slot(extent, 2, 1), Some((max, 2 * max)));
+        // The narrowest preferred tab still holds a 44-DIP close button.
+        let min = Dip::TAB_MIN_WIDTH.to_pixels(dpi) as i32;
+        assert!(close_button_slot(0, min, height, height).is_some());
+    }
+    // Many tabs shrink equally to fit the strip.
+    assert_eq!(tabs_extent(1000, 10, 240), 1000);
+    assert_eq!(tab_slot(1000, 10, 9), Some((900, 1000)));
+    assert_eq!(tabs_extent(1000, 0, 240), 0);
+    assert_eq!(tabs_extent(-5, 2, 240), 0);
+}
+
 /// Close buttons at 150 % and 200 % scale: the strip is 44 DIP high
 /// (`Dip::INTERACTION_TARGET`, rounded up), the button is a square of that
 /// height, and narrow tabs hide it instead of shrinking it.

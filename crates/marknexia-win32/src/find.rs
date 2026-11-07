@@ -263,8 +263,11 @@ pub mod native {
     pub const CLOSE_ID: isize = 1008;
     /// `EN_CHANGE` from the find box.
     pub const EN_CHANGE: u32 = 0x0300;
-    const LABEL_WIDTH: Dip = Dip(120);
-    const COUNT_WIDTH: Dip = Dip(110);
+    /// The find box: up to 280 DIPs wide, 28 DIPs high (CHROME-17).
+    const EDIT_WIDTH: Dip = Dip(280);
+    const EDIT_HEIGHT: Dip = Dip(28);
+    const COUNT_WIDTH: Dip = Dip(96);
+    const PADDING: Dip = Dip(8);
     /// The longest text read back from the find box, in UTF-16 units. The
     /// bridge limit is `MAX_FIND_QUERY_UNITS`; the box itself is limited to
     /// it with `EM_LIMITTEXT`.
@@ -323,7 +326,8 @@ pub mod native {
                 0,
                 LABEL_ID,
             )?;
-            let count = child(parent, instance, w!("STATIC"), w!(""), 0, COUNT_ID)?;
+            // SS_NOPREFIX | SS_CENTERIMAGE: one vertically centred line.
+            let count = child(parent, instance, w!("STATIC"), w!(""), 0x280, COUNT_ID)?;
             let button = BS_OWNERDRAW as u32 | WS_TABSTOP.0;
             let previous = child(
                 parent,
@@ -400,42 +404,72 @@ pub mod native {
             window == self.previous || window == self.next || window == self.close
         }
 
-        /// Lays the bar out inside `bar` (the shell layout's find bar):
-        /// label, box, count text, then three 44-DIP buttons. Hidden when the
-        /// bar has no height.
+        /// Lays the bar out inside `bar` (the shell layout's find bar, the
+        /// first row of the document column): a compact group at the right
+        /// end, as the .NET floating search header: the box (bordered, 28
+        /// DIPs high, centred), the count, then three 44-DIP buttons. The
+        /// label keeps a zero-size place before the box: it names the box
+        /// for UI Automation. Hidden when the bar has no height.
         pub fn layout(&self, bar: PixelRect, dpi: u32) {
             let visible = bar.height > 0 && bar.width > 0;
             let button = Dip::INTERACTION_TARGET.to_pixels(dpi).min(bar.width / 6);
-            let label = LABEL_WIDTH.to_pixels(dpi).min(bar.width / 4);
+            let padding = PADDING.to_pixels(dpi).min(bar.width / 8);
             let count = COUNT_WIDTH.to_pixels(dpi).min(bar.width / 4);
-            let edit = bar
+            let available = bar
                 .width
-                .saturating_sub(label)
                 .saturating_sub(count)
-                .saturating_sub(button.saturating_mul(3));
-            let mut x = bar.x;
-            for (window, width) in [
-                (self.label, label),
-                (self.edit, edit),
-                (self.count, count),
-                (self.previous, button),
-                (self.next, button),
-                (self.close, button),
-            ] {
+                .saturating_sub(button.saturating_mul(3))
+                .saturating_sub(padding.saturating_mul(3));
+            let edit = EDIT_WIDTH.to_pixels(dpi).min(available);
+            let edit_height = EDIT_HEIGHT.to_pixels(dpi).min(bar.height);
+            let group = edit
+                .saturating_add(padding)
+                .saturating_add(count)
+                .saturating_add(button.saturating_mul(3));
+            let mut x = bar
+                .right()
+                .saturating_sub(padding)
+                .saturating_sub(group)
+                .max(bar.x);
+            let edit_y = bar.y + bar.height.saturating_sub(edit_height) / 2;
+            let place = |window: HWND, x: u32, y: u32, width: u32, height: u32| {
                 // SAFETY: live child windows of this thread; no pointers.
                 unsafe {
                     let _ = SetWindowPos(
                         window,
                         None,
                         x as i32,
-                        bar.y as i32,
+                        y as i32,
                         width as i32,
-                        bar.height as i32,
+                        height as i32,
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     );
                     let _ = ShowWindow(window, if visible { SW_SHOW } else { SW_HIDE });
                 }
-                x = x.saturating_add(width);
+            };
+            place(self.label, x, bar.y, 0, 0);
+            place(self.edit, x, edit_y, edit, edit_height);
+            x = x.saturating_add(edit).saturating_add(padding);
+            place(self.count, x, bar.y, count, bar.height);
+            x = x.saturating_add(count);
+            for window in [self.previous, self.next, self.close] {
+                place(window, x, bar.y, button, bar.height);
+                x = x.saturating_add(button);
+            }
+            if visible {
+                // Inner margins of the box: 6 DIPs each side.
+                const EM_SETMARGINS: u32 = 0x00D3;
+                const EC_BOTH: usize = 0x3;
+                let margin = Dip(6).to_pixels(dpi) as isize;
+                // SAFETY: a live child of this thread; no pointers.
+                let _ = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                        self.edit,
+                        EM_SETMARGINS,
+                        Some(windows::Win32::Foundation::WPARAM(EC_BOTH)),
+                        Some(windows::Win32::Foundation::LPARAM(margin | (margin << 16))),
+                    )
+                };
             }
         }
 

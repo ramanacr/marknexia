@@ -9,16 +9,14 @@ use windows::{
     Win32::{
         Foundation::{HWND, RECT},
         Graphics::Gdi::{
-            BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-            DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-            DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint, FF_DONTCARE, FONT_WEIGHT,
-            FW_NORMAL, FW_SEMIBOLD, FrameRect, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
-            PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            BeginPaint, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+            DT_VCENTER, DrawFocusRect, DrawTextW, EndPaint, FW_NORMAL, FW_SEMIBOLD, HFONT, HGDIOBJ,
+            InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
         UI::{
             Controls::{
-                DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, TOOLTIPS_CLASSW,
-                TTF_IDISHWND, TTF_SUBCLASS, TTTOOLINFOW,
+                DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED,
+                TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTTOOLINFOW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreateMenu, CreatePopupMenu,
@@ -31,6 +29,7 @@ use windows::{
     core::{PCWSTR, PWSTR, w},
 };
 
+use super::style;
 use super::{
     COMMAND_OPEN_ID, child_style,
     chrome::{
@@ -42,11 +41,16 @@ use super::{
     },
     create_child, fill, native_color,
 };
-use crate::{layout::PixelRect, theme::Palette};
+use crate::{
+    layout::PixelRect,
+    theme::{ColorSpec, EffectiveTheme, Palette, SystemColorRole},
+};
 use windows::Win32::Foundation::HINSTANCE;
 
 const BS_OWNERDRAW: u32 = 0x0B;
 const CBS_DROPDOWNLIST: u32 = 0x3;
+const CBS_OWNERDRAWFIXED: u32 = 0x10;
+const CBS_HASSTRINGS: u32 = 0x200;
 const WS_VSCROLL: u32 = 0x0020_0000;
 const SS_NOPREFIX: u32 = 0x80;
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -140,7 +144,9 @@ const BRAND_DETAILS_WIDTH: u32 = 150;
 const BRAND_MARGIN: u32 = 12;
 /// .NET `AppBarSeparator` before the Open button.
 const SEPARATOR: u32 = 8;
-const THEME_LABEL_WIDTH: u32 = 56;
+/// The theme field with its "Theme: " prefix (replaces the Rust-only
+/// "Theme" label beside the box), and without it (.NET `Width="110"`).
+const THEME_PREFIX_WIDTH: u32 = 150;
 const THEME_WIDTH: u32 = 110;
 /// .NET `CompactWindow`: `ThemeSelector.Width = 86`.
 const COMPACT_THEME_WIDTH: u32 = 86;
@@ -208,11 +214,15 @@ pub(super) fn create(parent: HWND, instance: HINSTANCE) -> Result<Toolbar, super
         instance,
         w!("COMBOBOX"),
         w!("Theme"),
-        child_style(CBS_DROPDOWNLIST | WS_VSCROLL),
+        // Owner-drawn: the field shows "Theme: Light", vertically centred.
+        child_style(CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL),
         ID_THEME as isize,
     )?;
     for item in [w!("System"), w!("Light"), w!("Dark")] {
         send(theme, CB_ADDSTRING, 0, item.as_ptr() as isize);
+    }
+    for button in &buttons {
+        style::track_hover(*button, style::HoverKind::Button);
     }
     Ok(Toolbar {
         toggle: buttons[0],
@@ -361,13 +371,13 @@ pub(super) fn create_menu(parent: HWND, updates_enabled: bool) -> Option<HMENU> 
 
 /// What fits in the command bar: the .NET `CompactWindow` state collapses
 /// the brand details and the Open and Folder labels and narrows the theme
-/// selector. The Rust-only "Theme" label, then the brand details, also
-/// give way when the wide layout does not fit.
+/// selector. The "Theme: " prefix in the theme field, then the brand
+/// details, also give way when the wide layout does not fit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Plan {
+pub(super) struct Plan {
     details: bool,
     labels: bool,
-    theme_label: bool,
+    pub(super) theme_prefix: bool,
     theme_width: u32,
 }
 
@@ -376,7 +386,7 @@ fn plan(compact: bool, width_dip: u32) -> Plan {
         return Plan {
             details: false,
             labels: false,
-            theme_label: false,
+            theme_prefix: false,
             theme_width: COMPACT_THEME_WIDTH,
         };
     }
@@ -391,8 +401,8 @@ fn plan(compact: bool, width_dip: u32) -> Plan {
         + GAP;
     let right = ICON_WIDTH + GAP + THEME_WIDTH + PADDING;
     let details = BRAND_DETAILS_WIDTH + BRAND_MARGIN;
-    let label = THEME_LABEL_WIDTH;
-    let (details, theme_label) = if left + details + right + label <= width_dip {
+    let label = THEME_PREFIX_WIDTH - THEME_WIDTH;
+    let (details, theme_prefix) = if left + details + right + label <= width_dip {
         (true, true)
     } else if left + details + right <= width_dip {
         (true, false)
@@ -402,9 +412,19 @@ fn plan(compact: bool, width_dip: u32) -> Plan {
     Plan {
         details,
         labels: true,
-        theme_label,
-        theme_width: THEME_WIDTH,
+        theme_prefix,
+        theme_width: if theme_prefix {
+            THEME_PREFIX_WIDTH
+        } else {
+            THEME_WIDTH
+        },
     }
+}
+
+/// Whether the theme field shows its "Theme: " prefix for a bar `width`
+/// pixels wide at `dpi` (`draw_theme_item`).
+pub(super) fn theme_prefix(compact: bool, width: u32, dpi: u32) -> bool {
+    plan(compact, width * 96 / dpi.max(1)).theme_prefix
 }
 
 /// Lays the toolbar out in the command bar row: sidebar toggle, brand,
@@ -507,22 +527,10 @@ pub(super) fn layout(
             height: height.saturating_mul(4),
         },
     );
-    let label_width = if plan.theme_label {
-        dip(THEME_LABEL_WIDTH, dpi)
-    } else {
-        0
-    };
-    let label_x = theme_x.saturating_sub(label_width);
-    show(toolbar.theme_label, plan.theme_label);
-    set_bounds(
-        toolbar.theme_label,
-        PixelRect {
-            x: label_x,
-            y: bar.y,
-            width: label_width,
-            height,
-        },
-    );
+    // The prefix in the field replaces the separate label; the label stays
+    // (hidden) as the combo box's name source for older MSAA clients.
+    let label_x = theme_x;
+    show(toolbar.theme_label, false);
     // The find toggle sits left of the theme selector, as in .NET.
     let find_width = dip(BUTTONS[5].width, dpi);
     set_bounds(
@@ -538,7 +546,8 @@ pub(super) fn layout(
         },
     );
     // The selection field and list items meet the 44-DIP target; the item
-    // height excludes the field's borders.
+    // height excludes the field's borders (3 pixels each side), so the
+    // owner-drawn text is centred in a 44-DIP box.
     let field = isize::try_from(height.saturating_sub(6)).unwrap_or(0);
     send(toolbar.theme, CB_SETITEMHEIGHT, usize::MAX, field);
     send(
@@ -549,54 +558,37 @@ pub(super) fn layout(
     );
 }
 
-/// Glyph font for button faces at `dpi`.
+/// Glyph font for button faces at `dpi` (.NET `FontIcon`, 16 DIPs:
+/// Segoe Fluent Icons, else Segoe MDL2 Assets).
 pub(super) fn glyph_font(dpi: u32) -> HFONT {
-    font(w!("Segoe MDL2 Assets"), 11, dpi)
+    style::font(style::icon_face(), 16, FW_NORMAL, dpi)
 }
 
-/// Text font for chrome controls at `dpi` (Segoe UI 9 pt).
+/// Body text font for chrome controls at `dpi`: the system UI face at the
+/// WinUI body size (14 DIPs).
 pub(super) fn text_font(dpi: u32) -> HFONT {
-    font(w!("Segoe UI"), 9, dpi)
+    style::font(style::text_face(), 14, FW_NORMAL, dpi)
+}
+
+/// Caption font (12 DIPs, normal weight): the status bar, the find count,
+/// the folder line of a recent file.
+pub(super) fn caption_font(dpi: u32) -> HFONT {
+    style::font(style::text_face(), 12, FW_NORMAL, dpi)
+}
+
+/// Section heading font (.NET `DocumentMapHeader`: 11 DIPs SemiBold; 12
+/// here, the smallest size the Variable face renders crisply).
+pub(super) fn heading_font(dpi: u32) -> HFONT {
+    style::font(style::text_face(), 12, FW_SEMIBOLD, dpi)
 }
 
 /// .NET `BrandDetails` fonts: the name (15 DIPs, SemiBold) and the tagline
 /// (10 DIPs).
 pub(super) fn brand_fonts(dpi: u32) -> (HFONT, HFONT) {
     (
-        font_pixels(w!("Segoe UI"), 15, FW_SEMIBOLD, dpi),
-        font_pixels(w!("Segoe UI"), 10, FW_NORMAL, dpi),
+        style::font(style::text_face(), 15, FW_SEMIBOLD, dpi),
+        style::font(style::text_face(), 10, FW_NORMAL, dpi),
     )
-}
-
-fn font(face: PCWSTR, points: i32, dpi: u32) -> HFONT {
-    let height = -(points * i32::try_from(dpi).unwrap_or(96) / 72);
-    create_font(face, height, FW_NORMAL)
-}
-
-fn font_pixels(face: PCWSTR, dips: u32, weight: FONT_WEIGHT, dpi: u32) -> HFONT {
-    create_font(face, -i32::try_from(dip(dips, dpi)).unwrap_or(10), weight)
-}
-
-fn create_font(face: PCWSTR, height: i32, weight: FONT_WEIGHT) -> HFONT {
-    // SAFETY: plain GDI object creation; the caller owns and deletes it.
-    unsafe {
-        CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            weight.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            FF_DONTCARE.0 as u32,
-            face,
-        )
-    }
 }
 
 /// The brand image at 28 DIPs for `dpi`, from the embedded PNG (an icon
@@ -719,39 +711,94 @@ pub(super) fn clear_brand() {
     let brand = BRAND.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
     drop(brand);
 }
-/// Paints one of the toolbar buttons (or the diagnostics close button):
-/// glyph, optional label, focus rectangle; light, dark and high-contrast
-/// colors from the palette.
+/// Paints an owner-drawn chrome button (toolbar, sidebar row action,
+/// diagnostics close): a WinUI-like face inside the 44-DIP target. A
+/// labelled button has a subtle filled, bordered face; an icon button is
+/// flat until hovered. `background` is the surface behind the button.
+/// High contrast uses ButtonFace, ButtonText, Highlight and GrayText only.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_button(
     item: &DRAWITEMSTRUCT,
+    theme: EffectiveTheme,
     colors: Palette,
+    background: ColorSpec,
     glyph: char,
     label: Option<&str>,
     fonts: (HFONT, HFONT),
+    dpi: u32,
 ) {
     let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
     let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
-    let (face, text) = if pressed {
-        (colors.accent_pressed, colors.on_accent)
-    } else if disabled {
-        (colors.surface, colors.text_disabled)
-    } else {
-        (colors.elevated, colors.text)
-    };
-    // High contrast: ButtonText (or GrayText) on ButtonFace.
-    let text = super::chrome::readable_on(face, text);
+    let hot = !disabled && style::hot(item.hwndItem).is_some();
+    let focus = item.itemState.0 & ODS_FOCUS.0 != 0 && item.itemState.0 & ODS_NOFOCUSRECT.0 == 0;
+    let px = |value: u32| i32::try_from(dip(value, dpi)).unwrap_or(0);
     let dc = item.hDC;
     let rect = item.rcItem;
-    fill(dc, &rect, native_color(face));
-    // SAFETY: the DC and rectangle come from WM_DRAWITEM and are valid for
-    // this message; created brushes are deleted and the previous font is
-    // selected back.
-    unsafe {
-        let border = CreateSolidBrush(native_color(colors.border));
-        if !border.is_invalid() {
-            FrameRect(dc, &rect, border);
-            let _ = DeleteObject(HGDIOBJ(border.0));
+    let high_contrast = theme == EffectiveTheme::HighContrast;
+    // The face sits inside the 44-DIP target: 4 DIPs above and below, 2 on
+    // each side, rounded by 4 DIPs (WinUI `ControlCornerRadius`).
+    let face_rect = style::inset(&rect, px(2), px(4));
+    let radius = px(4);
+    let (face, border, text) = if high_contrast {
+        use ColorSpec::System;
+        use SystemColorRole as S;
+        if pressed {
+            (Some(System(S::Highlight)), None, System(S::HighlightText))
+        } else if disabled {
+            (
+                None,
+                label.map(|_| System(S::GrayText)),
+                System(S::GrayText),
+            )
+        } else if hot {
+            (None, Some(System(S::Highlight)), System(S::ButtonText))
+        } else {
+            (
+                None,
+                label.map(|_| System(S::ButtonText)),
+                System(S::ButtonText),
+            )
         }
+    } else if disabled {
+        (
+            label.map(|_| colors.surface),
+            label.map(|_| colors.subtle_border),
+            colors.text_disabled,
+        )
+    } else if pressed {
+        (
+            Some(colors.elevated),
+            label.map(|_| colors.subtle_border),
+            colors.text_secondary,
+        )
+    } else if hot {
+        (
+            Some(colors.hover),
+            label.map(|_| colors.subtle_border),
+            colors.text,
+        )
+    } else {
+        (
+            label.map(|_| colors.elevated),
+            label.map(|_| colors.subtle_border),
+            colors.text,
+        )
+    };
+    let backdrop = if high_contrast {
+        ColorSpec::System(SystemColorRole::ButtonFace)
+    } else {
+        background
+    };
+    fill(dc, &rect, native_color(backdrop));
+    if let Some(face) = face {
+        style::fill_round(dc, &face_rect, native_color(face), radius);
+    }
+    if let Some(border) = border {
+        style::frame_round(dc, &face_rect, native_color(border), radius);
+    }
+    // SAFETY: the DC and rectangle come from WM_DRAWITEM and are valid for
+    // this message; the previous font is selected back.
+    unsafe {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, native_color(text));
         let previous = SelectObject(dc, HGDIOBJ(fonts.0.0));
@@ -767,9 +814,10 @@ pub(super) fn draw_button(
                 );
             }
             Some(label) => {
-                let height = rect.bottom - rect.top;
+                // .NET: the glyph, 6 DIPs, the label; 12-DIP padding.
                 let mut glyph_area = RECT {
-                    right: rect.left + height,
+                    left: face_rect.left + px(10),
+                    right: face_rect.left + px(10) + px(20),
                     ..rect
                 };
                 DrawTextW(
@@ -780,7 +828,8 @@ pub(super) fn draw_button(
                 );
                 SelectObject(dc, HGDIOBJ(fonts.1.0));
                 let mut text_area = RECT {
-                    left: glyph_area.right,
+                    left: glyph_area.right + px(6),
+                    right: face_rect.right - px(8),
                     ..rect
                 };
                 let mut label: Vec<u16> = label.encode_utf16().collect();
@@ -793,13 +842,91 @@ pub(super) fn draw_button(
             }
         }
         SelectObject(dc, previous);
-        if item.itemState.0 & ODS_FOCUS.0 != 0 {
-            let mut focus = rect;
-            focus.left += 3;
-            focus.top += 3;
-            focus.right -= 3;
-            focus.bottom -= 3;
-            let _ = DrawFocusRect(dc, &focus);
+    }
+    if focus {
+        // A 2-pixel focus ring, as the WinUI focus visual.
+        let ring = native_color(if high_contrast {
+            ColorSpec::System(SystemColorRole::ButtonText)
+        } else {
+            colors.text
+        });
+        style::frame_round(dc, &style::inset(&face_rect, -1, -1), ring, radius + 1);
+        style::frame_round(dc, &face_rect, ring, radius);
+    }
+}
+
+/// Paints the theme selector's field ("Theme: Light", or "Light" without
+/// `prefix`) or one of its drop-down items, vertically centred, in the
+/// palette (system colors in high contrast).
+pub(super) fn draw_theme_item(
+    item: &DRAWITEMSTRUCT,
+    theme: EffectiveTheme,
+    colors: Palette,
+    font: HFONT,
+    dpi: u32,
+    prefix: bool,
+) {
+    const CB_GETLBTEXT: u32 = 0x0148;
+    const CB_GETLBTEXTLEN: u32 = 0x0149;
+    const ODS_COMBOBOXEDIT: u32 = 0x1000;
+    let field = item.itemState.0 & ODS_COMBOBOXEDIT != 0;
+    let selected = !field && item.itemState.0 & ODS_SELECTED.0 != 0;
+    let high_contrast = theme == EffectiveTheme::HighContrast;
+    let (background, text) = {
+        use ColorSpec::System;
+        use SystemColorRole as S;
+        match (high_contrast, selected) {
+            (true, true) => (System(S::Highlight), System(S::HighlightText)),
+            (true, false) => (System(S::Window), System(S::WindowText)),
+            (false, true) => (colors.hover, colors.text),
+            (false, false) => (colors.surface, colors.text),
+        }
+    };
+    let dc = item.hDC;
+    let rect = item.rcItem;
+    fill(dc, &rect, native_color(background));
+    let mut value = String::new();
+    if let Ok(index) = usize::try_from(item.itemID as i32) {
+        let length = usize::try_from(send(item.hwndItem, CB_GETLBTEXTLEN, index, 0).0).unwrap_or(0);
+        let mut buffer = vec![0_u16; length + 1];
+        let copied = send(
+            item.hwndItem,
+            CB_GETLBTEXT,
+            index,
+            buffer.as_mut_ptr() as isize,
+        )
+        .0;
+        buffer.truncate(usize::try_from(copied).unwrap_or(0));
+        value = String::from_utf16_lossy(&buffer);
+    }
+    let shown = if field && prefix && !value.is_empty() {
+        format!("Theme: {value}")
+    } else {
+        value
+    };
+    let mut area = RECT {
+        left: rect.left + i32::try_from(dip(10, dpi)).unwrap_or(10),
+        ..rect
+    };
+    let mut wide_text: Vec<u16> = shown.encode_utf16().collect();
+    // SAFETY: the DC is valid for WM_DRAWITEM; the previous font is
+    // selected back.
+    unsafe {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, native_color(text));
+        let previous = SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(
+            dc,
+            &mut wide_text,
+            &mut area,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        SelectObject(dc, previous);
+        if !field
+            && item.itemState.0 & ODS_FOCUS.0 != 0
+            && item.itemState.0 & ODS_NOFOCUSRECT.0 == 0
+        {
+            let _ = DrawFocusRect(dc, &rect);
         }
     }
 }
@@ -825,25 +952,26 @@ mod tests {
     #[test]
     fn compact_collapses_the_brand_details_and_labels() {
         let compact = plan(true, 600);
-        assert!(!compact.details && !compact.labels && !compact.theme_label);
+        assert!(!compact.details && !compact.labels && !compact.theme_prefix);
         assert_eq!(compact.theme_width, 86);
         let wide = plan(false, 1200);
-        assert!(wide.details && wide.labels && wide.theme_label);
-        assert_eq!(wide.theme_width, 110);
+        assert!(wide.details && wide.labels && wide.theme_prefix);
+        assert_eq!(wide.theme_width, 150);
     }
 
     #[test]
-    fn a_crowded_wide_bar_drops_the_theme_label_then_the_details() {
+    fn a_crowded_wide_bar_drops_the_theme_prefix_then_the_details() {
         let full = plan(false, 2000);
         let mut previous = full;
         let mut seen_label_only = false;
         for width in (720..=2000).rev() {
             let current = plan(false, width);
             assert!(current.labels);
-            // The label goes first; the details never return once gone.
-            assert!(!current.theme_label || current.details);
+            // The prefix goes first; the details never return once gone.
+            assert!(!current.theme_prefix || current.details);
             assert!(previous.details || !current.details);
-            seen_label_only |= current.details && !current.theme_label;
+            assert_eq!(current.theme_width == 150, current.theme_prefix);
+            seen_label_only |= current.details && !current.theme_prefix;
             previous = current;
         }
         assert!(seen_label_only);

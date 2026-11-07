@@ -146,6 +146,16 @@ fn severity_glyph(severity: DiagnosticSeverity) -> char {
     }
 }
 
+/// The bar's background: the message static's (the dark control color,
+/// otherwise the system button face, which is also the high-contrast pair).
+pub(super) fn background(theme: EffectiveTheme, colors: Palette) -> ColorSpec {
+    if theme == EffectiveTheme::Dark {
+        colors.surface
+    } else {
+        ColorSpec::System(SystemColorRole::ButtonFace)
+    }
+}
+
 /// Paints the severity: a stripe and the .NET glyph in the severity color.
 /// The background matches the message static's (the dark control color,
 /// otherwise the system button face, which is also the high-contrast pair).
@@ -157,11 +167,7 @@ pub(super) fn draw_icon(
     glyph_font: HFONT,
     dpi: u32,
 ) {
-    let background = if theme == EffectiveTheme::Dark {
-        colors.surface
-    } else {
-        ColorSpec::System(SystemColorRole::ButtonFace)
-    };
+    let background = background(theme, colors);
     let dc = item.hDC;
     let rect = item.rcItem;
     fill(dc, &rect, native_color(background));
