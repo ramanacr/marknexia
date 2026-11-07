@@ -372,7 +372,8 @@ pub mod native {
                 },
             },
             UI::WindowsAndMessaging::{
-                AllowSetForegroundWindow, PostMessageW, SW_RESTORE, SetForegroundWindow, ShowWindow,
+                AllowSetForegroundWindow, IsIconic, PostMessageW, SW_RESTORE, SetForegroundWindow,
+                ShowWindow,
             },
         },
         core::{PCWSTR, PWSTR},
@@ -997,12 +998,18 @@ pub mod native {
         true
     }
 
-    /// .NET `BringToFront`: `ShowWindow(SW_RESTORE)` then
-    /// `SetForegroundWindow`, exactly (a maximized window is restored too).
+    /// .NET `BringToFront` calls `ShowWindow(SW_RESTORE)` then
+    /// `SetForegroundWindow`, which also un-maximizes a maximized window.
+    /// Corrected here (owner test 2026-11-07): only a minimized window is
+    /// restored, then it comes to the foreground.
     pub fn bring_to_front(window: HWND) {
         // SAFETY: this thread's own top-level window.
+        // A minimized window is restored; a maximized or normal one keeps
+        // its show state (SW_RESTORE would un-maximize it).
         unsafe {
-            let _ = ShowWindow(window, SW_RESTORE);
+            if IsIconic(window).as_bool() {
+                let _ = ShowWindow(window, SW_RESTORE);
+            }
             let _ = SetForegroundWindow(window);
         }
     }

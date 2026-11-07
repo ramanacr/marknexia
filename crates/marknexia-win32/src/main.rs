@@ -1,3 +1,7 @@
+//! The Rust shell is a GUI program: no console window opens with it
+//! (release and debug). Nothing reads its stdout or stderr; harnesses use
+//! named events and UI Automation.
+#![windows_subsystem = "windows"]
 #![forbid(unsafe_code)]
 
 fn main() {
