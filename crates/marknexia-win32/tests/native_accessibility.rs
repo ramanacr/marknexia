@@ -16,7 +16,8 @@ use std::{
 };
 
 use marknexia_win32::{
-    accessibility::tab_slot,
+    accessibility::{tab_slot, tabs_extent},
+    layout::Dip,
     theme::{ColorSpec, EffectiveTheme, Palette, palette},
 };
 use windows::{
@@ -498,8 +499,14 @@ fn sample_tab_fills(shell_hwnd: HWND, strip: HWND, dpi: u32) -> Option<(u32, u32
     // Away from the slot edges (focus rectangle) and the title text.
     let inset = (6 * dpi / 96).max(4) as i32;
     let y = origin[0].y + strip_rect.bottom - inset;
+    // Tabs are at most `Dip::TAB_MAX_WIDTH` wide (`tabs_extent`).
+    let extent = tabs_extent(
+        strip_rect.right,
+        2,
+        Dip::TAB_MAX_WIDTH.to_pixels(dpi) as i32,
+    );
     let pixel_at = |index: usize| {
-        let (_, right) = tab_slot(strip_rect.right, 2, index)?;
+        let (_, right) = tab_slot(extent, 2, index)?;
         Some(unsafe { GetPixel(memory, origin[0].x + right - inset, y) }.0)
     };
     let fills = printed

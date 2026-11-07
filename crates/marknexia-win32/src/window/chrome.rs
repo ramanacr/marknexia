@@ -54,8 +54,7 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         Graphics::Gdi::{
-            COLOR_WINDOW, DeleteObject, GetSysColorBrush, HDC, HFONT, HGDIOBJ, InvalidateRect,
-            SetBkColor, SetTextColor,
+            DeleteObject, HDC, HFONT, HGDIOBJ, InvalidateRect, SetBkColor, SetTextColor,
         },
         UI::{
             Controls::{
@@ -69,9 +68,9 @@ use windows::{
                 CheckMenuItem, GetNextDlgTabItem, GetWindowThreadProcessId, HMENU, HWND_TOP,
                 IsChild, IsWindow, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG, PostMessageW,
                 SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
-                SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND, WM_CTLCOLORSTATIC,
-                WM_DRAWITEM, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NOTIFY, WM_PAINT,
-                WM_SYSKEYDOWN,
+                SetWindowPos, SetWindowTextW, ShowWindow, WM_APP, WM_COMMAND, WM_CTLCOLOREDIT,
+                WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_KEYDOWN, WM_MEASUREITEM,
+                WM_MENUCHAR, WM_NOTIFY, WM_PAINT, WM_SYSKEYDOWN,
             },
         },
     },
@@ -83,7 +82,7 @@ use super::{
     diagnostics::{self, DiagnosticsControls},
     dialogs, execute_command, menu_theme, move_child, native_color, open_document, palette, reflow,
     refresh_status, restore_session, select_tab_id, settings_bridge, shell_ops, sidebar,
-    start_render, take_session,
+    start_render, style, take_session,
     toolbar::{self, Toolbar},
     update_theme,
 };
@@ -152,6 +151,11 @@ pub(super) const ID_BRAND_NAME: usize = 2041;
 pub(super) const ID_BRAND_TAGLINE: usize = 2042;
 /// `ShellControls::sidebar`, the view selector.
 const ID_SELECTOR: usize = 1003;
+/// `ShellControls::find` (the find box) and `ShellControls::status`.
+const ID_FIND_EDIT: usize = 1004;
+const ID_STATUS: usize = 1005;
+/// The find bar's count text (`find::native::COUNT_ID`).
+const ID_FIND_COUNT: usize = 1010;
 
 const CBN_SELCHANGE: usize = 1;
 const LBN_SELCHANGE: usize = 1;
@@ -196,11 +200,19 @@ pub(super) struct ChromeControls {
     pub tooltip: Option<HWND>,
 }
 
-/// DPI-scaled GDI objects for chrome controls, deleted on drop.
-struct Fonts {
+/// DPI-scaled GDI objects for chrome controls, deleted on drop: the
+/// system UI face (Segoe UI Variable Text, else Segoe UI) at the WinUI
+/// sizes, and the icon font.
+pub(super) struct Fonts {
     dpi: u32,
-    text: HFONT,
-    glyph: HFONT,
+    /// Body text, 14 DIPs (toolbar labels, lists, tabs, find box).
+    pub text: HFONT,
+    /// Captions, 12 DIPs (status, find count, recent-file folders).
+    pub caption: HFONT,
+    /// Section headings, 12 DIPs SemiBold ("Document Map").
+    pub heading: HFONT,
+    /// Icons, 16 DIPs.
+    pub glyph: HFONT,
     /// .NET `BrandDetails`: the name and the tagline.
     brand_name: HFONT,
     brand_tagline: HFONT,
@@ -212,16 +224,35 @@ impl Fonts {
         Self {
             dpi,
             text: toolbar::text_font(dpi),
+            caption: toolbar::caption_font(dpi),
+            heading: toolbar::heading_font(dpi),
             glyph: toolbar::glyph_font(dpi),
             brand_name,
             brand_tagline,
+        }
+    }
+
+    fn handles(&self) -> FontSet {
+        FontSet {
+            text: self.text,
+            caption: self.caption,
+            heading: self.heading,
+            brand_name: self.brand_name,
+            brand_tagline: self.brand_tagline,
         }
     }
 }
 
 impl Drop for Fonts {
     fn drop(&mut self) {
-        for font in [self.text, self.glyph, self.brand_name, self.brand_tagline] {
+        for font in [
+            self.text,
+            self.caption,
+            self.heading,
+            self.glyph,
+            self.brand_name,
+            self.brand_tagline,
+        ] {
             if !font.is_invalid() {
                 // SAFETY: each font was created by this struct and is no
                 // longer selected: controls get the replacement first.
@@ -229,6 +260,16 @@ impl Drop for Fonts {
             }
         }
     }
+}
+
+/// Font handles copied out of the state for `WM_SETFONT`.
+#[derive(Clone, Copy)]
+struct FontSet {
+    text: HFONT,
+    caption: HFONT,
+    heading: HFONT,
+    brand_name: HFONT,
+    brand_tagline: HFONT,
 }
 
 enum ChromeAction {
@@ -429,6 +470,9 @@ pub(super) struct ChromeState {
     /// The last layout was below the 720-DIP breakpoint (.NET
     /// `CompactWindow`); `None` before the first layout after `install`.
     compact: Option<bool>,
+    /// The command bar width in pixels at the last layout (the theme
+    /// field's "Theme: " prefix depends on it).
+    bar_width: u32,
 }
 
 impl ChromeState {
@@ -474,6 +518,7 @@ impl ChromeState {
             fonts: None,
             names: None,
             compact: None,
+            bar_width: 0,
         }
     }
 
@@ -484,6 +529,26 @@ impl ChromeState {
             .iter()
             .find(|(_, location)| same_document_path(location.path(), path))
             .map(|(tab, _)| *tab)
+    }
+
+    /// The (icon, text) fonts for owner-drawn buttons and the (text,
+    /// caption) fonts for the tab strip; `None` before `install`.
+    pub(super) fn button_fonts(&self) -> Option<(HFONT, HFONT)> {
+        self.fonts.as_ref().map(|fonts| (fonts.glyph, fonts.text))
+    }
+
+    pub(super) fn text_fonts(&self) -> Option<(HFONT, HFONT)> {
+        self.fonts.as_ref().map(|fonts| (fonts.text, fonts.caption))
+    }
+
+    /// Whether `tab` shows a document (not a startup placeholder).
+    pub(super) fn has_document(&self, tab: u64) -> bool {
+        self.locations.contains_key(&tab)
+    }
+
+    /// The shell window, once `install` ran.
+    pub(super) fn window(&self) -> Option<HWND> {
+        (self.link.window != 0).then_some(HWND(self.link.window as *mut c_void))
     }
 
     /// .NET `RenderContext.AllowRemoteAssets` for new renders.
@@ -804,13 +869,23 @@ pub(super) fn install(
         tooltip,
     };
     if let Some(shell) = shell {
-        apply_fonts(
-            &controls,
-            shell,
-            (fonts.text, fonts.brand_name, fonts.brand_tagline),
-        );
+        apply_fonts(&controls, shell, None, fonts.handles());
         order_controls(&controls, shell);
         sidebar::select_mode(shell.sidebar, mode);
+        // Pointer hover for the owner-drawn buttons and lists, and the flat
+        // pivot of the view selector.
+        for button in [
+            shell.command,
+            controls.sidebar.copy_anchor,
+            controls.sidebar.reveal,
+            controls.diagnostics.close,
+        ] {
+            style::track_hover(button, style::HoverKind::Button);
+        }
+        for list in [controls.sidebar.outline, controls.sidebar.recent] {
+            style::track_hover(list, style::HoverKind::List);
+        }
+        sidebar::flatten_selector(shell.sidebar);
     }
     {
         let mut state = state.borrow_mut();
@@ -839,6 +914,18 @@ pub(super) fn install(
 /// repository (.NET `RestoreSavedRepositoryRootAsync`); then show state.
 pub(super) fn after_startup(hwnd: HWND, state: &Rc<RefCell<AppState>>, document_mode: bool) {
     annotate_controls(state);
+    // The find bar exists now (`input::initialize` runs after `install`).
+    let fonts = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.chrome.fonts.as_ref().map(Fonts::handles));
+    if let (Some(find), Some(fonts)) = (super::input::find_windows(state), fonts) {
+        send(find.label, WM_SETFONT, fonts.text.0 as usize, 1);
+        send(find.count, WM_SETFONT, fonts.caption.0 as usize, 1);
+        for button in [find.previous, find.next, find.close] {
+            style::track_hover(button, style::HoverKind::Button);
+        }
+    }
     {
         let mut state = state.borrow_mut();
         let chrome = &mut state.chrome;
@@ -879,10 +966,12 @@ pub(super) fn handle_message(
         // SAFETY: for WM_MEASUREITEM, lParam points to a MEASUREITEMSTRUCT
         // that is valid and writable for the duration of this message.
         WM_MEASUREITEM => unsafe { (lparam.0 as *mut MEASUREITEMSTRUCT).as_mut() }
-            .is_some_and(|item| menu_theme::measure(hwnd, item))
+            .is_some_and(|item| measure_theme(hwnd, item) || menu_theme::measure(hwnd, item))
             .then_some(LRESULT(1)),
         WM_MENUCHAR => menu_theme::menu_char(menu_handle(hwnd), wparam, lparam),
-        WM_CTLCOLORSTATIC => brand_text_color(hwnd, HDC(wparam.0 as *mut c_void), lparam),
+        WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT => {
+            control_color(hwnd, message, HDC(wparam.0 as *mut c_void), lparam)
+        }
         // The brand image (no child window); reads no shell state.
         WM_PAINT => {
             toolbar::paint_brand(hwnd);
@@ -891,7 +980,7 @@ pub(super) fn handle_message(
         // Dispatched by a nested pump while an outer frame holds the state:
         // run from the message loop instead (input's deferred work).
         WM_CHROME_ACTION | WM_CHROME_WORKER
-            if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) =>
+            if state_of(hwnd).is_some_and(|state| !super::shell_free(&state)) =>
         {
             super::input::defer_chrome(message == WM_CHROME_WORKER);
             Some(LRESULT(0))
@@ -913,43 +1002,6 @@ fn menu_handle(hwnd: HWND) -> Option<HMENU> {
     // SAFETY: plain query of this thread's window.
     let menu = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenu(hwnd) };
     (!menu.is_invalid()).then_some(menu)
-}
-
-/// `WM_CTLCOLORSTATIC` for the brand name and tagline: the shell
-/// background behind them (the dark background, otherwise the system
-/// window color, which is also the high-contrast pair), the name in the
-/// text color and the tagline in the muted one (.NET
-/// `MarknexiaMutedTextBrush`). Other statics keep the shell's handling.
-fn brand_text_color(hwnd: HWND, dc: HDC, lparam: LPARAM) -> Option<LRESULT> {
-    let control = HWND(lparam.0 as *mut c_void);
-    // SAFETY: plain query of a child window of this thread.
-    let id =
-        usize::try_from(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) })
-            .ok()?;
-    if !matches!(id, ID_BRAND_NAME | ID_BRAND_TAGLINE) {
-        return None;
-    }
-    let state = state_of(hwnd)?;
-    let state = state.try_borrow().ok()?;
-    let colors = palette(state.theme);
-    let (background, brush) = match state.brushes.as_ref() {
-        Some(brushes) => (colors.background, brushes.background),
-        // SAFETY: a shared system brush; it is never deleted.
-        None => (ColorSpec::System(SystemColorRole::Window), unsafe {
-            GetSysColorBrush(COLOR_WINDOW)
-        }),
-    };
-    let text = if id == ID_BRAND_NAME {
-        colors.text
-    } else {
-        colors.text_secondary
-    };
-    // SAFETY: the DC belongs to this WM_CTLCOLORSTATIC message.
-    unsafe {
-        SetTextColor(dc, native_color(text));
-        SetBkColor(dc, native_color(background));
-    }
-    Some(LRESULT(brush.0 as isize))
 }
 
 /// Keyboard handling from the message loop, before dispatch: the .NET
@@ -1177,16 +1229,17 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
     let Some(shell) = shell else {
         return;
     };
+    let find = super::input::find_windows(&state);
     if refont {
         let fonts = Fonts::new(dpi);
-        let selected = (fonts.text, fonts.brand_name, fonts.brand_tagline);
+        let selected = fonts.handles();
         // The new fonts are installed before the old ones are deleted.
         let previous = {
             let mut state = state.borrow_mut();
             state.chrome.fonts.replace(fonts)
         };
         with_controls(&state, |controls| {
-            apply_fonts(controls, shell, selected);
+            apply_fonts(controls, shell, find, selected);
             // The menu font follows the DPI too.
             if let Some(menu) = controls.menu {
                 menu_theme::apply(hwnd, menu, theme, dpi);
@@ -1222,6 +1275,7 @@ pub(super) fn layout_children(hwnd: HWND, layout: &ShellLayout) {
     });
     if let Ok(mut state) = state.try_borrow_mut() {
         state.chrome.diagnostics_laid_out = diagnostics_open;
+        state.chrome.bar_width = layout.command_bar.width;
     }
 }
 
@@ -1269,13 +1323,15 @@ pub(super) fn theme_changed(state: &Rc<RefCell<AppState>>) {
                 PCWSTR::null(),
             )
         };
-        let (background, text) = if dark {
-            (
-                super::native_color(colors.surface).0 as isize,
-                super::native_color(colors.text).0 as isize,
-            )
-        } else {
+        // The tree on the sidebar color (system colors in high contrast).
+        let sidebar = style::sidebar_colors(theme, colors);
+        let (background, text) = if theme == EffectiveTheme::HighContrast {
             (-1, -1)
+        } else {
+            (
+                super::native_color(sidebar.background).0 as isize,
+                super::native_color(sidebar.text).0 as isize,
+            )
         };
         send(tree, TVM_SETBKCOLOR, 0, background);
         send(tree, TVM_SETTEXTCOLOR, 0, text);
@@ -1448,43 +1504,157 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
     let id = item.CtlID as usize;
     if !matches!(
         id,
-        ID_DIAGNOSTIC_ICON | ID_DIAGNOSTIC_CLOSE | ID_OUTLINE | ID_COPY_ANCHOR | ID_REVEAL
+        ID_DIAGNOSTIC_ICON
+            | ID_DIAGNOSTIC_CLOSE
+            | ID_OUTLINE
+            | ID_RECENT
+            | ID_COPY_ANCHOR
+            | ID_REVEAL
+            | ID_THEME
     ) && toolbar::button_face(id, false).is_none()
     {
         return None;
     }
     // Copy what painting needs, then release the borrow: painting the
-    // outline sends LB_GETTEXT to the list box.
-    let (theme, colors, fonts, dpi, message, compact) = {
+    // lists sends LB_GETTEXT to the list box.
+    let (theme, colors, fonts, dpi, message, compact, bar_width) = {
         let state = state_of(hwnd)?;
         let state = state.try_borrow().ok()?;
         let fonts = state.chrome.fonts.as_ref()?;
         (
             state.theme,
             palette(state.theme),
-            (fonts.glyph, fonts.text),
+            (fonts.glyph, fonts.text, fonts.caption),
             state.dpi,
             (id == ID_DIAGNOSTIC_ICON)
                 .then(|| state.chrome.diagnostics.current().cloned())
                 .flatten(),
             state.chrome.compact == Some(true),
+            state.chrome.bar_width,
         )
     };
     let face = toolbar::button_face(id, compact);
+    let sidebar = style::sidebar_colors(theme, colors);
+    let buttons = (fonts.0, fonts.1);
     match (id, face) {
         (ID_DIAGNOSTIC_ICON, _) => {
             diagnostics::draw_icon(item, theme, colors, message.as_ref(), fonts.0, dpi);
         }
-        (ID_DIAGNOSTIC_CLOSE, _) => toolbar::draw_button(item, colors, '\u{E711}', None, fonts),
+        (ID_DIAGNOSTIC_CLOSE, _) => toolbar::draw_button(
+            item,
+            theme,
+            colors,
+            diagnostics::background(theme, colors),
+            '\u{E711}',
+            None,
+            buttons,
+            dpi,
+        ),
         // .NET glyphs: Copy (E8C8) and OpenInNewWindow (E8B7).
-        (ID_COPY_ANCHOR, _) => toolbar::draw_button(item, colors, '\u{E8C8}', None, fonts),
-        (ID_REVEAL, _) => toolbar::draw_button(item, colors, '\u{E8B7}', None, fonts),
-        (ID_OUTLINE, _) => sidebar::draw_outline_item(item, colors, fonts.1, dpi),
-
-        (_, Some((glyph, label))) => toolbar::draw_button(item, colors, glyph, label, fonts),
+        (ID_COPY_ANCHOR, _) => toolbar::draw_button(
+            item,
+            theme,
+            colors,
+            sidebar.background,
+            '\u{E8C8}',
+            None,
+            buttons,
+            dpi,
+        ),
+        (ID_REVEAL, _) => toolbar::draw_button(
+            item,
+            theme,
+            colors,
+            sidebar.background,
+            '\u{E8B7}',
+            None,
+            buttons,
+            dpi,
+        ),
+        (ID_OUTLINE, _) => sidebar::draw_outline_item(item, sidebar, fonts.1, dpi),
+        (ID_RECENT, _) => sidebar::draw_recent_item(item, sidebar, (fonts.1, fonts.2), dpi),
+        (ID_THEME, _) => toolbar::draw_theme_item(
+            item,
+            theme,
+            colors,
+            fonts.1,
+            dpi,
+            toolbar::theme_prefix(compact, bar_width, dpi),
+        ),
+        (_, Some((glyph, label))) => toolbar::draw_button(
+            item,
+            theme,
+            colors,
+            colors.surface,
+            glyph,
+            label,
+            buttons,
+            dpi,
+        ),
         _ => return None,
     }
     Some(LRESULT(1))
+}
+
+/// `WM_MEASUREITEM` for the owner-drawn theme selector: the field and the
+/// drop-down items meet the 44-DIP target (the field height is set again
+/// on every layout, with `CB_SETITEMHEIGHT`).
+fn measure_theme(hwnd: HWND, item: &mut MEASUREITEMSTRUCT) -> bool {
+    const ODT_COMBOBOX: u32 = 3;
+    if item.CtlType.0 != ODT_COMBOBOX || item.CtlID as usize != ID_THEME {
+        return false;
+    }
+    let dpi = state_of(hwnd)
+        .and_then(|state| state.try_borrow().ok().map(|state| state.dpi))
+        .unwrap_or(96);
+    item.itemHeight = dip(44, dpi);
+    true
+}
+
+/// `WM_CTLCOLOR*` for the chrome's text controls in every theme: the brand
+/// texts on the command bar, the sidebar heading and lists on the sidebar
+/// color, the status bar and the find bar's count and box. High contrast
+/// uses system colors only. Other controls keep the shell's handling.
+fn control_color(hwnd: HWND, message: u32, dc: HDC, lparam: LPARAM) -> Option<LRESULT> {
+    let control = HWND(lparam.0 as *mut c_void);
+    // SAFETY: plain query of a child window of this thread.
+    let id =
+        usize::try_from(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) })
+            .ok()?;
+    let (theme, colors) = {
+        let state = state_of(hwnd)?;
+        let state = state.try_borrow().ok()?;
+        (state.theme, palette(state.theme))
+    };
+    let sidebar = style::sidebar_colors(theme, colors);
+    let window_pair = (
+        ColorSpec::System(SystemColorRole::Window),
+        ColorSpec::System(SystemColorRole::WindowText),
+    );
+    let high_contrast = theme == EffectiveTheme::HighContrast;
+    let (background, text) = match (message, id) {
+        (WM_CTLCOLORSTATIC, ID_SIDEBAR_HEADER) => (sidebar.background, sidebar.muted),
+        (WM_CTLCOLORLISTBOX, ID_OUTLINE | ID_RECENT) => (sidebar.background, sidebar.text),
+        (WM_CTLCOLORSTATIC, ID_BRAND_NAME | ID_BRAND_TAGLINE | ID_STATUS | ID_FIND_COUNT)
+        | (WM_CTLCOLOREDIT, ID_FIND_EDIT)
+            if high_contrast =>
+        {
+            window_pair
+        }
+        (WM_CTLCOLORSTATIC, ID_BRAND_NAME) => (colors.surface, colors.text),
+        (WM_CTLCOLORSTATIC, ID_BRAND_TAGLINE | ID_STATUS | ID_FIND_COUNT) => {
+            (colors.surface, colors.text_secondary)
+        }
+        (WM_CTLCOLOREDIT, ID_FIND_EDIT) => (colors.surface, colors.text),
+        _ => return None,
+    };
+    let (background, text) = (native_color(background), native_color(text));
+    // SAFETY: the DC belongs to this WM_CTLCOLOR* message.
+    unsafe {
+        SetTextColor(dc, text);
+        SetBkColor(dc, background);
+    }
+    Some(LRESULT(style::brush(background).0 as isize))
 }
 
 /// The foreground color for text on `background`: in high contrast, text on
@@ -1545,7 +1715,7 @@ fn run_action(hwnd: HWND, action: ChromeAction) {
 /// .NET `CopyAnchor_Click` for the selected outline row: the clipboard gets
 /// `#slug` and nothing else; the diagnostics bar confirms it.
 fn copy_anchor(hwnd: HWND) {
-    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
+    let Some(state) = state_of(hwnd).filter(|state| super::shell_free(state)) else {
         return;
     };
     let Some(outline) = state
@@ -1584,7 +1754,7 @@ fn copy_anchor(hwnd: HWND) {
 /// gate and must lie in the repository; File Explorer opens on a worker
 /// with the item selected in its folder.
 fn reveal_selected(hwnd: HWND) {
-    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
+    let Some(state) = state_of(hwnd).filter(|state| super::shell_free(state)) else {
         return;
     };
     let Some(tree) = state
@@ -1835,19 +2005,34 @@ fn all_windows(c: &ChromeControls) -> [HWND; 23] {
     ]
 }
 
-/// The text font for the chrome controls; the brand name and tagline get
-/// their own fonts (`fonts`: text, brand name, brand tagline).
-fn apply_fonts(controls: &ChromeControls, shell: ShellControls, fonts: (HFONT, HFONT, HFONT)) {
-    let (text, name, tagline) = fonts;
-    for window in all_windows(controls).into_iter().chain([shell.sidebar]) {
+/// The chrome fonts: body text for controls and lists, the heading font
+/// for the sidebar heading, captions for the status bar and the find
+/// count, and the brand fonts for the name and tagline.
+fn apply_fonts(
+    controls: &ChromeControls,
+    shell: ShellControls,
+    find: Option<crate::find::native::FindControls>,
+    fonts: FontSet,
+) {
+    for window in all_windows(controls)
+        .into_iter()
+        .chain([shell.sidebar, shell.find])
+    {
         let font = if window == controls.toolbar.brand_name {
-            name
+            fonts.brand_name
         } else if window == controls.toolbar.brand_tagline {
-            tagline
+            fonts.brand_tagline
+        } else if window == controls.sidebar.header {
+            fonts.heading
         } else {
-            text
+            fonts.text
         };
         send(window, WM_SETFONT, font.0 as usize, 1);
+    }
+    send(shell.status, WM_SETFONT, fonts.caption.0 as usize, 1);
+    if let Some(find) = find {
+        send(find.label, WM_SETFONT, fonts.text.0 as usize, 1);
+        send(find.count, WM_SETFONT, fonts.caption.0 as usize, 1);
     }
 }
 
@@ -1925,9 +2110,15 @@ fn move_focus(hwnd: HWND, backward: bool) -> bool {
     }
 }
 
+/// The active tab. Chrome actions run only when neither the shell state
+/// nor the portable state is borrowed (`shell_free` in `handle_message`),
+/// so the reads cannot conflict; they still never panic.
 fn active_tab(state: &Rc<RefCell<AppState>>) -> Option<u64> {
-    let portable = Rc::clone(&state.borrow().portable);
-    portable.borrow().active_tab().map(crate::tabs::TabId::get)
+    let portable = crate::reentry::read(state, |state| Rc::clone(&state.portable))?;
+    crate::reentry::read(&portable, |app| {
+        app.active_tab().map(crate::tabs::TabId::get)
+    })
+    .flatten()
 }
 
 /// .NET `Reload_Click`: re-read and re-render the active document; on
@@ -2288,7 +2479,7 @@ fn set_theme(hwnd: HWND, theme: ThemePreference) {
 pub(super) fn begin_sidebar_drag(hwnd: HWND) {
     // A press while an outer frame holds the state starts no drag (the
     // splitter keeps its capture until the release, which ends nothing).
-    if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) {
+    if state_of(hwnd).is_some_and(|state| !super::shell_free(&state)) {
         return;
     }
     let visible = state_of(hwnd).is_some_and(|state| {
@@ -2306,7 +2497,7 @@ pub(super) fn begin_sidebar_drag(hwnd: HWND) {
 pub(super) fn drag_sidebar(hwnd: HWND) {
     // Moves while an outer frame holds the state are ignored; the next move
     // continues the drag from the pointer position.
-    let Some(state) = state_of(hwnd).filter(|state| crate::reentry::is_free(state)) else {
+    let Some(state) = state_of(hwnd).filter(|state| super::shell_free(state)) else {
         return;
     };
     let (dragging, dpi) = {
@@ -2339,7 +2530,7 @@ pub(super) fn drag_sidebar(hwnd: HWND) {
 
 /// .NET `StopSidebarResize`: saves the width.
 pub(super) fn end_sidebar_drag(hwnd: HWND) {
-    if state_of(hwnd).is_some_and(|state| !crate::reentry::is_free(&state)) {
+    if state_of(hwnd).is_some_and(|state| !super::shell_free(&state)) {
         // Never left dragging: the end runs from the message loop.
         super::input::defer_sidebar_drag_end();
         return;
@@ -2358,7 +2549,7 @@ pub(super) fn resize_sidebar_by_key(hwnd: HWND, step: SidebarResize) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if !crate::reentry::is_free(&state) {
+    if !super::shell_free(&state) {
         super::input::defer_sidebar_key(step);
         return;
     }

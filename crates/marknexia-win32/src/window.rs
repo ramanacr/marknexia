@@ -1,7 +1,7 @@
 //! Raw Win32 shell. All HWND and WebView2 COM state stays on the owning STA.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     ffi::c_void,
     path::PathBuf,
@@ -32,8 +32,8 @@ use windows::{
                 COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateSolidBrush, DT_CENTER,
                 DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint,
                 FillRect, FrameRect, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ,
-                InvalidateRect, PAINTSTRUCT, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
-                UpdateWindow,
+                InvalidateRect, PAINTSTRUCT, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+                TRANSPARENT, UpdateWindow,
             },
         },
         Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
@@ -74,15 +74,16 @@ use windows::{
 
 use crate::{
     accessibility::{
+        self, TabHit,
         native::{NativeAccessibility, SelectTab, is_uia_root_request},
-        tab_slot,
+        tab_slot, tabs_extent,
     },
     app::{AppState as PortableAppState, FocusSurface},
     documents::{
         self, RenderJob, RenderOutcome, RenderPool, RenderTickets, StartupSignal, StartupTracker,
     },
     keyboard::{KeyChord, ShellCommand, route_key},
-    layout::{PixelRect, ShellLayout, ShellLayoutRequest},
+    layout::{Dip, PixelRect, ShellLayout, ShellLayoutRequest},
     tabs::TabId,
     theme::{ColorSpec, EffectiveTheme, SystemColorRole, palette, resolve_theme},
 };
@@ -96,6 +97,7 @@ mod menu_theme;
 mod settings_bridge;
 mod shell_ops;
 mod sidebar;
+mod style;
 mod toolbar;
 // Find in page, drag and drop, single instance, tab close and reorder.
 mod input;
@@ -473,7 +475,8 @@ fn initialize(
             instance,
             w!("EDIT"),
             w!("Find"),
-            child_style(0x80),
+            // ES_AUTOHSCROLL and a one-pixel border (themed).
+            child_style(0x80 | 0x0080_0000),
             1004,
         )?,
         status: create_child(
@@ -481,7 +484,8 @@ fn initialize(
             instance,
             w!("STATIC"),
             w!("Ready"),
-            child_style(0),
+            // SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS: one centred line.
+            child_style(0x80 | 0x200 | 0x4000),
             1005,
         )?,
     };
@@ -598,6 +602,7 @@ fn initialize(
     // StartupFailed now so a harness does not wait for its timeout.
     update_startup_readiness(&state);
     refresh_status(&state);
+    update_window_title(&state);
     // chrome: restore the saved repository, show the chrome state.
     chrome::after_startup(hwnd, &state, document_mode);
     Ok(())
@@ -828,7 +833,7 @@ fn apply_render_results(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    if !crate::reentry::is_free(&state) {
+    if !shell_free(&state) {
         // Dispatched by a nested pump while an outer frame holds the state.
         input::defer_render_results();
         return;
@@ -964,7 +969,7 @@ impl AppState {
 fn open_from_dialog(hwnd: HWND) {
     // WM_OPEN_DIALOG dispatched by a nested pump while an outer frame holds
     // the state: open the dialog from the message loop instead.
-    if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !crate::reentry::is_free(&state)) {
+    if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !shell_free(&state)) {
         input::defer_open_dialog();
         return;
     }
@@ -1223,10 +1228,7 @@ unsafe extern "system" fn window_proc(
         }
         // WM_CLOSE dispatched by a nested pump while an outer frame holds
         // the state: close from the message loop (WM_DESTROY needs it).
-        WM_CLOSE
-            if unsafe { app_state_handle(hwnd) }
-                .is_some_and(|state| !crate::reentry::is_free(&state)) =>
-        {
+        WM_CLOSE if unsafe { app_state_handle(hwnd) }.is_some_and(|state| !shell_free(&state)) => {
             input::defer_close_window();
             LRESULT(0)
         }
@@ -1286,7 +1288,13 @@ unsafe extern "system" fn tab_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            track_tab_hover(hwnd, Some((lparam.0 as i16) as i32));
             input::on_tab_mouse_move(hwnd, (lparam.0 as i16) as i32, wparam.0);
+            LRESULT(0)
+        }
+        // WM_MOUSELEAVE: the hover look ends.
+        0x02A3 => {
+            track_tab_hover(hwnd, None);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1316,7 +1324,7 @@ fn paint_tabs(hwnd: HWND) {
     let Some(state) = (unsafe { app_state_handle(parent) }) else {
         return;
     };
-    let free = crate::reentry::is_free(&state)
+    let free = shell_free(&state)
         && crate::reentry::read(&state, |state| crate::reentry::is_free(&state.portable))
             .unwrap_or(false);
     if !free {
@@ -1330,7 +1338,7 @@ fn paint_tabs(hwnd: HWND) {
         input::defer_repaint();
         return;
     }
-    let (tabs, selected, focus_visible, colors, dpi, theme) = {
+    let (tabs, selected, focus_visible, colors, dpi, theme, font) = {
         let state = state.borrow();
         let app = state.portable.borrow();
         (
@@ -1344,49 +1352,143 @@ fn paint_tabs(hwnd: HWND) {
             palette(state.theme),
             state.dpi,
             state.theme,
+            state.chrome.text_fonts().map(|fonts| fonts.0),
         )
     };
     let count = tabs.len();
     // The order a queued click is pinned against (`input`).
     input::snapshot_tabs(&tabs.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+    let hot = TAB_HOT.with(Cell::get);
+    let px = |value: u32| i32::try_from(chrome::dip(value, dpi)).unwrap_or(0);
     let mut paint = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut paint) };
     let mut client = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut client) }.is_ok() {
+        let previous_font = font.map(|font| unsafe { SelectObject(dc, HGDIOBJ(font.0)) });
+        // The strip: the command bar's surface, a one-pixel line below.
         fill(dc, &client, native_color(colors.surface));
+        fill(
+            dc,
+            &RECT {
+                top: client.bottom - 1,
+                ..client
+            },
+            native_color(colors.border),
+        );
+        let width = client.right - client.left;
+        let extent = tabs_extent(
+            width,
+            count,
+            i32::try_from(Dip::TAB_MAX_WIDTH.to_pixels(dpi)).unwrap_or(i32::MAX),
+        );
+        let minimum = i32::try_from(Dip::INTERACTION_TARGET.to_pixels(dpi)).unwrap_or(44);
+        let hot_hit =
+            hot.and_then(|x| accessibility::hit_test_tab(extent, client.bottom, minimum, count, x));
         for (index, (tab_id, title)) in tabs.iter().enumerate() {
-            if let Some((left, right)) = tab_slot(client.right - client.left, count, index) {
-                let rect = RECT {
-                    left,
-                    top: 0,
-                    right,
-                    bottom: client.bottom,
-                };
-                let active = selected == Some(*tab_id);
+            let Some((left, right)) = tab_slot(extent, count, index) else {
+                continue;
+            };
+            let slot = RECT {
+                left,
+                top: 0,
+                right,
+                bottom: client.bottom,
+            };
+            let active = selected == Some(*tab_id);
+            // The visible tab: 2 DIPs apart, top corners rounded by 6 DIPs
+            // (the round rectangle runs below the strip, so only the top
+            // corners show).
+            let tab = RECT {
+                left: slot.left + px(2),
+                top: slot.top + px(4),
+                right: slot.right - px(2),
+                bottom: slot.bottom,
+            };
+            let body_hot =
+                matches!(hot_hit, Some(TabHit::Body(i) | TabHit::Close(i)) if i == index);
+            let face = if active {
+                Some(colors.elevated)
+            } else if body_hot && theme != EffectiveTheme::HighContrast {
+                Some(colors.hover)
+            } else {
+                None
+            };
+            if let Some(face) = face {
+                style::fill_round(
+                    dc,
+                    &RECT {
+                        bottom: tab.bottom + px(6),
+                        ..tab
+                    },
+                    native_color(face),
+                    px(6),
+                );
+                // The strip line stays under inactive tabs only.
                 fill(
                     dc,
-                    &rect,
-                    native_color(if active {
-                        colors.elevated
-                    } else {
-                        colors.surface
-                    }),
+                    &RECT {
+                        top: client.bottom - 1,
+                        ..tab
+                    },
+                    native_color(face),
                 );
-                // Title clipped before the close button, then its glyph.
-                input::paint_tab_content(
-                    dc,
-                    &rect,
-                    title,
-                    native_color(input::tab_text_color(theme, colors, active)),
-                    dpi,
-                );
-                if active && focus_visible {
-                    let _ = unsafe { DrawFocusRect(dc, &rect) };
-                }
             }
+            if active {
+                // The selected-tab indicator: a 3-DIP accent line.
+                fill(
+                    dc,
+                    &RECT {
+                        left: tab.left + px(8),
+                        right: tab.right - px(8),
+                        top: tab.bottom - px(3),
+                        bottom: tab.bottom,
+                    },
+                    native_color(style::indicator(theme, colors)),
+                );
+            }
+            let close_hot = matches!(hot_hit, Some(TabHit::Close(i)) if i == index);
+            input::paint_tab_content(
+                dc,
+                &slot,
+                title,
+                native_color(input::tab_text_color(theme, colors, active)),
+                (close_hot && theme != EffectiveTheme::HighContrast)
+                    .then(|| native_color(colors.hover)),
+                dpi,
+            );
+            if active && focus_visible {
+                let _ = unsafe { DrawFocusRect(dc, &style::inset(&tab, px(2), px(2))) };
+            }
+        }
+        if let Some(previous) = previous_font {
+            unsafe { SelectObject(dc, previous) };
         }
     }
     let _ = unsafe { EndPaint(hwnd, &paint) };
+}
+
+thread_local! {
+    /// The pointer's x in the tab strip while it is over it (hover).
+    static TAB_HOT: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+/// Tracks the pointer over the tab strip for the hover look. Reads no
+/// shell state; only repaints the strip.
+fn track_tab_hover(hwnd: HWND, x: Option<i32>) {
+    let previous = TAB_HOT.with(|hot| hot.replace(x));
+    if previous.is_none() && x.is_some() {
+        let mut track = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>(
+            ) as u32,
+            dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut track) };
+    }
+    if previous != x {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
 }
 
 fn fill(dc: windows::Win32::Graphics::Gdi::HDC, rect: &RECT, color: COLORREF) {
@@ -1441,7 +1543,7 @@ fn route_native_chord(hwnd: HWND, key: u16, ctrl: bool, shift: bool) -> bool {
     let Some(command) = route_key(KeyChord::new(key, ctrl, shift, false)) else {
         return false;
     };
-    if input::has_pending() || !crate::reentry::is_free(&state) {
+    if input::has_pending() || !shell_free(&state) {
         input::defer_native_key(key, ctrl, shift);
         return true;
     }
@@ -1463,6 +1565,14 @@ fn execute_command(hwnd: HWND, command: ShellCommand) -> bool {
     let applied = portable.borrow_mut().apply_command(command);
     if !applied {
         return false;
+    }
+    // F6 skips the hidden find bar: focus on its hidden box would let
+    // Enter open the bar without Ctrl+F or the Find button.
+    if command == ShellCommand::CycleFocus {
+        let hidden = !portable.borrow().find_bar_visible();
+        if hidden && portable.borrow().focused_surface() == FocusSurface::FindBar {
+            let _ = portable.borrow_mut().apply_command(command);
+        }
     }
     if command == ShellCommand::CycleFocus {
         let (controls, focus) = {
@@ -1530,7 +1640,7 @@ fn select_tab_at(hwnd: HWND, x: i32) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    let (portable, width) = {
+    let (portable, width, dpi) = {
         let state = state.borrow();
         (
             Rc::clone(&state.portable),
@@ -1539,6 +1649,7 @@ fn select_tab_at(hwnd: HWND, x: i32) {
                 .as_ref()
                 .map_or(1, NativeAccessibility::tab_strip_width)
                 .max(1),
+            state.dpi,
         )
     };
     portable.borrow_mut().note_pointer_input();
@@ -1546,7 +1657,11 @@ fn select_tab_at(hwnd: HWND, x: i32) {
     if count == 0 {
         return;
     }
-    let width = i32::try_from(width).unwrap_or(i32::MAX);
+    let width = tabs_extent(
+        i32::try_from(width).unwrap_or(i32::MAX),
+        count,
+        i32::try_from(Dip::TAB_MAX_WIDTH.to_pixels(dpi)).unwrap_or(i32::MAX),
+    );
     let index = (0..count)
         .find(|index| tab_slot(width, count, *index).is_some_and(|(_, right)| x < right))
         .unwrap_or(count - 1);
@@ -1633,6 +1748,7 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
         input::refresh_find(state);
     }
     refresh_status(state);
+    update_window_title(state);
     // chrome: outline and history buttons follow the active tab.
     chrome::tabs_changed(state);
 }
@@ -1867,7 +1983,7 @@ fn reflow(hwnd: HWND, dpi: u32) {
     };
     // WM_SIZE and WM_DPICHANGED can be sent while an outer frame holds the
     // state: lay out from the message loop instead.
-    if !crate::reentry::is_free(&state) {
+    if !shell_free(&state) {
         input::defer_reflow(dpi);
         return;
     }
@@ -1894,13 +2010,23 @@ fn reflow(hwnd: HWND, dpi: u32) {
         .with_diagnostics_visible(diagnostics_open),
     );
     drop(app);
+    BANDS.with(|bands| {
+        bands.set([
+            layout.command_bar,
+            layout.sidebar,
+            layout.find_bar,
+            layout.status_bar,
+        ]);
+    });
+    // The shell window's own bands (command bar, pane, status) move too.
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
     if let Some(c) = controls {
         for (window, rect) in [
             (c.command, layout.command_bar),
             (c.tabs, layout.tab_strip),
             (c.sidebar, layout.sidebar),
             (c.find, layout.find_bar),
-            (c.status, layout.status_bar),
+            (c.status, status_text_rect(layout.status_bar, actual_dpi)),
         ] {
             move_child(window, rect);
         }
@@ -1946,6 +2072,19 @@ fn reflow(hwnd: HWND, dpi: u32) {
     runtime::layout(&state, layout.webview, actual_dpi);
 }
 
+/// The status text inside the status bar: 12 DIPs in from each side, below
+/// the bar's one-pixel top line (painted by the shell window).
+fn status_text_rect(bar: PixelRect, dpi: u32) -> PixelRect {
+    let inset = chrome::dip(12, dpi).min(bar.width / 2);
+    let line = u32::from(bar.height > 0);
+    PixelRect {
+        x: bar.x.saturating_add(inset),
+        y: bar.y.saturating_add(line),
+        width: bar.width.saturating_sub(inset.saturating_mul(2)),
+        height: bar.height.saturating_sub(line),
+    }
+}
+
 fn move_child(hwnd: HWND, b: PixelRect) {
     let _ = unsafe {
         SetWindowPos(
@@ -1965,7 +2104,7 @@ fn update_theme(hwnd: HWND) {
         return;
     };
     // Setting broadcasts are sent synchronously, also into nested pumps.
-    if !crate::reentry::is_free(&state) {
+    if !shell_free(&state) {
         input::defer_theme();
         return;
     }
@@ -2133,21 +2272,80 @@ fn themed_control_brush(hwnd: HWND, dc: HDC) -> Option<HBRUSH> {
     Some(brushes.control)
 }
 
+thread_local! {
+    /// The last layout's command bar, sidebar, find bar and status bar, for
+    /// painting the shell window's own background (`WM_ERASEBKGND`).
+    static BANDS: Cell<[PixelRect; 4]> = const { Cell::new([PixelRect { x: 0, y: 0, width: 0, height: 0 }; 4]) };
+}
+
+fn to_rect(rect: PixelRect) -> RECT {
+    RECT {
+        left: i32::try_from(rect.x).unwrap_or(i32::MAX),
+        top: i32::try_from(rect.y).unwrap_or(i32::MAX),
+        right: i32::try_from(rect.right()).unwrap_or(i32::MAX),
+        bottom: i32::try_from(rect.bottom()).unwrap_or(i32::MAX),
+    }
+}
+
+/// Paints the shell window's background in every theme: the page color,
+/// the command bar and the find bar on the surface color with a one-pixel
+/// line below (.NET command grid `BorderThickness="0,0,0,1"`), the sidebar
+/// on its pane color, and the status bar on the surface with a line above.
+/// High contrast uses system colors only.
 fn erase_themed_background(hwnd: HWND, dc: HDC) -> bool {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return false;
     };
-    let Ok(state) = state.try_borrow() else {
-        return false;
-    };
-    let Some(brushes) = state.brushes.as_ref() else {
+    let Ok(theme) = state.try_borrow().map(|state| state.theme) else {
         return false;
     };
     let mut client = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
         return false;
     }
-    unsafe { FillRect(dc, &client, brushes.background) };
+    let colors = palette(theme);
+    let high_contrast = theme == EffectiveTheme::HighContrast;
+    let (page, bar, line) = if high_contrast {
+        (
+            ColorSpec::System(SystemColorRole::Window),
+            ColorSpec::System(SystemColorRole::Window),
+            ColorSpec::System(SystemColorRole::WindowText),
+        )
+    } else {
+        (colors.background, colors.surface, colors.border)
+    };
+    let sidebar = style::sidebar_colors(theme, colors);
+    let [command, side, find, status] = BANDS.with(Cell::get);
+    fill(dc, &client, native_color(page));
+    for band in [command, find] {
+        if band.height > 0 {
+            let rect = to_rect(band);
+            fill(dc, &rect, native_color(bar));
+            fill(
+                dc,
+                &RECT {
+                    top: rect.bottom - 1,
+                    ..rect
+                },
+                native_color(line),
+            );
+        }
+    }
+    if side.width > 0 {
+        fill(dc, &to_rect(side), native_color(sidebar.background));
+    }
+    if status.height > 0 {
+        let rect = to_rect(status);
+        fill(dc, &rect, native_color(bar));
+        fill(
+            dc,
+            &RECT {
+                bottom: rect.top + 1,
+                ..rect
+            },
+            native_color(line),
+        );
+    }
     true
 }
 
@@ -2168,16 +2366,82 @@ fn system_prefers_dark() -> bool {
     status.is_ok() && size == std::mem::size_of::<u32>() as u32 && light_theme == 0
 }
 
+/// The title bar follows the theme (Windows 11; Windows 10 ignores the
+/// color attributes, and every failure is ignored): immersive dark mode in
+/// the dark theme, and the caption, caption text and border colors of the
+/// palette (the caption on the command bar's surface color, so the two
+/// read as one band). High contrast restores the system colors
+/// (`DWMWA_COLOR_DEFAULT`). The system caption buttons stay.
 fn apply_window_theme(hwnd: HWND, theme: EffectiveTheme) {
-    let dark = i32::from(matches!(theme, EffectiveTheme::Dark));
-    let _ = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            (&dark as *const i32).cast::<c_void>(),
-            std::mem::size_of_val(&dark) as u32,
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWINDOWATTRIBUTE,
+    };
+    /// `DWMWA_COLOR_DEFAULT`: the system's own color.
+    const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+    let set = |attribute: DWMWINDOWATTRIBUTE, value: u32| {
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                (&value as *const u32).cast::<c_void>(),
+                std::mem::size_of_val(&value) as u32,
+            )
+        };
+    };
+    set(
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        u32::from(matches!(theme, EffectiveTheme::Dark)),
+    );
+    let colors = palette(theme);
+    let (caption, text, border) = if theme == EffectiveTheme::HighContrast {
+        (COLOR_DEFAULT, COLOR_DEFAULT, COLOR_DEFAULT)
+    } else {
+        (
+            native_color(colors.surface).0,
+            native_color(colors.text).0,
+            native_color(colors.border).0,
         )
     };
+    set(DWMWA_CAPTION_COLOR, caption);
+    set(DWMWA_TEXT_COLOR, text);
+    set(DWMWA_BORDER_COLOR, border);
+}
+
+/// The window title: "Marknexia — <document>" for the active tab, as the
+/// .NET store edition shows it, else "Marknexia".
+pub(crate) fn window_title(document: Option<&str>) -> String {
+    match document.filter(|title| !title.is_empty()) {
+        Some(title) => format!("Marknexia \u{2014} {title}"),
+        None => "Marknexia".to_owned(),
+    }
+}
+
+fn update_window_title(state: &Rc<RefCell<AppState>>) {
+    let Some((window, title)) = crate::reentry::read(state, |state| {
+        let title = crate::reentry::read(&state.portable, |app| {
+            let active = app.active_tab()?;
+            // Placeholder tabs (no document) keep the plain product name.
+            state.chrome.has_document(active.get()).then_some(())?;
+            app.tabs()
+                .tabs()
+                .iter()
+                .find(|tab| tab.id() == active)
+                .map(|tab| tab.title().to_owned())
+        })
+        .flatten();
+        (state.chrome.window(), title)
+    }) else {
+        return;
+    };
+    let Some(window) = window else {
+        return;
+    };
+    let text: Vec<u16> = window_title(title.as_deref())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: NUL-terminated buffer that outlives the call; no borrow held.
+    let _ = unsafe { SetWindowTextW(window, PCWSTR::from_raw(text.as_ptr())) };
 }
 
 fn webview_color(spec: ColorSpec) -> HostColor {
@@ -2264,7 +2528,7 @@ fn select_from_automation(hwnd: HWND, id: TabId) -> bool {
     if !selected {
         return false;
     }
-    if crate::reentry::is_free(&state) {
+    if shell_free(&state) {
         refresh_tabs(&state, Some(id));
     } else {
         // The strip cannot repaint now: the repaint and ElementSelected
@@ -2291,7 +2555,7 @@ fn apply_automation_selection(hwnd: HWND, raw_id: u64) {
     let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
         return;
     };
-    if !crate::reentry::is_free(&state) {
+    if !shell_free(&state) {
         // Dispatched by a nested pump: run it from the message loop.
         input::defer_selection(raw_id);
         return;
@@ -2379,6 +2643,18 @@ fn enable_dpi() -> Result<(), Error> {
     }
 }
 
+/// The portable tab state inside the shell state (`reentry::is_free_nested`).
+fn portable_cell(state: &AppState) -> &RefCell<PortableAppState> {
+    &state.portable
+}
+
+/// True when neither the shell state nor the portable state inside it is
+/// borrowed: every entry point that can run reentrantly checks this and
+/// defers its work otherwise (`reentry`).
+fn shell_free(state: &RefCell<AppState>) -> bool {
+    crate::reentry::is_free_nested(state, portable_cell)
+}
+
 unsafe fn app_state_handle(hwnd: HWND) -> Option<Rc<RefCell<AppState>>> {
     let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Rc<RefCell<AppState>>;
     if pointer.is_null() {
@@ -2432,6 +2708,7 @@ fn close_state(state: &Rc<RefCell<AppState>>) {
     drop(session);
     drop(observer);
     drop(apartment);
+    style::clear_brushes();
     let mut state = state.borrow_mut();
     if error.is_some() {
         state.shell_error = error;

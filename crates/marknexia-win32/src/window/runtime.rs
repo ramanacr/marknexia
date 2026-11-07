@@ -512,7 +512,7 @@ pub(super) fn poll(hwnd: HWND) {
         return;
     };
     // Only when nothing holds the state and no COM call has the session.
-    if !reentry::is_free(&state) || state.borrow().webview_checked_out {
+    if !super::shell_free(&state) || state.borrow().webview_checked_out {
         return;
     }
     let events: Vec<Event> = state.borrow().runtime.events.try_iter().collect();
