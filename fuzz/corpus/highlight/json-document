@@ -1,0 +1,10 @@
+{
+  "name": "value",
+  "number": -12.5e3,
+  "int": 42,
+  "bool": true,
+  "other": false,
+  "nothing": null,
+  "array": [1, "two", {"k": "v"}],
+  "escaped": "a\"b\\c"
+}

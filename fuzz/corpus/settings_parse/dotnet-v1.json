@@ -1,0 +1,12 @@
+{
+  "Theme": 2,
+  "EnforceRepositorySandbox": true,
+  "AllowExternalLinks": true,
+  "AllowRemoteAssets": false,
+  "IsSidebarOpen": true,
+  "SidebarMode": 1,
+  "SidebarWidth": 312.5,
+  "RepositoryRoot": "C:\\repo",
+  "RecentFiles": ["C:\\docs\\README.md", "\\\\server\\share\\a.md"],
+  "RecentFolders": ["C:\\repo"]
+}

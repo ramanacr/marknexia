@@ -1,0 +1,6 @@
+<%@ Application language="vb" %>
+<script language="vb" runat="server">
+Sub Application_Start()
+  Dim x = 1
+End Sub
+</script>

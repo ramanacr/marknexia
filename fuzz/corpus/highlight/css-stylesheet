@@ -1,0 +1,6 @@
+/* comment */
+body, html { margin: 0; padding: 0 10px; }
+#id .class > a:hover::before { color: #FF0000; content: "x"; }
+@media (max-width: 600px) { .a { display: none !important; } }
+div[data-x="1"] { background: url(img.png) no-repeat; font: 12px/1.5 'Segoe UI', sans-serif; }
+.b{color:red}

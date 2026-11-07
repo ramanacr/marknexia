@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marknexia WebView2 feasibility probe</title>
+  <link rel="stylesheet" href="/assets/probe.css">
+  <script defer src="/assets/probe.js"></script>
+</head>
+<body data-tab-id="{{TAB_ID}}" data-document-epoch="{{DOCUMENT_EPOCH}}">
+  <main>
+    <h1>Marknexia WebView2 probe</h1>
+    <p>Tab {{TAB_ID}}. This page is served only by its controller's broker.</p>
+    <img src="/assets/probe-image.svg" width="80" height="80" alt="Radium mark">
+    <p><a href="https://example.com/blocked">External navigation probe</a></p>
+    <button id="copy" type="button">Copy probe text</button>
+    <output id="status">Waiting for host</output>
+  </main>
+</body>
+</html>

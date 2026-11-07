@@ -1,0 +1,6 @@
+<%@ Page Language="C#" %>
+<script runat="server">
+  protected void Page_Load(object s, EventArgs e) { var x = "y"; }
+</script>
+<div><% for (int i = 0; i < 3; i++) { %><b><%= i %></b><% } %></div>
+<%-- c --%>

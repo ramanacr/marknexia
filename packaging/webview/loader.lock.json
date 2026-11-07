@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "webview2-loader-lock-v1",
+  "packageId": "Microsoft.Web.WebView2",
+  "version": "1.0.4191.47",
+  "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4191.47/microsoft.web.webview2.1.0.4191.47.nupkg",
+  "packageSha256": "f492bbf547d0da329553b6727435b677579b1e9f91cc9e4a1ad029366d5f23d0",
+  "loaders": {
+    "x64": {
+      "entry": "runtimes/win-x64/native/WebView2Loader.dll",
+      "bytes": 163680,
+      "sha256": "c66e4a92fdc7a216118e43b7a5024ea2200e8c43f9310bf20d96a0084f82c5bc"
+    },
+    "ARM64": {
+      "entry": "runtimes/win-arm64/native/WebView2Loader.dll",
+      "bytes": 150880,
+      "sha256": "5a5cf33bdce364d72cbb56d59e24e5cf77ee38976d4f8b392a151e0013215703"
+    }
+  }
+}

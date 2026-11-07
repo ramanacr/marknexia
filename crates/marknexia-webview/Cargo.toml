@@ -1,0 +1,24 @@
+[package]
+name = "marknexia-webview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+marknexia-rendering = { path = "../marknexia-rendering", version = "=0.1.0" }
+marknexia-security = { path = "../marknexia-security", version = "=0.1.0" }
+percent-encoding = "=2.3.2"
+serde.workspace = true
+serde_json.workspace = true
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Com"] }
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+# Already in the workspace; reads packaging/webview/mermaid.lock.json.
+serde_json.workspace = true
+
+[dev-dependencies]
+marknexia-markdown = { path = "../marknexia-markdown", version = "=0.1.0" }

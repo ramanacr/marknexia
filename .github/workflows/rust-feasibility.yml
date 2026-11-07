@@ -1,0 +1,353 @@
+name: Rust Feasibility
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, ramana_rust_win32_feasibility]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1-x86_64-pc-windows-msvc
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  rust-quality:
+    name: Rust quality and policy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Install pinned policy tools
+        run: |
+          $tools = Get-Content tools/rust-tools.lock -Raw | ConvertFrom-Json
+          cargo install cargo-deny --version $tools.tools.cargoDeny --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo install cargo-fuzz --version $tools.tools.cargoFuzz --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Portable dependency boundary
+        run: pwsh -NoProfile -NonInteractive -File tests/rust/portable_dependency_boundary.ps1 -Cargo (Get-Command cargo).Source
+      - name: Dependency policy
+        run: cargo deny check advisories bans licenses sources
+      - name: Install pinned SPDX validator
+        # spdx-tools is pinned by exact version in tools/rust-tools.lock, in an
+        # isolated virtual environment, from wheels only.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Get-Content tools/rust-tools.lock -Raw | ConvertFrom-Json
+          $venv = Join-Path $env:RUNNER_TEMP 'spdx-venv'
+          python -m venv $venv
+          & "$venv/Scripts/python.exe" -m pip install --disable-pip-version-check --no-input --only-binary ':all:' "spdx-tools==$($tools.tools.spdxTools)"
+          & "$venv/Scripts/python.exe" -m pip freeze --all
+          "PYSPDXTOOLS=$venv/Scripts/pyspdxtools.exe" >> $env:GITHUB_ENV
+      - name: Headless release evidence contracts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pwsh -NoProfile -NonInteractive -File tests/perf/no_synthetic_pe_disk.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/test_rust_architecture.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_artifacts.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/measure_rust_desktop_perf.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/compare_rust_builds.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1 -PySpdxTools $env:PYSPDXTOOLS
+          pwsh -NoProfile -NonInteractive -File tests/perf/rust_setup_payload.tests.ps1
+
+  rust-release-build:
+    name: Rust release build (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: source-a
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: source-b
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Build twice from clean unsigned copies
+        run: |
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $env:CARGO_INCREMENTAL = '0'
+          $first = (Resolve-Path source-a).Path
+          $second = (Resolve-Path source-b).Path
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$first=/workspace"
+          cargo build --manifest-path source-a/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$second=/workspace"
+          cargo build --manifest-path source-b/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compare unsigned hashes and validate PE machine
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $target = '${{ matrix.target }}'
+          $architecture = if ($target -eq 'x86_64-pc-windows-msvc') { 'x64' } else { 'ARM64' }
+          $first = Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release"
+          $second = Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release"
+          $reportRoot = Join-Path $env:RUNNER_TEMP "rust-feasibility-$architecture"
+          New-Item -ItemType Directory -Path $reportRoot -Force | Out-Null
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Compare-RustBuilds.ps1 -FirstRoot $first -SecondRoot $second -OutputPath (Join-Path $reportRoot 'unsigned-reproducibility.json')
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-RustArchitecture.ps1 -Path (Join-Path $first 'marknexia-win32.exe') -Expected $architecture
+          $artifactRoot = Join-Path $reportRoot 'vertical-slice-artifacts'
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $first 'marknexia-win32.exe') -Destination $artifactRoot
+          $loaderLock = Get-Content source-a/packaging/webview/loader.lock.json -Raw | ConvertFrom-Json
+          $sdkPackage = Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg'
+          Invoke-WebRequest -Uri $loaderLock.source -OutFile $sdkPackage
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Stage-WebView2Loader.ps1 -Architecture $architecture -PackagePath $sdkPackage -OutputPath (Join-Path $artifactRoot 'WebView2Loader.dll')
+          $digest = (Get-FileHash -LiteralPath source-a/test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifactRoot -NativeArtifactPath (Join-Path $artifactRoot 'marknexia-win32.exe') -OutputPath (Join-Path $reportRoot 'vertical-slice-artifacts.json') -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-feasibility-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-feasibility-*/**/*.json
+          if-no-files-found: error
+      # Evidence only: the ZIP is unsigned, is never attached to a release and
+      # is never published. Archives that contain an executable are built only
+      # here, on the hosted runner, never on a developer machine. Pull requests
+      # from forks skip packaging and upload.
+      - name: Unsigned preview package, SBOM and notices
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          # Runtime crates resolve for the target; build scripts and proc-macros
+          # resolve for the build host (differs in the ARM64 cross build).
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
+          $metadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json"
+          $hostMetadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json"
+          $tree = Join-Path $env:RUNNER_TEMP "cargo-tree-$target.txt"
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $target
+          [IO.File]::WriteAllText($metadata, ($json -join "`n"), $utf8)
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $hostTriple
+          [IO.File]::WriteAllText($hostMetadata, ($json -join "`n"), $utf8)
+          $lines = cargo tree --manifest-path source-a/Cargo.toml --locked -e normal,build -p marknexia-win32 --target $target --prefix none --format '{p}'
+          [IO.File]::WriteAllText($tree, ($lines -join "`n"), $utf8)
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustPortablePackage.ps1 `
+            -Target $target `
+            -FirstRoot (Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release") `
+            -SecondRoot (Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release") `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath $metadata `
+            -HostMetadataPath $hostMetadata `
+            -CargoTreePath $tree `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview') `
+            -SourceCommit $env:GITHUB_SHA
+      - name: Validate the SBOM with the pinned SPDX reference tool
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Get-Content source-a/tools/rust-tools.lock -Raw | ConvertFrom-Json
+          $venv = Join-Path $env:RUNNER_TEMP 'spdx-venv'
+          python -m venv $venv
+          & "$venv/Scripts/python.exe" -m pip install --disable-pip-version-check --no-input --only-binary ':all:' "spdx-tools==$($tools.tools.spdxTools)"
+          & "$venv/Scripts/python.exe" -m pip freeze --all
+          $sboms = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview/out') -Filter '*.spdx.json')
+          if ($sboms.Count -ne 1) { throw "Expected one SBOM, found $($sboms.Count)." }
+          & "$venv/Scripts/pyspdxtools.exe" -i $sboms[0].FullName
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-preview/out/
+          if-no-files-found: error
+          retention-days: 14
+      # Evidence only, as for the ZIP (compat/decisions/rust-installers.md): the setup
+      # executable and the MSIX are unsigned, never attached to a release and never
+      # published. They are built, unpacked and run only here, on hosted runners, never on
+      # a developer machine. Pull requests from forks skip them.
+      - name: Unsigned preview setup and MSIX
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-unsigned-installers'
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustInstallerPackages.ps1 `
+            -Target $target `
+            -FirstSource (Join-Path $env:GITHUB_WORKSPACE 'source-a') `
+            -SecondSource (Join-Path $env:GITHUB_WORKSPACE 'source-b') `
+            -PortableOutputRoot (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview') `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json") `
+            -HostMetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json") `
+            -OutputRoot $installers `
+            -SourceCommit $env:GITHUB_SHA
+          # The pinned SPDX reference validator from the previous step.
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.setupSbom
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.msixSbom
+      # windows-latest is x64 and cannot run the ARM64 setup. The hosted runner is
+      # ephemeral: the per-user install, its HKCU keys and the uninstall vanish with it.
+      - name: Silent install, upgrade and uninstall round trip (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-unsigned-installers'
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          $version = (Get-Content (Join-Path $installers 'setup/installer-verification.json') -Raw | ConvertFrom-Json).version
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-RustSetupInstall.ps1 `
+            -SetupPath $paths.setupPath -PayloadDir $paths.payloadDir -ExpectedVersion $version `
+            -OutputPath (Join-Path $installers 'setup/install-round-trip.json')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-setup-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-installers/setup/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-msix-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-installers/msix/
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-native-gates:
+    name: Native gates (${{ matrix.target }})
+    # Hosted Windows runners provide an interactive desktop, the shared
+    # WebView2 Evergreen runtime and UI Automation. windows-11-arm is native
+    # ARM64 hardware, which the local evidence host lacks.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            toolchain: 1.98.1-x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            toolchain: 1.98.1-aarch64-pc-windows-msvc
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Record WebView2 runtime
+        run: (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+      # The hosted windows-11-arm image can start with a "Microsoft account"
+      # sign-in prompt (a system CoreWindow) holding the foreground, which
+      # Windows then refuses to hand to the shell under test (run
+      # 42104089745). This ephemeral runner never signs in: the prompt's host
+      # process is logged and closed, nothing is answered.
+      - name: Close the runner image's sign-in prompt
+        if: runner.os == 'Windows'
+        run: |
+          Get-Process | Where-Object { $_.MainWindowTitle } |
+            ForEach-Object { "{0} {1} '{2}'" -f $_.Id, $_.ProcessName, $_.MainWindowTitle }
+          $prompts = Get-Process | Where-Object { $_.MainWindowTitle -eq 'Microsoft account' }
+          foreach ($prompt in $prompts) {
+            "closing $($prompt.Id) $($prompt.ProcessName)"
+            Stop-Process -Id $prompt.Id -Force
+          }
+      - name: Native gates
+        run: pwsh -NoProfile -NonInteractive -File scripts/Test-RustNativeGates.ps1 -Target ${{ matrix.target }} -OutputPath "$env:RUNNER_TEMP/native-evidence/native-gates.json"
+      - name: Desktop performance (empty shell, 30 cold + 30 warm)
+        if: always()
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = if ('${{ matrix.target }}' -like 'x86_64*') { 'x64' } else { 'ARM64' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'native-evidence'
+          $artifacts = Join-Path $env:RUNNER_TEMP "artifacts-$architecture"
+          New-Item -ItemType Directory -Force -Path $evidence, $artifacts | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/marknexia-win32.exe" $artifacts
+          $digest = (Get-FileHash -LiteralPath test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
+          pwsh -NoProfile -NonInteractive -File scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifacts -NativeArtifactPath (Join-Path $artifacts 'marknexia-win32.exe') -OutputPath "$evidence/artifacts.json" -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 60
+          pwsh -NoProfile -NonInteractive -File scripts/Collect-RustDesktopPerf.ps1 -ArtifactMeasurementPath "$evidence/artifacts.json" -ArtifactsRoot $artifacts -Scenario tests/perf/scenarios/empty-shell.json -OutputPath "$evidence/empty-shell-samples.json" -Runs 30
+          pwsh -NoProfile -NonInteractive -File scripts/Measure-RustDesktopPerf.ps1 -Scenario tests/perf/scenarios/empty-shell.json -SamplesPath "$evidence/empty-shell-samples.json" -ArtifactMeasurementPath "$evidence/artifacts.json" -OutputPath "$evidence/empty-shell-desktop.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: rust-native-evidence-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-evidence/**/*.json
+          if-no-files-found: warn
+
+  rust-fuzz:
+    name: Fuzz markdown_and_html (300 s) and settings_parse (60 s)
+    # The content crates are portable; libFuzzer runs reliably on Linux.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo_fuzz=$(jq -r .tools.cargoFuzz tools/rust-tools.lock)
+          cargo +nightly install cargo-fuzz --version "$cargo_fuzz" --locked
+      - name: Fuzz
+        # cargo fuzz sets RUSTFLAGS, which replaces .cargo/config.toml rustflags.
+        env:
+          RUSTFLAGS: --cfg ammonia_unstable
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run markdown_and_html corpus/markdown_and_html -- -max_total_time=300 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz.log"
+      - name: Fuzz settings_parse (60 s)
+        env:
+          RUSTFLAGS: --cfg ammonia_unstable
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run settings_parse corpus/settings_parse -- -max_total_time=60 -print_final_stats=1 2>&1 | tee "$RUNNER_TEMP/fuzz-settings.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: rust-fuzz-markdown-and-html-and-settings
+          path: |
+            ${{ runner.temp }}/fuzz.log
+            ${{ runner.temp }}/fuzz-settings.log
+            fuzz/artifacts/**
+          if-no-files-found: warn
+
+  dotnet-preservation:
+    name: .NET Release preservation
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # The parity verifier checks provenance against the fixtures'
+          # frozen source revision, which a shallow clone does not contain.
+          fetch-depth: 0
+      - name: Run existing .NET Release suite
+        run: dotnet test Marknexia.slnx --configuration Release

@@ -42,11 +42,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm test
 
-      - name: Calculate & Sync Version
-        shell: pwsh
-        run: |
-          ./scripts/set-version.ps1 -SyncManifestOnly
-
       - name: Restore Dependencies
         run: dotnet restore Marknexia.slnx
 
@@ -56,6 +51,13 @@ jobs:
 
       - name: Run Test Suite
         run: dotnet test Marknexia.slnx --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
+
+      # After the tests: syncing rewrites src/Marknexia.App/Package.appxmanifest,
+      # and the parity tests refuse to run on a dirty oracle (src/).
+      - name: Calculate & Sync Version
+        shell: pwsh
+        run: |
+          ./scripts/set-version.ps1 -SyncManifestOnly
 
       - name: Build Application (Release)
         shell: pwsh

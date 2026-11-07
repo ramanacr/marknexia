@@ -1,0 +1,6 @@
+{
+  "id": "small-document",
+  "description": "Open the pinned small Markdown fixture and wait for first render.",
+  "fixture": "test-fixtures/markdown/gfm/features.md",
+  "requiredSignals": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"]
+}

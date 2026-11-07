@@ -1,0 +1,800 @@
+#![forbid(unsafe_code)]
+
+//! Markdown → sanitized document, reproducing the .NET `MarkdownRenderer`
+//! pipeline (`src/Marknexia.Rendering`):
+//!
+//! 1. parse with a [`MarkdownEngine`] (raw, unsanitized body HTML);
+//! 2. wrap code blocks in the copy-button container and highlight them with
+//!    ColorCode parity (every ColorCode 2.0.15 language), or, in the Rust
+//!    edition only, draw ASCII-art and box-drawing blocks as text diagrams
+//!    (`compat/decisions/text-diagrams.md`);
+//! 3. replace Mermaid blocks with the diagram shell or a limit fallback;
+//! 4. render math spans with the local TeX subset;
+//! 5. sanitize with [`HtmlPolicy::sanitize_fragment`]; with remote assets off
+//!    the policy blanks remote image sources where .NET does
+//!    ([`RemoteImagePolicy::Blank`]);
+//! 6. enforce the full-page size limit of the .NET template.
+//!
+//! Documents up to the .NET limits (50 MiB of source, 128 MiB of page) are
+//! rendered; the sanitizer cleans large bodies in parallel chunks.
+//! [`Renderer::render_cancellable`] lets a caller stop a render in flight.
+//!
+//! Unsanitized markup never leaves this crate: [`RenderedDocument`] holds the
+//! body only as a [`SanitizedFragment`] and all metadata as [`PlainText`],
+//! which reaches HTML only through [`PlainText::encode_html`]. The shell builds
+//! a WebView `HostDocument` from [`RenderedDocument::body`];
+//! [`RenderedDocument::page_html`] reproduces the complete .NET page (trusted
+//! template + sanitized body) for parity and for the .NET-compatible host.
+//!
+//! Differences from .NET are recorded in
+//! `compat/decisions/rendering-differences.md`.
+
+mod highlight;
+mod math;
+mod passes;
+mod template;
+mod text;
+mod textdiagram;
+
+use std::{error::Error, fmt};
+
+use marknexia_core::contracts::{AppTheme, Diagnostic};
+use marknexia_markdown::{MarkdownEngine, MarkdownOptions, ParsedDocument};
+use marknexia_security::{
+    ContentPolicy, HtmlPolicy, PolicyLimits, RemoteImagePolicy, SanitizeError, SanitizedFragment,
+};
+
+/// Test hooks. Not part of the API.
+#[doc(hidden)]
+pub mod testing {
+    use super::{MarkdownEngine, RenderContext, RenderError, Renderer};
+
+    /// The body after the code, diagram and math passes, before
+    /// sanitization: what the sanitizer receives.
+    pub fn unsanitized_body<E: MarkdownEngine>(
+        renderer: &Renderer<E>,
+        source: &str,
+        context: &RenderContext,
+    ) -> Result<String, RenderError> {
+        renderer.body_before_sanitizing(source, context, &|| false)
+    }
+
+    /// `ColorCodeSyntaxHighlighter.HighlightCode(code, language)`, and the
+    /// regex steps it used.
+    pub fn highlight_code(code: &str, language: &str) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Default,
+            &mut crate::highlight::document_budget(&|| false),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code`] with C# through the regex engine instead of the
+    /// C# fast path.
+    pub fn highlight_code_with_engine(code: &str, language: &str) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Engine,
+            &mut crate::highlight::document_budget(&|| false),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code`] with an explicit regex step budget.
+    pub fn highlight_code_with_budget(code: &str, language: &str, budget: u64) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Default,
+            &mut crate::highlight::regex::Budget::new(budget),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// [`highlight_code_with_engine`] with an explicit regex step budget.
+    pub fn highlight_code_with_engine_and_budget(
+        code: &str,
+        language: &str,
+        budget: u64,
+    ) -> (String, u64) {
+        let (html, steps) = crate::highlight::highlight_with(
+            code,
+            language,
+            usize::MAX,
+            crate::highlight::Path::Engine,
+            &mut crate::highlight::regex::Budget::new(budget),
+        );
+        (html.unwrap_or_default(), steps)
+    }
+
+    /// What the text-diagram heuristic decides for an untagged block.
+    pub fn detect_text_diagram(code: &str) -> TextDiagramDetection {
+        let (accepted, features) = crate::textdiagram::detect_untagged(code);
+        let features = features.unwrap_or_default();
+        TextDiagramDetection {
+            accepted,
+            nonblank_rows: features.nonblank_rows,
+            diagram_rows: features.diagram_rows,
+            nonspace_cells: features.nonspace_cells,
+            drawn_cells: features.drawn_cells,
+            heads: features.heads,
+            box_cells: features.box_cells,
+            vertical_cells: features.vertical_cells,
+        }
+    }
+
+    /// The text-diagram heuristic's decision and measurements.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct TextDiagramDetection {
+        pub accepted: bool,
+        pub nonblank_rows: usize,
+        pub diagram_rows: usize,
+        pub nonspace_cells: usize,
+        pub drawn_cells: usize,
+        pub heads: usize,
+        pub box_cells: usize,
+        pub vertical_cells: usize,
+    }
+
+    /// Every ColorCode language id, in `LanguageRepository` order.
+    pub fn highlight_language_ids() -> Vec<&'static str> {
+        crate::highlight::language_ids()
+    }
+
+    /// The regex step budget of a code block of `utf16_units` code units.
+    pub fn highlight_budget(utf16_units: u64) -> u64 {
+        crate::highlight::budget_for(utf16_units)
+    }
+}
+
+pub use math::MAX_MATH_DEPTH;
+pub use template::{InvalidPageIdentity, PageIdentity};
+
+/// Resource limits. Defaults are the .NET constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenderLimits {
+    /// `FileService.LargeFileThresholdBytes` (50 MiB): larger sources are
+    /// rejected before they are read.
+    pub max_source_bytes: u64,
+    /// `MarkdownRenderer.MaxRenderedHtmlBytes` (128 MiB): limit on the
+    /// complete templated page.
+    pub max_rendered_html_bytes: usize,
+    /// `MarkdownRenderer.MaxDiagramCount`.
+    pub max_diagram_count: usize,
+    /// `MarkdownRenderer.MaxDiagramSourceBytes`.
+    pub max_diagram_source_bytes: usize,
+}
+
+impl RenderLimits {
+    pub const DEFAULT_MAX_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
+    pub const DEFAULT_MAX_RENDERED_HTML_BYTES: usize = 128 * 1024 * 1024;
+    pub const DEFAULT_MAX_DIAGRAM_COUNT: usize = 64;
+    pub const DEFAULT_MAX_DIAGRAM_SOURCE_BYTES: usize = 1024 * 1024;
+}
+
+impl Default for RenderLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: Self::DEFAULT_MAX_SOURCE_BYTES,
+            max_rendered_html_bytes: Self::DEFAULT_MAX_RENDERED_HTML_BYTES,
+            max_diagram_count: Self::DEFAULT_MAX_DIAGRAM_COUNT,
+            max_diagram_source_bytes: Self::DEFAULT_MAX_DIAGRAM_SOURCE_BYTES,
+        }
+    }
+}
+
+/// Per-document settings (.NET `RenderContext` plus the template secrets).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderContext {
+    pub theme: AppTheme,
+    pub allow_remote_assets: bool,
+    pub enable_diagrams: bool,
+    pub enable_math: bool,
+    /// Draw ASCII-art and box-drawing code blocks as diagrams (Rust edition
+    /// only; the "Render text diagrams" setting, TDG-8). Default on.
+    pub enable_text_diagrams: bool,
+    /// The document's directory relative to its asset root, `/`- or
+    /// `\`-separated; empty or `.` for the root. It becomes the `<base href>`
+    /// path, one percent-encoded segment each.
+    pub document_directory: String,
+    pub identity: PageIdentity,
+}
+
+impl RenderContext {
+    /// .NET defaults: diagrams and math on, remote assets off; text
+    /// diagrams on.
+    #[must_use]
+    pub fn new(theme: AppTheme, identity: PageIdentity) -> Self {
+        Self {
+            theme,
+            allow_remote_assets: false,
+            enable_diagrams: true,
+            enable_math: true,
+            enable_text_diagrams: true,
+            document_directory: String::new(),
+            identity,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RenderError {
+    /// A limit in [`RenderLimits`] is zero (.NET `ArgumentOutOfRangeException`).
+    InvalidLimits,
+    /// The document directory escapes its asset root.
+    InvalidDocumentDirectory,
+    /// .NET `DocumentTooLargeException` from `FileService` (the fixture's
+    /// `rejected-before-read`).
+    SourceTooLarge { size_bytes: u64, maximum_bytes: u64 },
+    /// .NET `DocumentTooLargeException` from the renderer (`rejected`). The
+    /// size is unknown when the Markdown layer stopped at the limit.
+    RenderedTooLarge {
+        size_bytes: Option<u64>,
+        maximum_bytes: u64,
+    },
+    /// The sanitizer refused the body (nesting, work and size budgets that
+    /// .NET does not have; REND-1). No partial output exists.
+    Sanitizer(SanitizeError),
+    /// The caller's cancellation callback returned `true`.
+    Cancelled,
+}
+
+impl fmt::Display for RenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLimits => f.write_str("render limits must be positive"),
+            Self::InvalidDocumentDirectory => {
+                f.write_str("the document is outside its authorized asset root")
+            }
+            Self::SourceTooLarge {
+                size_bytes,
+                maximum_bytes,
+            } => write!(
+                f,
+                "document is {size_bytes} bytes; the limit is {maximum_bytes} bytes"
+            ),
+            Self::RenderedTooLarge {
+                size_bytes: Some(size),
+                maximum_bytes,
+            } => write!(
+                f,
+                "rendered document is {size} bytes; the limit is {maximum_bytes} bytes"
+            ),
+            Self::RenderedTooLarge {
+                size_bytes: None,
+                maximum_bytes,
+            } => write!(
+                f,
+                "rendered document exceeds the {maximum_bytes}-byte limit"
+            ),
+            Self::Sanitizer(error) => write!(f, "sanitizer rejected the document: {error}"),
+            Self::Cancelled => f.write_str("rendering was cancelled"),
+        }
+    }
+}
+
+impl Error for RenderError {}
+
+/// Untrusted text (heading text, slugs, anchor names, image sources, diagram
+/// source). It is never markup: use [`PlainText::as_str`] for text sinks and
+/// [`PlainText::encode_html`] to place it in HTML.
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PlainText(String);
+
+impl PlainText {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Entity-encode for an HTML text or attribute context.
+    pub fn encode_html(&self, policy: &HtmlPolicy) -> Result<SanitizedFragment, SanitizeError> {
+        policy.encode_text(&self.0)
+    }
+}
+
+impl From<String> for PlainText {
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderedHeading {
+    pub text: PlainText,
+    pub level: u8,
+    pub slug_id: PlainText,
+    pub line_number: usize,
+}
+
+/// One entry of the .NET anchor index (`AnchorTarget`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorTarget {
+    pub id: PlainText,
+    pub text: PlainText,
+    pub is_heading_anchor: bool,
+    pub line_number: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderedDiagram {
+    pub id: PlainText,
+    pub diagram_type: PlainText,
+    pub source_code: PlainText,
+    pub line_number: usize,
+}
+
+/// A rendered document: sanitized body plus plain-text metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderedDocument {
+    body: SanitizedFragment,
+    head: template::PageHead,
+    page_bytes: usize,
+    has_mermaid: bool,
+    text_diagrams: usize,
+    headings: Vec<RenderedHeading>,
+    anchors: Vec<AnchorTarget>,
+    image_references: Vec<PlainText>,
+    diagrams: Vec<RenderedDiagram>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl RenderedDocument {
+    /// The sanitized Markdown body (the content of `<div class="markdown-body">`).
+    #[must_use]
+    pub const fn body(&self) -> &SanitizedFragment {
+        &self.body
+    }
+
+    #[must_use]
+    pub fn into_body(self) -> SanitizedFragment {
+        self.body
+    }
+
+    /// The complete .NET `TemplateEngine` page: trusted template text, bundled
+    /// CSS and bridge script, and the sanitized body.
+    #[must_use]
+    pub fn page_html(&self) -> String {
+        let mut page = String::with_capacity(self.page_bytes);
+        self.head.write(self.body.as_str(), &mut page);
+        page
+    }
+
+    /// UTF-8 length of [`Self::page_html`], the value the output limit checks.
+    #[must_use]
+    pub const fn page_bytes(&self) -> usize {
+        self.page_bytes
+    }
+
+    /// A Mermaid diagram shell was emitted, so the page loads the Mermaid
+    /// runtime (.NET `hasMermaid && EnableDiagrams`).
+    #[must_use]
+    pub const fn has_mermaid(&self) -> bool {
+        self.has_mermaid
+    }
+
+    /// Code blocks drawn as text diagrams (Rust edition, TDG-1). The page
+    /// carries the text-diagram stylesheet only when this is not zero.
+    #[must_use]
+    pub const fn text_diagrams(&self) -> usize {
+        self.text_diagrams
+    }
+
+    #[must_use]
+    pub fn headings(&self) -> &[RenderedHeading] {
+        &self.headings
+    }
+
+    /// The .NET anchor index in insertion order: headings first, then custom
+    /// anchors, first occurrence winning under ordinal case-insensitive ids.
+    #[must_use]
+    pub fn anchors(&self) -> &[AnchorTarget] {
+        &self.anchors
+    }
+
+    /// Raw image sources as written (.NET `AssetReferences`).
+    #[must_use]
+    pub fn image_references(&self) -> &[PlainText] {
+        &self.image_references
+    }
+
+    #[must_use]
+    pub fn diagrams(&self) -> &[RenderedDiagram] {
+        &self.diagrams
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+}
+
+/// A Markdown document renderer.
+pub trait DocumentRenderer {
+    fn render(
+        &self,
+        source: &str,
+        context: &RenderContext,
+    ) -> Result<RenderedDocument, RenderError>;
+}
+
+/// The .NET `MarkdownRenderer` over a Marknexia Markdown engine.
+#[derive(Clone)]
+pub struct Renderer<E> {
+    engine: E,
+    limits: RenderLimits,
+}
+
+impl<E> fmt::Debug for Renderer<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Renderer")
+            .field("engine", &std::any::type_name::<E>())
+            .field("limits", &self.limits)
+            .finish()
+    }
+}
+
+impl Renderer<marknexia_markdown::PulldownAdapter> {
+    /// The recommended Markdown candidate with .NET default limits.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            engine: marknexia_markdown::PulldownAdapter,
+            limits: RenderLimits::default(),
+        }
+    }
+}
+
+impl Default for Renderer<marknexia_markdown::PulldownAdapter> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: MarkdownEngine> Renderer<E> {
+    pub fn with_engine(engine: E, limits: RenderLimits) -> Result<Self, RenderError> {
+        if limits.max_source_bytes == 0
+            || limits.max_rendered_html_bytes == 0
+            || limits.max_diagram_source_bytes == 0
+        {
+            return Err(RenderError::InvalidLimits);
+        }
+        Ok(Self { engine, limits })
+    }
+
+    #[must_use]
+    pub const fn limits(&self) -> RenderLimits {
+        self.limits
+    }
+
+    /// The pre-read size check (.NET `FileService.ReadTextAsync`): call with
+    /// the file length before reading it.
+    pub fn check_source_size(&self, size_bytes: u64) -> Result<(), RenderError> {
+        if size_bytes > self.limits.max_source_bytes {
+            Err(RenderError::SourceTooLarge {
+                size_bytes,
+                maximum_bytes: self.limits.max_source_bytes,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// [`DocumentRenderer::render`] that polls `cancel` between stages and
+    /// inside the sanitizer (at most about 16 KiB of body apart) and returns
+    /// [`RenderError::Cancelled`], with no partial output, once it returns
+    /// `true`. `cancel` may be called from several threads.
+    pub fn render_cancellable(
+        &self,
+        source: &str,
+        context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<RenderedDocument, RenderError> {
+        self.render_document(source, context, cancel)
+    }
+
+    /// Steps 1 to 3b: the parsed document and the body the sanitizer gets.
+    fn prepare<'c>(
+        &self,
+        source: &str,
+        context: &'c RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Prepared<'c>, RenderError> {
+        let checkpoint = || {
+            if cancel() {
+                Err(RenderError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        self.check_source_size(source.len() as u64)?;
+        let segments = directory_segments(&context.document_directory)?;
+        checkpoint()?;
+        let maximum_bytes = self.limits.max_rendered_html_bytes;
+        let options = MarkdownOptions {
+            max_diagram_count: self.limits.max_diagram_count,
+            max_diagram_source_bytes: self.limits.max_diagram_source_bytes,
+            // The body can never exceed the page, so the parser may stop here.
+            max_rendered_body_bytes: maximum_bytes,
+        };
+        let mut parsed =
+            self.engine
+                .parse(source, &options)
+                .map_err(|_| RenderError::RenderedTooLarge {
+                    size_bytes: None,
+                    maximum_bytes: maximum_bytes as u64,
+                })?;
+        checkpoint()?;
+
+        // Every pass runs within the sanitizer's input budget (the .NET page
+        // limit); passes check exact sizes before building each block, so
+        // intermediate strings stay within the budget. Each pass consumes the
+        // previous body, so only one intermediate string is alive at a time.
+        let budget = PolicyLimits::default().max_html_input_bytes;
+        let over_budget = |_| {
+            RenderError::Sanitizer(SanitizeError::InputTooLarge {
+                kind: "HTML",
+                limit: budget,
+            })
+        };
+        let body = std::mem::take(&mut parsed.rendered_body_html);
+        if body.len() > budget {
+            return Err(over_budget(passes::Overflow));
+        }
+        let mut text_diagrams = textdiagram::Converter::new(context.enable_text_diagrams);
+        let body =
+            passes::highlight_code_blocks_cancellable(body, budget, &mut text_diagrams, cancel)
+                .map_err(|error| match error {
+                    highlight::HighlightError::Overflow => over_budget(passes::Overflow),
+                    highlight::HighlightError::Cancelled => RenderError::Cancelled,
+                })?;
+        checkpoint()?;
+        let (body, has_mermaid) = passes::transform_diagrams(
+            body,
+            passes::DiagramSettings {
+                enabled: context.enable_diagrams,
+                max_count: self.limits.max_diagram_count,
+                max_source_bytes: self.limits.max_diagram_source_bytes,
+            },
+            budget,
+        )
+        .map_err(over_budget)?;
+        checkpoint()?;
+        let body = passes::render_math(body, context.enable_math, budget).map_err(over_budget)?;
+        checkpoint()?;
+        Ok(Prepared {
+            parsed,
+            body,
+            has_mermaid,
+            text_diagrams: text_diagrams.converted(),
+            segments,
+        })
+    }
+
+    fn body_before_sanitizing(
+        &self,
+        source: &str,
+        context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<String, RenderError> {
+        self.prepare(source, context, cancel)
+            .map(|prepared| prepared.body)
+    }
+
+    fn render_document(
+        &self,
+        source: &str,
+        context: &RenderContext,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<RenderedDocument, RenderError> {
+        let Prepared {
+            parsed,
+            body,
+            has_mermaid,
+            text_diagrams,
+            segments,
+        } = self.prepare(source, context, cancel)?;
+        let body = sanitize_body(body, context.allow_remote_assets, cancel)?;
+        if cancel() {
+            return Err(RenderError::Cancelled);
+        }
+
+        let head = template::PageHead::new(
+            context.theme,
+            context.allow_remote_assets,
+            &segments,
+            &context.identity,
+            has_mermaid && context.enable_diagrams,
+            text_diagrams > 0,
+        );
+        let mut counter = template::Counter(0);
+        head.write(body.as_str(), &mut counter);
+        let maximum_bytes = self.limits.max_rendered_html_bytes;
+        if counter.0 > maximum_bytes {
+            return Err(RenderError::RenderedTooLarge {
+                size_bytes: Some(counter.0 as u64),
+                maximum_bytes: maximum_bytes as u64,
+            });
+        }
+        Ok(assemble(
+            parsed,
+            body,
+            head,
+            counter.0,
+            has_mermaid,
+            text_diagrams,
+        ))
+    }
+}
+
+/// The parsed document (its body moved out) and the body after the passes.
+struct Prepared<'c> {
+    parsed: ParsedDocument,
+    body: String,
+    has_mermaid: bool,
+    text_diagrams: usize,
+    segments: Vec<&'c str>,
+}
+
+impl<E: MarkdownEngine> DocumentRenderer for Renderer<E> {
+    fn render(
+        &self,
+        source: &str,
+        context: &RenderContext,
+    ) -> Result<RenderedDocument, RenderError> {
+        self.render_document(source, context, &|| false)
+    }
+}
+
+/// Steps 4 and 4b in one sanitizer pass. .NET sanitizes (keeping remote
+/// images) and then blanks remote `<img src>` on the sanitized markup; the
+/// sanitizer's `Blank` policy takes the same decision on the parsed value
+/// (REND-4). As in .NET's `HtmlSanitizerService`, a body that is only white
+/// space (`char.IsWhiteSpace`, the Unicode `White_Space` set) becomes empty.
+fn sanitize_body(
+    body: String,
+    allow_remote_assets: bool,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SanitizedFragment, RenderError> {
+    let remote = if allow_remote_assets {
+        RemoteImagePolicy::AllowHttps
+    } else {
+        RemoteImagePolicy::Blank
+    };
+    let policy = ContentPolicy::try_new(PolicyLimits::default(), remote)
+        .map(HtmlPolicy::new)
+        .map_err(RenderError::Sanitizer)?;
+    let input = if body.chars().all(char::is_whitespace) {
+        ""
+    } else {
+        body.as_str()
+    };
+    policy
+        .sanitize_fragment_cancellable(input, cancel)
+        .map_err(|error| match error {
+            SanitizeError::Cancelled => RenderError::Cancelled,
+            error => RenderError::Sanitizer(error),
+        })
+}
+
+/// .NET `DocumentAssetContext.Create`: the document directory relative to
+/// the asset root, which must not escape it.
+fn directory_segments(directory: &str) -> Result<Vec<&str>, RenderError> {
+    if directory.is_empty() || directory == "." {
+        return Ok(Vec::new());
+    }
+    let segments: Vec<&str> = directory.split(['/', '\\']).collect();
+    if segments.iter().any(|segment| {
+        segment.is_empty() || *segment == "." || *segment == ".." || segment.contains(':')
+    }) {
+        return Err(RenderError::InvalidDocumentDirectory);
+    }
+    Ok(segments)
+}
+
+/// .NET `StringComparer.OrdinalIgnoreCase` key: simple per-character upper
+/// case.
+fn ordinal_ignore_case_key(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            let mut upper = character.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+fn assemble(
+    parsed: ParsedDocument,
+    body: SanitizedFragment,
+    head: template::PageHead,
+    page_bytes: usize,
+    has_mermaid: bool,
+    text_diagrams: usize,
+) -> RenderedDocument {
+    let mut seen = std::collections::HashSet::new();
+    let mut anchors = Vec::new();
+    for heading in &parsed.headings {
+        if seen.insert(ordinal_ignore_case_key(&heading.slug_id)) {
+            anchors.push(AnchorTarget {
+                id: PlainText(heading.slug_id.clone()),
+                text: PlainText(heading.text.clone()),
+                is_heading_anchor: true,
+                line_number: heading.line_number,
+            });
+        }
+    }
+    for anchor in &parsed.custom_anchors {
+        if seen.insert(ordinal_ignore_case_key(&anchor.id)) {
+            anchors.push(AnchorTarget {
+                id: PlainText(anchor.id.clone()),
+                text: PlainText(anchor.name.clone()),
+                is_heading_anchor: anchor.is_heading_anchor,
+                line_number: anchor.line_number,
+            });
+        }
+    }
+    RenderedDocument {
+        body,
+        head,
+        page_bytes,
+        has_mermaid,
+        text_diagrams,
+        headings: parsed
+            .headings
+            .into_iter()
+            .map(|heading| RenderedHeading {
+                text: PlainText(heading.text),
+                level: heading.level,
+                slug_id: PlainText(heading.slug_id),
+                line_number: heading.line_number,
+            })
+            .collect(),
+        anchors,
+        image_references: parsed.images.into_iter().map(PlainText).collect(),
+        diagrams: parsed
+            .diagrams
+            .into_iter()
+            .map(|diagram| RenderedDiagram {
+                id: PlainText(diagram.id),
+                diagram_type: PlainText(diagram.diagram_type),
+                source_code: PlainText(diagram.source_code),
+                line_number: diagram.line_number,
+            })
+            .collect(),
+        diagnostics: parsed.diagnostics,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_validation() {
+        assert_eq!(directory_segments("").unwrap(), Vec::<&str>::new());
+        assert_eq!(directory_segments(".").unwrap(), Vec::<&str>::new());
+        assert_eq!(directory_segments("a\\b/c").unwrap(), ["a", "b", "c"]);
+        for bad in ["..", "a/../b", "/a", "a//b", "a/", "C:/x", "./a"] {
+            assert_eq!(
+                directory_segments(bad),
+                Err(RenderError::InvalidDocumentDirectory),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_keys_ignore_case() {
+        assert_eq!(ordinal_ignore_case_key("Ab-ß"), "AB-ß");
+        assert_eq!(ordinal_ignore_case_key("é"), "É");
+    }
+}

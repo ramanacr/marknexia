@@ -1,0 +1,16 @@
+[build]
+incremental = false
+# marknexia-security serializes ammonia's cleaned DOM itself
+# (`Document::to_dom_node`), which ammonia only exposes under this cfg. Cargo
+# uses the target tables below instead of this one where they match, so they
+# repeat it. An explicit RUSTFLAGS (or CARGO_ENCODED_RUSTFLAGS) replaces all
+# of these and must include `--cfg ammonia_unstable` as well.
+rustflags = ["--cfg", "ammonia_unstable"]
+# Doctests are compiled by rustdoc, which reads rustdocflags, not rustflags.
+rustdocflags = ["--cfg", "ammonia_unstable"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/Brepro", "--cfg", "ammonia_unstable"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/Brepro", "--cfg", "ammonia_unstable"]

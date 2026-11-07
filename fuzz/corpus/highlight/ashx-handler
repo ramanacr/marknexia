@@ -1,0 +1,5 @@
+<%@ WebHandler Language="C#" Class="Handler" %>
+using System;
+public class Handler : IHttpHandler {
+  public void ProcessRequest(HttpContext context) { context.Response.Write("Hi"); }
+}

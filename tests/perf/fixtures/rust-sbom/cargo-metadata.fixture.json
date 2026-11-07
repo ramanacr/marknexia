@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "workspace_root": "@WORKSPACE@",
+  "target_directory": "@WORKSPACE@/target",
+  "workspace_members": [
+    "path+file:///@WORKSPACE@/crates/marknexia-win32#0.1.0",
+    "path+file:///@WORKSPACE@/crates/marknexia-core#0.1.0",
+    "path+file:///@WORKSPACE@/crates/marknexia-update#0.1.0"
+  ],
+  "packages": [
+    {
+      "name": "marknexia-win32", "version": "0.1.0", "id": "path+file:///@WORKSPACE@/crates/marknexia-win32#0.1.0",
+      "license": "MIT", "license_file": null, "source": null, "repository": "https://github.com/ramanacr/marknexia",
+      "manifest_path": "@WORKSPACE@/crates/marknexia-win32/Cargo.toml",
+      "targets": [ { "kind": [ "bin" ], "name": "marknexia-win32" } ]
+    },
+    {
+      "name": "marknexia-core", "version": "0.1.0", "id": "path+file:///@WORKSPACE@/crates/marknexia-core#0.1.0",
+      "license": "MIT", "license_file": null, "source": null, "repository": "https://github.com/ramanacr/marknexia",
+      "manifest_path": "@WORKSPACE@/crates/marknexia-core/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "marknexia_core" } ]
+    },
+    {
+      "name": "marknexia-update", "version": "0.1.0", "id": "path+file:///@WORKSPACE@/crates/marknexia-update#0.1.0",
+      "license": "MIT", "license_file": null, "source": null, "repository": "https://github.com/ramanacr/marknexia",
+      "manifest_path": "@WORKSPACE@/crates/marknexia-update/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "marknexia_update" } ]
+    },
+    {
+      "name": "alpha", "version": "1.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#alpha@1.0.0",
+      "license": "MIT/Apache-2.0", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://example.invalid/alpha", "manifest_path": "@CRATES@/alpha-1.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "alpha" } ]
+    },
+    {
+      "name": "beta", "version": "0.3.0", "id": "registry+https://github.com/rust-lang/crates.io-index#beta@0.3.0",
+      "license": "MIT", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/beta-0.3.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "beta" } ]
+    },
+    {
+      "name": "both", "version": "1.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#both@1.0.0",
+      "license": null, "license_file": "COPYING-CUSTOM.txt", "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/both-1.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "both" } ]
+    },
+    {
+      "name": "builder", "version": "2.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#builder@2.0.0",
+      "license": "Apache-2.0", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/builder-2.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "builder" } ]
+    },
+    {
+      "name": "derive-macro", "version": "1.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#derive-macro@1.0.0",
+      "license": "MIT OR Apache-2.0", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/derive-macro-1.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "proc-macro" ], "name": "derive_macro" } ]
+    },
+    {
+      "name": "gamma", "version": "1.1.0", "id": "registry+https://github.com/rust-lang/crates.io-index#gamma@1.1.0",
+      "license": "Unicode-3.0", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/gamma-1.1.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "gamma" } ]
+    },
+    {
+      "name": "devonly", "version": "1.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#devonly@1.0.0",
+      "license": "MIT", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/devonly-1.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "devonly" } ]
+    },
+    {
+      "name": "hidden", "version": "1.0.0", "id": "registry+https://github.com/rust-lang/crates.io-index#hidden@1.0.0",
+      "license": "MIT", "license_file": null, "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": null, "manifest_path": "@CRATES@/hidden-1.0.0/Cargo.toml",
+      "targets": [ { "kind": [ "lib" ], "name": "hidden" } ]
+    }
+  ],
+  "resolve": {
+    "root": null,
+    "nodes": [
+      {
+        "id": "path+file:///@WORKSPACE@/crates/marknexia-win32#0.1.0",
+        "deps": [
+          { "name": "marknexia_core", "pkg": "path+file:///@WORKSPACE@/crates/marknexia-core#0.1.0", "dep_kinds": [ { "kind": null, "target": null } ] },
+          { "name": "alpha", "pkg": "registry+https://github.com/rust-lang/crates.io-index#alpha@1.0.0", "dep_kinds": [ { "kind": null, "target": null } ] },
+          { "name": "both", "pkg": "registry+https://github.com/rust-lang/crates.io-index#both@1.0.0", "dep_kinds": [ { "kind": null, "target": null }, { "kind": "dev", "target": null } ] },
+          { "name": "derive_macro", "pkg": "registry+https://github.com/rust-lang/crates.io-index#derive-macro@1.0.0", "dep_kinds": [ { "kind": null, "target": null } ] },
+          { "name": "devonly", "pkg": "registry+https://github.com/rust-lang/crates.io-index#devonly@1.0.0", "dep_kinds": [ { "kind": "dev", "target": null } ] }
+        ]
+      },
+      {
+        "id": "path+file:///@WORKSPACE@/crates/marknexia-core#0.1.0",
+        "deps": [
+          { "name": "beta", "pkg": "registry+https://github.com/rust-lang/crates.io-index#beta@0.3.0", "dep_kinds": [ { "kind": null, "target": null } ] },
+          { "name": "builder", "pkg": "registry+https://github.com/rust-lang/crates.io-index#builder@2.0.0", "dep_kinds": [ { "kind": "build", "target": null } ] }
+        ]
+      },
+      {
+        "id": "path+file:///@WORKSPACE@/crates/marknexia-update#0.1.0",
+        "deps": [
+          { "name": "hidden", "pkg": "registry+https://github.com/rust-lang/crates.io-index#hidden@1.0.0", "dep_kinds": [ { "kind": null, "target": null } ] }
+        ]
+      },
+      { "id": "registry+https://github.com/rust-lang/crates.io-index#alpha@1.0.0", "deps": [] },
+      { "id": "registry+https://github.com/rust-lang/crates.io-index#beta@0.3.0", "deps": [] },
+      { "id": "registry+https://github.com/rust-lang/crates.io-index#both@1.0.0", "deps": [] },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#builder@2.0.0",
+        "deps": [
+          { "name": "gamma", "pkg": "registry+https://github.com/rust-lang/crates.io-index#gamma@1.1.0", "dep_kinds": [ { "kind": null, "target": null } ] }
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#derive-macro@1.0.0",
+        "deps": [
+          { "name": "gamma", "pkg": "registry+https://github.com/rust-lang/crates.io-index#gamma@1.1.0", "dep_kinds": [ { "kind": null, "target": null } ] }
+        ]
+      },
+      { "id": "registry+https://github.com/rust-lang/crates.io-index#gamma@1.1.0", "deps": [] },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#devonly@1.0.0",
+        "deps": [
+          { "name": "hidden", "pkg": "registry+https://github.com/rust-lang/crates.io-index#hidden@1.0.0", "dep_kinds": [ { "kind": null, "target": null } ] }
+        ]
+      },
+      { "id": "registry+https://github.com/rust-lang/crates.io-index#hidden@1.0.0", "deps": [] }
+    ]
+  }
+}

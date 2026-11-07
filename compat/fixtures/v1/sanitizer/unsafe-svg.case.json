@@ -1,0 +1,14 @@
+{
+  "area": "sanitizer",
+  "expected": {
+    "sanitizedHtml": "\u003Csvg\u003E\u003Cpath d=\u0022M0 0\u0022\u003E\u003C/path\u003E\u003C/svg\u003E"
+  },
+  "input": {
+    "html": "\u003Csvg onclick=\u0022alert(1)\u0022\u003E\u003Cscript\u003Ealert(1)\u003C/script\u003E\u003Cpath d=\u0022M0 0\u0022 /\u003E\u003C/svg\u003E",
+    "mode": "svg"
+  },
+  "name": "unsafe-svg",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": null
+}

@@ -1,0 +1,11 @@
+[package]
+name = "marknexia-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,25 @@
+using System;
+using System.Collections.Generic;
+
+namespace Demo
+{
+    /// <summary>Docs &amp; more</summary>
+    /// <param name="x">X</param>
+    [Serializable]
+    [assembly: AssemblyVersion("1.0.0.0")]
+    public sealed class Foo<T> : IBar where T : class
+    {
+        private const int Max = 42;
+        public string Name { get; set; } = @"C:\path\""quoted""";
+        char c = '\'';
+        #region Methods
+        public async Task<int> RunAsync(int count)
+        {
+            // comment
+            var list = new List<int> { 1, 2, 3 };
+            foreach (var item in list) { await Task.Delay(item); }
+            return count > 0 ? count : -1; /* inline */
+        }
+        #endregion
+    }
+}

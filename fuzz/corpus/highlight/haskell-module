@@ -1,0 +1,18 @@
+-- comment
+{- block {- nested -} comment -}
+module Main (main, Shape(..)) where
+import qualified Data.Map as M
+import Data.List (sortBy, foldl')
+import Prelude hiding (lookup)
+data Shape = Circle Double | Rect Double Double deriving (Show, Eq)
+newtype Wrapper a = Wrapper { unwrap :: a }
+type Name = String
+class Container f where
+  empty :: f a
+instance Show Wrapper where show _ = "w"
+main :: IO ()
+main = do
+  let xs = [1, 2, 3] :: [Int]
+  putStrLn $ "sum: " ++ show (sum xs) ++ ['c']
+  mapM_ print (filter (> 1) xs) >>= \x -> return x
+  case xs of { [] -> 0; (y:_) -> y + 0x1F + 3.5e2 }

@@ -1,0 +1,6 @@
+{
+  "id": "repository-scan",
+  "description": "Open the pinned repository fixture and wait for scan completion and first render.",
+  "fixture": "test-fixtures/markdown/navigation",
+  "requiredSignals": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"]
+}

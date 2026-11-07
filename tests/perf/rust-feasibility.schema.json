@@ -1,0 +1,206 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Marknexia Rust feasibility measurement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "hardware",
+    "operatingSystem",
+    "architecture",
+    "nativeArtifact",
+    "commit",
+    "fixtureDigest",
+    "runCount",
+    "webViewResidency",
+    "metrics",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "rust-feasibility-v1" },
+    "kind": { "enum": ["artifact-measurement-v1", "desktop-performance-measurement-v1"] },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["machineName", "processor", "logicalProcessorCount", "physicalMemoryBytes"],
+      "properties": {
+        "machineName": { "type": "string", "minLength": 1 },
+        "processor": { "type": "string", "minLength": 1 },
+        "logicalProcessorCount": { "type": "integer", "minimum": 1 },
+        "physicalMemoryBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "operatingSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caption", "build"],
+      "properties": {
+        "caption": { "type": "string", "minLength": 1 },
+        "build": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$" }
+      }
+    },
+    "architecture": { "enum": ["x64", "ARM64"] },
+    "nativeArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "machine", "evidenceType", "nativeRuntimeVerified"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "machine": { "enum": ["0x8664", "0xaa64"] },
+        "evidenceType": { "const": "static-pe-header-only" },
+        "nativeRuntimeVerified": { "const": false }
+      }
+    },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+    "fixtureDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runCount": { "type": "integer", "minimum": 1 },
+    "webViewResidency": { "enum": ["not-measured", "separate-process", "unavailable"] },
+    "scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "sampleSource": { "enum": ["imported-external", "collected-local"] },
+    "runtimeCollectorStatus": { "enum": ["unavailable-deferred", "available"] },
+    "sampleProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commit", "fixtureDigest", "scenario", "architecture", "nativeArtifact", "nativeArtifactSha256", "hardware", "operatingSystem"],
+      "properties": {
+        "commit": { "$ref": "#/properties/commit" },
+        "fixtureDigest": { "$ref": "#/properties/fixtureDigest" },
+        "scenario": { "$ref": "#/properties/scenario" },
+        "architecture": { "$ref": "#/properties/architecture" },
+        "nativeArtifact": { "$ref": "#/properties/nativeArtifact" },
+        "nativeArtifactSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "hardware": { "$ref": "#/properties/hardware" },
+        "operatingSystem": { "$ref": "#/properties/operatingSystem" }
+      }
+    },
+    "runs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cold", "warm"],
+      "properties": {
+        "cold": { "type": "array", "minItems": 30, "maxItems": 30, "items": { "$ref": "#/definitions/sample" } },
+        "warm": { "type": "array", "minItems": 30, "maxItems": 30, "items": { "$ref": "#/definitions/sample" } }
+      }
+    },
+    "warmMetrics": { "$ref": "#/definitions/phaseMetrics" },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "$ref": "#/definitions/summary" },
+        "webViewReadyMs": { "$ref": "#/definitions/summary" },
+        "firstRenderMs": { "$ref": "#/definitions/summary" },
+        "hostPrivateBytes": { "type": ["integer", "null", "object"] },
+        "webView2WorkingSetBytes": { "type": ["integer", "null", "object"] }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalBytes", "binaryBytes", "assetsBytes", "unpackedBytes", "files"],
+      "properties": {
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "binaryBytes": { "type": "integer", "minimum": 0 },
+        "assetsBytes": { "type": "integer", "minimum": 0 },
+        "unpackedBytes": { "type": "integer", "minimum": 0 },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes", "sha256"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^[^\\\\/]+(?:/[^\\\\/]+)*$" },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "artifact-measurement-v1" } } },
+      "then": {
+        "properties": {
+          "metrics": {
+            "properties": {
+              "hostPrivateBytes": { "type": "null" },
+              "webView2WorkingSetBytes": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "desktop-performance-measurement-v1" } } },
+      "then": {
+        "required": ["scenario", "runs", "warmMetrics", "sampleSource", "runtimeCollectorStatus", "sampleProvenance"],
+        "properties": {
+          "runCount": { "const": 60 },
+          "webViewResidency": { "const": "separate-process" },
+          "metrics": {
+            "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+            "properties": {
+              "shellVisibleMs": { "$ref": "#/definitions/measuredSummary" },
+              "webViewReadyMs": { "$ref": "#/definitions/measuredSummary" },
+              "firstRenderMs": { "$ref": "#/definitions/measuredSummary" },
+              "hostPrivateBytes": { "$ref": "#/definitions/measuredSummary" },
+              "webView2WorkingSetBytes": { "$ref": "#/definitions/measuredSummary" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["median", "p95"],
+      "properties": {
+        "median": { "type": ["number", "null"], "minimum": 0 },
+        "p95": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "measuredSummary": {
+      "type": "object",
+      "required": ["median", "p95"],
+      "properties": {
+        "median": { "type": "number", "minimum": 0 },
+        "p95": { "type": "number", "minimum": 0 }
+      }
+    },
+    "phaseMetrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "$ref": "#/definitions/measuredSummary" },
+        "webViewReadyMs": { "$ref": "#/definitions/measuredSummary" },
+        "firstRenderMs": { "$ref": "#/definitions/measuredSummary" },
+        "hostPrivateBytes": { "$ref": "#/definitions/measuredSummary" },
+        "webView2WorkingSetBytes": { "$ref": "#/definitions/measuredSummary" }
+      }
+    },
+    "sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"],
+      "properties": {
+        "shellVisibleMs": { "type": "number", "minimum": 0 },
+        "webViewReadyMs": { "type": "number", "minimum": 0 },
+        "firstRenderMs": { "type": "number", "minimum": 0 },
+        "hostPrivateBytes": { "type": "integer", "minimum": 0 },
+        "webView2WorkingSetBytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

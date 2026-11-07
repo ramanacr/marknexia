@@ -1,0 +1,14 @@
+package com.example;
+import java.util.*;
+/** Javadoc */
+@Override
+public final class Main extends Base implements Runnable {
+    private static final long ID = 1L;
+    // comment
+    public static void main(String[] args) throws Exception {
+        String s = "text\"q"; char c = '\n';
+        int x = 0x10; float f = 1.5f;
+        synchronized (this) { if (s instanceof Object) return; }
+        new Thread(() -> System.out.println(s)).start();
+    }
+}

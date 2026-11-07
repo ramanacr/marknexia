@@ -1,0 +1,38 @@
+{
+  "astral": {
+    "decision": "MATH-3",
+    "rustBody": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"𝑥^2 + \\𝑥\">𝑥<sup>2</sup> + \\𝑥</span></p>\n"
+  },
+  "caret-backslash-at-end": {
+    "decision": "REND-5 (`^\\` at the end)",
+    "rustBody": "<span class=\"marknexia-math\" role=\"math\" aria-label=\"x^\\\">x<sup>\\</sup></span>\n"
+  },
+  "deep-nesting": {
+    "decision": "REND-5 (MAX_MATH_DEPTH)",
+    "rustBody": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{x}}}}}}}}}}}}}}}}}}}}\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">\\sqrt{\\sqrt{\\sqrt{x}}}</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p>\n"
+  },
+  "display-block": {
+    "decision": "MATH-1",
+    "rustBody": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"E = mc^2\">E = mc<sup>2</sup></span></p>\n"
+  },
+  "leading-space": {
+    "decision": "MATH-2",
+    "rustBody": "<p>$ x^2 $ and $x^2 $</p>\n"
+  },
+  "math-disabled": {
+    "decision": "MATH-1",
+    "rustBody": "<p>Inline <span class=\"marknexia-math-fallback\" role=\"math\">\\(x^2\\)</span> and</p>\n<p><span class=\"marknexia-math-fallback\" role=\"math\">\\(\ny &amp;lt; z\n\\)</span></p>\n"
+  },
+  "multi-line-display": {
+    "decision": "MATH-1",
+    "rustBody": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{a}{b}\n\\\\\nc\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">a</span><span class=\"marknexia-denominator\">b</span></span>\n\\\nc</span></p>\n"
+  },
+  "unbalanced": {
+    "decision": "MATH-2",
+    "rustBody": "<p>$\\frac{a$ and <span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sqrt[3\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"></span></span></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"{{{x$ and $}}}y\">x$ and $y</span></p>\n"
+  },
+  "underscore-backslash-at-end": {
+    "decision": "REND-5 (`_\\` at the end)",
+    "rustBody": "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"y_\\\">y<sub>\\</sub></div>\n"
+  }
+}

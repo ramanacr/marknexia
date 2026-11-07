@@ -1,0 +1,32 @@
+{
+  "area": "update-archives",
+  "expected": {
+    "exception": "InvalidDataException",
+    "message": "The update package is missing required file \u0027Marknexia.App.dll\u0027.",
+    "outcome": "rejected",
+    "pendingStageDirectories": 1,
+    "preExistingStageStillExists": true
+  },
+  "input": {
+    "archiveBytesBase64": "UEsDBBQAAAAAAAAAIVAb3wWlAQAAAAEAAAARAAAATWFya25leGlhLkFwcC5leGUBUEsBAhQAFAAAAAAAAAAhUBvfBaUBAAAAAQAAABEAAAAAAAAAAAAAAAAAAAAAAE1hcmtuZXhpYS5BcHAuZXhlUEsFBgAAAAABAAEAPwAAADAAAAAAAA==",
+    "checksumMatches": true,
+    "checksumText": "a510d18b3f36a4a6bc257a1069e1c8a5157f9d0cee556b7e4385ed08e80416d5  package.zip\n",
+    "maximumExpandedBytes": 1000000000,
+    "packageBytes": 133,
+    "packageEntries": [
+      {
+        "contentBase64": "AQ==",
+        "declaredUncompressedBytes": 1,
+        "path": "Marknexia.App.exe"
+      }
+    ],
+    "preExistingStage": "pending-stale-fixture"
+  },
+  "name": "stale-stage-cleanup",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": {
+    "files": [],
+    "root": "updates"
+  }
+}

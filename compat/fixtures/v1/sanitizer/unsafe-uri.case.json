@@ -1,0 +1,14 @@
+{
+  "area": "sanitizer",
+  "expected": {
+    "sanitizedHtml": "\u003Cimg src=\u0022#\u0022\u003E"
+  },
+  "input": {
+    "html": "\u003Cimg src=\u0022vbscript:msgbox(1)\u0022\u003E",
+    "mode": "html"
+  },
+  "name": "unsafe-uri",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": null
+}

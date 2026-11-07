@@ -1,0 +1,18 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Cpre\u003E\u003Ccode class=\u0022language-c#\u0022\u003Evar value = 1;\n\u003C/code\u003E\u003C/pre\u003E\n"
+  },
+  "input": {
+    "markdown": "\u0060\u0060\u0060c#\nvar value = 1;\n\u0060\u0060\u0060\n"
+  },
+  "name": "language-labels",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": null
+}

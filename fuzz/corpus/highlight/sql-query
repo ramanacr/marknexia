@@ -1,0 +1,10 @@
+	-- comment
+/* block
+ comment */
+SELECT TOP 10 u.Id, COUNT(*) AS Total, 'it''s' AS s, N'unicode'
+FROM dbo.Users u WITH (NOLOCK)
+LEFT OUTER JOIN [Orders] o ON o.UserId = u.Id
+WHERE u.Name LIKE 'A%' AND u.Age >= 18 OR u.Flag IS NOT NULL
+GROUP BY u.Id HAVING COUNT(*) > 1
+ORDER BY Total DESC;
+DECLARE @x INT = 5; EXEC sp_who; select getdate(), @@ROWCOUNT, "quoted";

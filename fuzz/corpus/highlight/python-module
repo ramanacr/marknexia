@@ -1,0 +1,21 @@
+# comment
+import os, sys
+from typing import List
+
+class Foo(Base):
+    """Docstring here."""
+    x: int = 0x1F
+    def __init__(self, name='n', *args, **kwargs):
+        self.name = f"hi {name}"
+        doc = '''triple
+        single'''
+        raw = r"\d+"
+        if name is None or not args:
+            return
+        print(len(args), abs(-1.5e3), isinstance(name, str))
+        lambda y: y + 1
+
+async def main():
+    await asyncio.sleep(1)
+    with open('f') as fh: pass
+    return [i for i in range(10) if i % 2 == 0]
