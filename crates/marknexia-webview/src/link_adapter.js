@@ -1,5 +1,5 @@
 // Host-injected link adapter (AddScriptToExecuteOnDocumentCreated). The
-// rendered page and its bundled bridge.js stay byte-identical to .NET. The
+// rendered page and its bundled bridge.js are not changed for links. The
 // .NET bridge posts an untyped {type:'openLink', href} message that the
 // strict Rust protocol rejects; this adapter takes link clicks first, in the
 // capture phase on the window, stops them before bridge.js sees them, and

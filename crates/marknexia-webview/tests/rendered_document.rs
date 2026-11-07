@@ -488,8 +488,8 @@ fn the_link_adapter_is_bound_to_one_document_identity() {
 }
 
 #[test]
-fn the_frozen_bridge_is_unchanged_and_still_posts_the_flat_message() {
-    // Decision LNK-1: bridge.js stays byte-identical to .NET; the adapter
+fn the_bridge_keeps_the_dotnet_link_handler_and_its_flat_message() {
+    // Decision LNK-1: bridge.js keeps the .NET link handler; the adapter
     // stops the click before it.
     let bridge = include_str!("../../marknexia-rendering/assets/bridge.js");
     assert!(
