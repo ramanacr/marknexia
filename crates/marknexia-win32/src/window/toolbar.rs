@@ -863,6 +863,27 @@ pub(super) fn draw_button(
     }
 }
 
+/// Repaints the one-pixel line at the bottom of a button that spans a bar
+/// with a bottom line (the command bar, the find bar), so the line stays
+/// continuous under the buttons: the border color, WindowText in high
+/// contrast (as the shell window paints it).
+pub(super) fn bar_line(item: &DRAWITEMSTRUCT, theme: EffectiveTheme, colors: Palette) {
+    let line = if theme == EffectiveTheme::HighContrast {
+        ColorSpec::System(SystemColorRole::WindowText)
+    } else {
+        colors.border
+    };
+    let rect = item.rcItem;
+    fill(
+        item.hDC,
+        &RECT {
+            top: rect.bottom - 1,
+            ..rect
+        },
+        native_color(line),
+    );
+}
+
 /// Paints the theme selector's field ("Theme: Light", or "Light" without
 /// `prefix`) or one of its drop-down items, vertically centred, in the
 /// palette (system colors in high contrast).

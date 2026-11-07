@@ -1593,16 +1593,20 @@ fn on_draw_item(hwnd: HWND, item: &DRAWITEMSTRUCT) -> Option<LRESULT> {
             dpi,
             toolbar::theme_prefix(compact, bar_width, dpi),
         ),
-        (_, Some((glyph, label))) => toolbar::draw_button(
-            item,
-            theme,
-            colors,
-            colors.surface,
-            glyph,
-            label,
-            buttons,
-            dpi,
-        ),
+        (_, Some((glyph, label))) => {
+            toolbar::draw_button(
+                item,
+                theme,
+                colors,
+                colors.surface,
+                glyph,
+                label,
+                buttons,
+                dpi,
+            );
+            // The command bar's bottom line runs under the button.
+            toolbar::bar_line(item, theme, colors);
+        }
         _ => return None,
     }
     Some(LRESULT(1))

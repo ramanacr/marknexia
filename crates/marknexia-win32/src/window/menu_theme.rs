@@ -19,11 +19,11 @@ use std::cell::RefCell;
 
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, SIZE, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
             CreateFontIndirectW, CreateSolidBrush, DT_CENTER, DT_HIDEPREFIX, DT_SINGLELINE,
-            DT_VCENTER, DeleteObject, GetDC, GetTextExtentPoint32W, HBRUSH, HFONT, HGDIOBJ,
-            ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            DT_VCENTER, DeleteObject, GetDC, GetDCOrgEx, GetTextExtentPoint32W, HBRUSH, HFONT,
+            HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, WindowFromDC,
         },
         UI::{
             Accessibility::{MSAA_MENU_SIG, MSAAMENUINFO},
@@ -258,6 +258,33 @@ pub(super) fn measure(window: HWND, item: &mut MEASUREITEMSTRUCT) -> bool {
     true
 }
 
+/// The item's rectangle, or `None` when the DC is not the bar's window
+/// DC. `rcItem` of a menu bar item is in window coordinates. On Windows 11
+/// (26100) the bar's hot-tracking redraws can hand over a DC whose origin
+/// is the client area: painting `rcItem` there drew a second copy of
+/// "File View Settings Help" over the toolbar (owner test 2026-11-07).
+/// Such a DC is skipped (the bar itself is painted through its window
+/// DC). A DC without a window (a memory DC) keeps `rcItem`.
+fn bar_rect(item: &DRAWITEMSTRUCT) -> Option<RECT> {
+    let rect = item.rcItem;
+    // SAFETY: plain queries of the DC and window of this WM_DRAWITEM.
+    unsafe {
+        let window = WindowFromDC(item.hDC);
+        if window.is_invalid() {
+            return Some(rect);
+        }
+        let mut origin = POINT::default();
+        let mut frame = RECT::default();
+        if !GetDCOrgEx(item.hDC, &mut origin).as_bool()
+            || windows::Win32::UI::WindowsAndMessaging::GetWindowRect(window, &mut frame).is_err()
+        {
+            return Some(rect);
+        }
+        // The bar's own window DC starts at the window origin.
+        (frame.left == origin.x && frame.top == origin.y).then_some(rect)
+    }
+}
+
 /// `WM_DRAWITEM` for the owner-drawn bar items.
 pub(super) fn draw(item: &DRAWITEMSTRUCT) -> bool {
     if item.CtlType != ODT_MENU {
@@ -283,7 +310,10 @@ pub(super) fn draw(item: &DRAWITEMSTRUCT) -> bool {
         colors.text
     };
     let dc = item.hDC;
-    let mut rect = item.rcItem;
+    let Some(mut rect) = bar_rect(item) else {
+        // Not the bar's window DC (see `bar_rect`): nothing to paint.
+        return true;
+    };
     fill(dc, &rect, native_color(background));
     // SAFETY: the label is a static literal; it is copied to a local buffer
     // for DrawTextW.

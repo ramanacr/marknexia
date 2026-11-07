@@ -1239,6 +1239,8 @@ pub(super) fn draw_find_button(hwnd: HWND, item: &DRAWITEMSTRUCT) -> bool {
                 fonts,
                 dpi,
             );
+            // The find bar's bottom line runs under the button.
+            super::toolbar::bar_line(item, theme, colors);
             true
         }
         None => {
