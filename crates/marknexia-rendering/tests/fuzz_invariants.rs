@@ -236,3 +236,109 @@ fn leading_line_feeds_in_pre_and_textarea_are_a_fixed_point() {
         assert_eq!(twice, once, "{input:?}");
     }
 }
+
+/// Replays one `markdown_and_html` fuzz input exactly as the fuzz target
+/// decodes it: the first byte selects the options, the rest is the text.
+fn replay_markdown_and_html(name: &str, bytes: &[u8]) {
+    use marknexia_security::testing::sanitize_with_chunking;
+
+    let Some((&flags, rest)) = bytes.split_first() else {
+        return;
+    };
+    let Ok(input) = std::str::from_utf8(rest) else {
+        return;
+    };
+    let remote = flags & 1 != 0;
+
+    let content = ContentPolicy::try_new(
+        PolicyLimits::default(),
+        match flags & 0x41 {
+            0x01 | 0x41 => RemoteImagePolicy::AllowHttps,
+            0x40 => RemoteImagePolicy::Deny,
+            _ => RemoteImagePolicy::Blank,
+        },
+    )
+    .unwrap();
+    let html = HtmlPolicy::new(content);
+    if let Ok(clean) = html.sanitize_fragment(input) {
+        assert!(clean.as_str().len() <= MAX_HTML_OUTPUT_BYTES, "{name}");
+        let again = html.sanitize_fragment(clean.as_str()).unwrap();
+        assert_eq!(again, clean, "{name}: sanitizer is not a fixed point");
+    }
+    assert_eq!(
+        sanitize_with_chunking(content, input, Some(1), 2),
+        sanitize_with_chunking(content, input, None, 1),
+        "{name}: chunked sanitization differs"
+    );
+
+    let limits = RenderLimits {
+        max_rendered_html_bytes: if flags & 0x10 != 0 {
+            40_000
+        } else {
+            RenderLimits::DEFAULT_MAX_RENDERED_HTML_BYTES
+        },
+        max_diagram_count: usize::from((flags >> 5) & 3),
+        max_diagram_source_bytes: if flags & 0x80 != 0 { 8 } else { 1024 },
+        ..RenderLimits::default()
+    };
+    let renderer = Renderer::with_engine(marknexia_markdown::PulldownAdapter, limits).unwrap();
+    let mut context = RenderContext::new(
+        AppTheme::System,
+        PageIdentity::new([1; 16], [2; 16]).unwrap(),
+    );
+    context.allow_remote_assets = remote;
+    context.enable_diagrams = flags & 2 == 0;
+    context.enable_math = flags & 4 == 0;
+    context.document_directory = if flags & 8 != 0 {
+        "docs/a b".into()
+    } else {
+        String::new()
+    };
+    let Ok(document) = renderer.render(input, &context) else {
+        return;
+    };
+    let body = document.body().as_str();
+    assert!(body.len() <= MAX_HTML_OUTPUT_BYTES, "{name}");
+    assert!(
+        document.page_bytes() <= limits.max_rendered_html_bytes,
+        "{name}"
+    );
+    let again = policy(remote).sanitize_fragment(body).unwrap();
+    if again.as_str() != body {
+        let again = again.as_str();
+        let at = body
+            .bytes()
+            .zip(again.bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| body.len().min(again.len()));
+        let from = at.saturating_sub(120);
+        panic!(
+            "{name}: rendered body is not a sanitizer fixed point at byte {at}\n body: {:?}\n again: {:?}",
+            body.get(from..(at + 80).min(body.len())),
+            again.get(from..(at + 80).min(again.len()))
+        );
+    }
+}
+
+/// Every committed `markdown_and_html` corpus file, crash inputs included,
+/// keeps the fuzz target's invariants on a normal `cargo test`.
+#[test]
+fn markdown_and_html_corpus_keeps_the_fuzz_invariants() {
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/markdown_and_html");
+    let mut entries: Vec<_> = std::fs::read_dir(&corpus)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    entries.sort();
+    assert!(
+        entries.iter().any(|path| path
+            .file_name()
+            .is_some_and(|name| name == "crash-c4f446f4b39c298c633e17eb9c91bec48fb02286")),
+        "the deep blockquote crash input is in the corpus"
+    );
+    for path in entries {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        replay_markdown_and_html(&name, &std::fs::read(&path).unwrap());
+    }
+}

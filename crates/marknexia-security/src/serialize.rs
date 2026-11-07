@@ -17,6 +17,16 @@
 //!   the HTML fragment serialization algorithm of AngleSharp and browsers
 //!   does, so re-parsing the output restores the same text and sanitization
 //!   is a fixed point.
+//! * **Nested links.** The tree builder can leave an HTML `<a>` inside
+//!   another one: the adoption agency algorithm stops after eight outer
+//!   iterations, so when active-formatting reconstruction has cloned a link
+//!   into many blocks, the next `<a>` start tag does not close every clone.
+//!   Re-parsing a nested `<a>` start tag always closes the outer link (it
+//!   runs the adoption agency for an `<a>` after the last marker), so that
+//!   tree is not a fixed point. The tags of an `<a>` that has an open `<a>`
+//!   ancestor with no `<td>`, `<th>` or `<caption>` (the markers a sanitized
+//!   tree can hold) in between are left out, and its children are written in
+//!   its place. This only drops markup: the inner link and its attributes.
 //!
 //! The output budget is shared by every chunk of a document and charged while
 //! writing, so an expanding document fails once the total passes the limit.
@@ -58,6 +68,11 @@ impl OutputBudget {
 struct ElemInfo {
     html_name: Option<LocalName>,
     ignore_children: bool,
+    /// An HTML `<a>` is open with no `<td>`, `<th>` or `<caption>` since, so
+    /// an `<a>` start tag here would close it on re-parsing.
+    in_link: bool,
+    /// The element's own tags are not written (a nested `<a>`).
+    unwrapped: bool,
 }
 
 enum Op {
@@ -69,7 +84,9 @@ struct Writer<'b> {
     out: String,
     charged: usize,
     budget: &'b OutputBudget,
-    restore_leading_lf: bool,
+    /// Marknexia's re-parse fixes (leading line feed, nested links). Off
+    /// only for the differential test against html5ever's serializer.
+    round_trip: bool,
     /// The output starts the whole fragment (see [`BOM_REFERENCE`]).
     document_start: bool,
 }
@@ -135,10 +152,27 @@ impl Writer<'_> {
         stack: &mut Vec<ElemInfo>,
     ) -> Result<(), SanitizeError> {
         let html_name = (name.ns == ns!(html)).then(|| name.local.clone());
+        let parent_in_link = stack.last().is_some_and(|parent| parent.in_link);
         if stack.last().is_some_and(|parent| parent.ignore_children) {
             stack.push(ElemInfo {
                 html_name,
                 ignore_children: true,
+                in_link: parent_in_link,
+                unwrapped: false,
+            });
+            return Ok(());
+        }
+        let in_link = match html_name {
+            Some(local_name!("a")) => true,
+            Some(local_name!("td") | local_name!("th") | local_name!("caption")) => false,
+            _ => parent_in_link,
+        };
+        if self.round_trip && parent_in_link && html_name == Some(local_name!("a")) {
+            stack.push(ElemInfo {
+                html_name,
+                ignore_children: false,
+                in_link,
+                unwrapped: true,
             });
             return Ok(());
         }
@@ -163,12 +197,12 @@ impl Writer<'_> {
             self.out.push('"');
         }
         self.out.push('>');
-        if self.restore_leading_lf
+        if self.round_trip
             && matches!(
                 html_name,
                 Some(local_name!("pre") | local_name!("listing") | local_name!("textarea"))
             )
-            && starts_with_line_feed(node)
+            && starts_with_line_feed(node, in_link)
         {
             self.out.push('\n');
         }
@@ -176,6 +210,8 @@ impl Writer<'_> {
         stack.push(ElemInfo {
             html_name,
             ignore_children,
+            in_link,
+            unwrapped: false,
         });
         self.settle(false)
     }
@@ -185,7 +221,9 @@ impl Writer<'_> {
         name: &QualName,
         stack: &mut Vec<ElemInfo>,
     ) -> Result<(), SanitizeError> {
-        let ignore = stack.pop().is_some_and(|info| info.ignore_children);
+        let ignore = stack
+            .pop()
+            .is_some_and(|info| info.ignore_children || info.unwrapped);
         if ignore {
             return Ok(());
         }
@@ -244,10 +282,23 @@ fn is_void(name: &LocalName) -> bool {
     )
 }
 
-fn starts_with_line_feed(node: &Handle) -> bool {
-    node.children.borrow().first().is_some_and(|first| {
-        matches!(&first.data, NodeData::Text { contents } if contents.borrow().starts_with('\n'))
-    })
+/// The first character written after `node`'s start tag is a line feed.
+/// With `in_link`, a first child `<a>` is unwrapped, so its own first child
+/// is written right after the start tag.
+fn starts_with_line_feed(node: &Handle, in_link: bool) -> bool {
+    let mut node = node.clone();
+    loop {
+        let Some(first) = node.children.borrow().first().cloned() else {
+            return false;
+        };
+        match &first.data {
+            NodeData::Text { contents } => return contents.borrow().starts_with('\n'),
+            NodeData::Element { name, .. }
+                if in_link && name.ns == ns!(html) && name.local == local_name!("a") => {}
+            _ => return false,
+        }
+        node = first;
+    }
 }
 
 /// Serialize the children of `root` (ammonia's `<html>` fragment root), as
@@ -266,20 +317,22 @@ fn serialize_with(
     root: &Handle,
     budget: &OutputBudget,
     capacity: usize,
-    restore_leading_lf: bool,
+    round_trip: bool,
     document_start: bool,
 ) -> Result<String, SanitizeError> {
     let mut writer = Writer {
         out: String::with_capacity(capacity.min(budget.limit)),
         charged: 0,
         budget,
-        restore_leading_lf,
+        round_trip,
         document_start,
     };
     // `TraversalScope::ChildrenOnly(None)`: the root's own name is not used.
     let mut stack = vec![ElemInfo {
         html_name: None,
         ignore_children: false,
+        in_link: false,
+        unwrapped: false,
     }];
     let mut ops: Vec<Op> = root
         .children
@@ -450,5 +503,75 @@ mod tests {
             serialize_children(&root, &budget, 0, true),
             Err(SanitizeError::OutputTooLarge { limit: 20 })
         );
+    }
+}
+
+#[cfg(test)]
+mod nested_link_tests {
+    use crate::{ContentPolicy, HtmlPolicy};
+
+    fn sanitize(input: &str) -> String {
+        HtmlPolicy::new(ContentPolicy::default())
+            .sanitize_fragment(input)
+            .unwrap()
+            .as_str()
+            .to_owned()
+    }
+
+    /// Markdown-like body: an unclosed link deep in block quotes, closed
+    /// quotes, then the same again, so the second `<a>` start tag meets
+    /// more reconstructed link clones than the adoption agency closes.
+    fn unclosed_links(depth: usize, sections: usize, inner: &str) -> String {
+        let mut body = String::new();
+        for section in 0..sections {
+            body.push_str(&"<blockquote>\n".repeat(depth));
+            body.push_str(&format!(
+                "<p>t <a href=\"https://h.test/{section}\">{inner}</p>\n"
+            ));
+            body.push_str(&"</blockquote>\n".repeat(depth));
+            body.push_str("<h2>T</h2>\n");
+        }
+        body
+    }
+
+    #[test]
+    fn deep_unclosed_links_are_a_fixed_point() {
+        for depth in [1, 2, 7, 8, 9, 10, 16, 17, 24, 40] {
+            for sections in 1..=4 {
+                for inner in [
+                    "x",
+                    "\nx",
+                    "<pre>\n\ny</pre>",
+                    "<b>z",
+                    "<table><tr><td><a>c",
+                ] {
+                    let input = unclosed_links(depth, sections, inner);
+                    let once = sanitize(&input);
+                    let twice = sanitize(&once);
+                    assert_eq!(twice, once, "{depth} {sections} {inner:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_link_is_unwrapped_unless_a_cell_separates_them() {
+        // The fuzz crash shape: the tree builder leaves `<a><a>` (adoption
+        // agency limit); only the outer link's tags are written.
+        let input = unclosed_links(24, 2, "x");
+        let once = sanitize(&input);
+        assert!(!once.contains("</a></a>"), "{once}");
+        // A table cell is a marker: re-parsing keeps the inner link there.
+        let cell = "<a href=\"https://h.test/\">o<table><tbody><tr><td>\
+                    <a href=\"https://h.test/i\">i</a></td></tr></tbody></table></a>";
+        assert_eq!(sanitize(cell), cell);
+        assert_eq!(sanitize(&sanitize(cell)), cell);
+    }
+
+    #[test]
+    fn a_pre_after_an_unwrapped_link_keeps_its_leading_line_feed() {
+        let input = unclosed_links(24, 2, "<pre>\n\ny</pre>");
+        let once = sanitize(&input);
+        assert_eq!(sanitize(&once), once);
     }
 }
