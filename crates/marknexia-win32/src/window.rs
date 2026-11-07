@@ -30,10 +30,10 @@ use windows::{
             Gdi::{
                 BeginPaint, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
                 COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateSolidBrush, DT_CENTER,
-                DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, EndPaint,
-                FillRect, FrameRect, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ,
-                InvalidateRect, PAINTSTRUCT, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-                TRANSPARENT, UpdateWindow,
+                DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, EndPaint, FillRect,
+                FrameRect, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+                PAINTSTRUCT, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+                UpdateWindow,
             },
         },
         Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
@@ -2243,7 +2243,7 @@ fn draw_command_button(hwnd: HWND, item: &DRAWITEMSTRUCT) -> bool {
     unsafe {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, native_color(text));
-        DrawTextW(
+        style::draw_text(
             dc,
             &mut label[..length],
             &mut text_rect,

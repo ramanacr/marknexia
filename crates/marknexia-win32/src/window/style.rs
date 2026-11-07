@@ -13,9 +13,9 @@ use windows::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
             CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush,
-            DEFAULT_CHARSET, DeleteObject, FF_DONTCARE, FONT_WEIGHT, GetDC, GetStockObject,
-            GetTextFaceW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, NULL_PEN,
-            OUT_DEFAULT_PRECIS, PS_SOLID, ReleaseDC, RoundRect, SelectObject,
+            DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DeleteObject, DrawTextW, FF_DONTCARE, FONT_WEIGHT,
+            GetDC, GetStockObject, GetTextFaceW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
+            NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PS_SOLID, ReleaseDC, RoundRect, SelectObject,
         },
         UI::{
             Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent},
@@ -277,6 +277,26 @@ pub(super) fn frame_round(dc: HDC, rect: &RECT, color: COLORREF, radius: i32) {
     }
 }
 
+/// `DrawTextW` that never passes an empty string. windows-rs hands an
+/// empty slice to GDI as a dangling (non-null) pointer with length 0, and
+/// `DrawTextW` with `DT_END_ELLIPSIS` reads through it: an access
+/// violation inside USER32 during `WM_DRAWITEM` (the empty theme field at
+/// startup crashed the shell, owner test 2026-11-07). Empty text draws
+/// nothing; the return value is 0, as for an empty string.
+pub(super) fn draw_text(
+    dc: HDC,
+    text: &mut [u16],
+    rect: &mut RECT,
+    format: DRAW_TEXT_FORMAT,
+) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    // SAFETY: `text` is a live, non-empty buffer and `rect` a live local;
+    // the DC belongs to the caller's paint.
+    unsafe { DrawTextW(dc, text, rect, format) }
+}
+
 /// `rect` shrunk by `dx` and `dy` pixels on each side.
 pub(super) fn inset(rect: &RECT, dx: i32, dy: i32) -> RECT {
     RECT {
@@ -483,4 +503,41 @@ unsafe extern "system" fn hover_proc(
     }
     // SAFETY: default processing of the subclassed control.
     unsafe { DefSubclassProc(window, message, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{
+            CreateCompatibleDC, DT_END_ELLIPSIS, DT_LEFT, DT_PATH_ELLIPSIS, DT_SINGLELINE,
+            DT_VCENTER, DeleteDC,
+        },
+    };
+
+    use super::draw_text;
+
+    /// Startup crash, owner test 2026-11-07: the theme field has no
+    /// selection on its first `WM_DRAWITEM`, so its text was empty, and
+    /// `DrawTextW` with an empty slice and `DT_END_ELLIPSIS` faulted in
+    /// USER32. Every owner-drawn text goes through `draw_text`, which skips
+    /// empty text; non-empty text still draws (headless memory DC).
+    #[test]
+    fn empty_owner_drawn_text_never_reaches_draw_text_w() {
+        // SAFETY: a memory DC compatible with the screen, deleted below.
+        let dc = unsafe { CreateCompatibleDC(None) };
+        assert!(!dc.is_invalid());
+        let format = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_PATH_ELLIPSIS;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 120,
+            bottom: 40,
+        };
+        assert_eq!(draw_text(dc, &mut [], &mut rect, format), 0);
+        let mut text: Vec<u16> = "Theme: Light".encode_utf16().collect();
+        assert!(draw_text(dc, &mut text, &mut rect, format) > 0);
+        // SAFETY: created above; nothing is selected into it.
+        let _ = unsafe { DeleteDC(dc) };
+    }
 }

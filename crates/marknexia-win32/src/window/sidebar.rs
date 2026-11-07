@@ -11,7 +11,7 @@ use windows::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             BeginPaint, DT_BOTTOM, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
-            DT_SINGLELINE, DT_TOP, DT_VCENTER, DrawFocusRect, DrawTextW, EndPaint, HFONT, HGDIOBJ,
+            DT_SINGLELINE, DT_TOP, DT_VCENTER, DrawFocusRect, EndPaint, HFONT, HGDIOBJ,
             InvalidateRect, PAINTSTRUCT, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
             TRANSPARENT,
         },
@@ -615,7 +615,7 @@ pub(super) fn draw_outline_item(
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, native_color(foreground));
         let previous = SelectObject(dc, HGDIOBJ(font.0));
-        DrawTextW(
+        super::style::draw_text(
             dc,
             &mut text,
             &mut area,
@@ -662,7 +662,7 @@ pub(super) fn draw_recent_item(
             right,
             bottom: middle + px(2),
         };
-        DrawTextW(
+        super::style::draw_text(
             dc,
             &mut name,
             &mut area,
@@ -680,7 +680,7 @@ pub(super) fn draw_recent_item(
             right,
             bottom: rect.bottom,
         };
-        DrawTextW(
+        super::style::draw_text(
             dc,
             &mut folder,
             &mut area,
@@ -847,7 +847,7 @@ fn paint_selector(hwnd: HWND) -> bool {
         let mut measure = body;
         // SAFETY: as above; DT_CALCRECT only measures.
         unsafe {
-            DrawTextW(
+            super::style::draw_text(
                 dc,
                 &mut label,
                 &mut measure,
@@ -862,7 +862,7 @@ fn paint_selector(hwnd: HWND) -> bool {
                 }),
             );
             let mut area = body;
-            DrawTextW(
+            super::style::draw_text(
                 dc,
                 &mut label,
                 &mut area,
