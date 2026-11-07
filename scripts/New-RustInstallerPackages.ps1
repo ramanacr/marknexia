@@ -232,7 +232,11 @@ if ($LASTEXITCODE -ne 0) { throw "makeappx unpack failed ($LASTEXITCODE)." }
 
 $stagedFiles = @(Get-ChildItem -LiteralPath $msixRoot -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($msixRoot, $_.FullName) })
 $unpackedFiles = @(Get-ChildItem -LiteralPath $unpacked -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($unpacked, $_.FullName) })
-$generated = @('AppxBlockMap.xml', '[Content_Types].xml')
+# makeappx unpack writes the block map but not [Content_Types].xml (run
+# 42354781909), so only the block map is an expected generated file; the
+# content-types part, if a future makeappx extracts it, is tolerated.
+$unpackedFiles = @($unpackedFiles | Where-Object { $_ -cne '[Content_Types].xml' })
+$generated = @('AppxBlockMap.xml')
 $expectedFiles = Get-OrdinalSorted (@($stagedFiles) + $generated)
 if (((Get-OrdinalSorted $unpackedFiles) -join '|') -cne ($expectedFiles -join '|')) {
     throw "The MSIX holds other files than staged: $((Get-OrdinalSorted $unpackedFiles) -join ', ')"
