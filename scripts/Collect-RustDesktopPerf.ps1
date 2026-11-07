@@ -132,6 +132,40 @@ public static class PerfWindowProbe {
         }, IntPtr.Zero);
         return lines.Length == 0 ? "  (no top-level windows)\n" : lines.ToString();
     }
+    // Process list from a Toolhelp snapshot: no WMI, so it cannot stall the
+    // way Win32_Process queries can after many launches on a hosted runner.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry {
+        public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+        public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    public static string[] Processes() {
+        var result = new System.Collections.Generic.List<string>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+        if (snapshot == new IntPtr(-1)) { return result.ToArray(); }
+        try {
+            var entry = new ProcessEntry { dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
+            for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
+                result.Add(entry.th32ProcessID + "|" + entry.th32ParentProcessID + "|" + entry.szExeFile);
+            }
+        }
+        finally { CloseHandle(snapshot); }
+        return result.ToArray();
+    }
+    private static System.Threading.Timer watchdog;
+    // Ends the collector process if it has not finished in time. Pure .NET
+    // timer callback: no PowerShell runspace is needed on the timer thread.
+    public static void StartWatchdog(int minutes) {
+        watchdog = new System.Threading.Timer(_ => {
+            Console.Error.WriteLine("Collector watchdog: no completion within " + minutes + " minutes; a call blocked without a timeout.");
+            Environment.Exit(3);
+        }, null, TimeSpan.FromMinutes(minutes), System.Threading.Timeout.InfiniteTimeSpan);
+    }
     public static IntPtr FindVisibleShell(uint processId) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((window, _) => {
@@ -149,7 +183,10 @@ public static class PerfWindowProbe {
 '@
 
 function Get-DescendantProcesses([int]$RootId) {
-    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -OperationTimeoutSec 20)
+    $all = @([PerfWindowProbe]::Processes() | ForEach-Object {
+            $fields = $_.Split('|', 3)
+            [pscustomobject]@{ ProcessId = [int]$fields[0]; ParentProcessId = [int]$fields[1]; Name = $fields[2] }
+        })
     $result = [System.Collections.Generic.List[object]]::new()
     $frontier = [System.Collections.Generic.Queue[int]]::new()
     $frontier.Enqueue($RootId)
@@ -257,6 +294,9 @@ function Invoke-Run([string]$UserData) {
 # every retry is recorded in the samples so nothing is hidden.
 $script:retries = [System.Collections.Generic.List[object]]::new()
 $script:collection = [Diagnostics.Stopwatch]::StartNew()
+# Hard backstop: if any call blocks past the overall deadline, end the
+# collector with a clear error instead of running into the CI step timeout.
+[PerfWindowProbe]::StartWatchdog($TotalTimeoutMinutes + 1)
 function Invoke-MeasuredRun([string]$UserData, [string]$Label) {
     if ($script:collection.Elapsed.TotalMinutes -gt $TotalTimeoutMinutes) {
         throw "Collection exceeded $TotalTimeoutMinutes minutes before run $Label."
