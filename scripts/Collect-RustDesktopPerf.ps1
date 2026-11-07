@@ -290,7 +290,7 @@ function Invoke-Run([string]$UserData) {
 }
 
 # A launch can fail transiently on hosted runners (e.g. STATUS_DLL_INIT_FAILED
-# 0xC0000142 when desktop resources run low). Retry such a run at most twice;
+# 0xC0000142 when desktop resources run low). Retry such a run at most three times, with back-off;
 # every retry is recorded in the samples so nothing is hidden.
 $script:retries = [System.Collections.Generic.List[object]]::new()
 $script:collection = [Diagnostics.Stopwatch]::StartNew()
@@ -309,9 +309,13 @@ function Invoke-MeasuredRun([string]$UserData, [string]$Label) {
             return $sample
         }
         catch {
-            if ($attempt -ge 3 -or "$_" -notmatch 'Shell exited early') { throw }
+            if ($attempt -ge 4 -or "$_" -notmatch 'Shell exited early') { throw }
             $script:retries.Add([ordered]@{ run = $Label; attempt = $attempt; reason = "$_" })
-            Start-Sleep -Seconds 2
+            # Back off: on hosted runners the 0xC0000142 launch failures came
+            # in bursts right after a run whose WebView2 processes were slow
+            # to exit (CI runs 42369583603, 42391046714, 42391048861), and a
+            # 2-second pause was not enough for the desktop to recover.
+            Start-Sleep -Seconds (5 * $attempt * $attempt)
         }
     }
 }
