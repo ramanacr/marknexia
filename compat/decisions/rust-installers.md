@@ -1,6 +1,6 @@
 # Rust preview installers: per-user setup and MSIX (unsigned, CI only)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: `crates/marknexia-setup` (all of it), `packaging/rust-msix/AppxManifest.xml`, `scripts/New-RustInstallerPackages.ps1`, `scripts/Test-RustSetupPayload.ps1`, `scripts/Test-RustSetupInstall.ps1`, the optional naming parameters of `scripts/Generate-RustSbom.ps1` and `scripts/Test-RustSbom.ps1`, `tests/perf/rust_setup_payload.tests.ps1`, and the setup and MSIX steps of the `rust-release-build` job in `.github/workflows/rust-feasibility.yml`. The .NET sources are `src/Marknexia.Setup/Program.cs`, `src/Marknexia.App/Package.appxmanifest` and `scripts/Test-MsixPackage.ps1`; they are not changed. Owner decision 2026-11-07: build an unsigned per-user setup and an MSIX for x64 and ARM64 in CI only, and upload them only as workflow artifacts (no signing, no release, no publishing).
 

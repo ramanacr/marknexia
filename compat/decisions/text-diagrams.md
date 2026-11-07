@@ -1,6 +1,6 @@
 # Text diagrams: ASCII-art and box-drawing code blocks drawn as SVG (Rust edition only)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: `crates/marknexia-rendering/src/textdiagram/` (all of it), the text-diagram hook in `crates/marknexia-rendering/src/passes.rs` (`highlight_code_blocks_cancellable`), `RenderContext::enable_text_diagrams`, `RenderedDocument::text_diagrams` and the conditional stylesheet in `crates/marknexia-rendering/src/template.rs`, the `RenderTextDiagrams` property in `crates/marknexia-core/src/settings.rs`, the View menu item and `RenderJob::render_text_diagrams` in `crates/marknexia-win32`, the tests `crates/marknexia-rendering/tests/text_diagrams.rs` (with the fixture `tests/text_diagrams/adr-reference-architecture.txt`) and the preview example `crates/marknexia-rendering/examples/text_diagram_preview.rs`. Owner request 2026-11-07: ASCII-art and box-drawing diagrams inside code blocks must render as real diagrams, not text. This is a new feature: the .NET edition shows every such block as a highlighted code block. No .NET source, bundled asset (`github-markdown.css`, `bridge.js`) or frozen fixture is changed.
 
@@ -38,7 +38,7 @@ Owner options: (a) keep the in-house renderer (this record); (b) approve `BSD-3-
 | TDG-9 | Accessibility | — | The figure is `role="img"` with the whole original text as its accessible name; the SVG and the text layer are `aria-hidden`. The Source button shows the original text as a code block. **Known gap:** the bridge (a frozen .NET asset) labels every diagram viewport "Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore." Changing it needs a bridge change outside the frozen asset. |
 | TDG-10 | Frozen v1 fixtures | — | No frozen fixture contains an untagged, `text` or tagged diagram fence (the fixture fences are `c#`, `csharp` and `mermaid`), so no expected result changes. `parity_v1` passes with no new allowance. |
 
-Later change (2026-11-07): `vector-diagram-zoom.md` (proposed) changes the bundled `bridge.js` and `github-markdown.css` so that diagrams zoom without blur. From that change on, no page keeps the exact .NET bytes; text-diagram pages still differ from other pages only by the conditional stylesheet (TDG-7).
+Later change (2026-11-07): `vector-diagram-zoom.md` (approved 2026-11-07) changes the bundled `bridge.js` and `github-markdown.css` so that diagrams zoom without blur. From that change on, no page keeps the exact .NET bytes; text-diagram pages still differ from other pages only by the conditional stylesheet (TDG-7).
 
 ## Detection corpus (`crates/marknexia-rendering/tests/text_diagrams.rs`)
 

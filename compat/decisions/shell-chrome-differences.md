@@ -38,7 +38,7 @@ Approve or reject each row. CHROME-5, CHROME-7 and CHROME-14 are gaps to close b
 
 ## Proposed additions (2026-11-07)
 
-Status: **proposed — not approved.** UI polish after the owner's live test of the preview build ("UI is somewhat weird"). The rows above keep their approved status; these rows wait for owner approval. Rows CHROME-16 to CHROME-27 describe what changed and what still differs from .NET. Native UI tests were not run for this change (the owner's desktop was in use); the pure layout, geometry and model tests were run.
+Status: **approved — owner decision 2026-11-07.** UI polish after the owner's live test of the preview build ("UI is somewhat weird"). The rows above keep their approved status; the owner approved these rows on 2026-11-07. Rows CHROME-16 to CHROME-27 describe what changed and what still differs from .NET. Native UI tests were not run for this change (the owner's desktop was in use); the pure layout, geometry and model tests were run.
 
 | ID | Condition | .NET oracle | Rust target |
 | --- | --- | --- | --- |
