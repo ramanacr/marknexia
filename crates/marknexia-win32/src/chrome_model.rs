@@ -73,6 +73,16 @@ impl SidebarMode {
         }
     }
 
+    /// The selector label for a narrow pane: "Recent" for "Recent files"
+    /// (the UIA name stays [`Self::label`]).
+    #[must_use]
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Recent => "Recent",
+            mode => mode.label(),
+        }
+    }
+
     /// The heading above the list (.NET `DocumentMapHeader` and
     /// `RepositoryHeader`).
     #[must_use]

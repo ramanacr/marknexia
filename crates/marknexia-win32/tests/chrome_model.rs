@@ -415,3 +415,12 @@ fn the_sbom_list_is_capped_with_a_remainder_row() {
     assert_eq!(rows[SBOM_LIST_LIMIT - 1], many[SBOM_LIST_LIMIT - 1]);
     assert_eq!(rows[SBOM_LIST_LIMIT], "\u{2026}and 7 more");
 }
+
+#[test]
+fn a_narrow_selector_shortens_only_the_recent_label() {
+    use marknexia_win32::chrome_model::SidebarMode;
+    assert_eq!(SidebarMode::Recent.short_label(), "Recent");
+    assert_eq!(SidebarMode::Recent.label(), "Recent files");
+    assert_eq!(SidebarMode::Outline.short_label(), "Outline");
+    assert_eq!(SidebarMode::Repository.short_label(), "Repository");
+}

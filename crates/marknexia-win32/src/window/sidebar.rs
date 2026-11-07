@@ -289,8 +289,9 @@ pub(super) fn layout(
             ..sidebar
         },
     );
-    // Equal pivot items across the pane (the painted labels are centred).
-    let item_width = width / 3;
+    // Equal pivot items across the pane (the painted labels are centred),
+    // always inside the control, so its scroll arrows never appear.
+    let item_width = selector_item_width(width, dpi);
     send(
         selector,
         TCM_SETITEMSIZE,
@@ -360,6 +361,18 @@ pub(super) fn layout(
         0,
     );
     send(controls.tree, TVM_SETINDENT, dip(12, dpi) as usize, 0);
+}
+
+/// Room the tab control keeps beside its items (a 2-pixel lead and the
+/// selected tab's 2-pixel inflation on each side), in DIPs, with margin.
+const SELECTOR_SLACK: u32 = 8;
+
+/// The width of each of the three view items in a selector `width` pixels
+/// wide at `dpi`: equal shares of the pane less [`SELECTOR_SLACK`], so the
+/// items always fit and the native up-down scroll control never shows
+/// (owner check 2026-11-07: "Recer" and arrows at the default pane width).
+pub(super) fn selector_item_width(width: u32, dpi: u32) -> u32 {
+    width.saturating_sub(dip(SELECTOR_SLACK, dpi)) / 3
 }
 
 fn make_lparam(low: u32, high: u32) -> isize {
@@ -843,16 +856,26 @@ fn paint_selector(hwnd: HWND) -> bool {
                 px(4),
             );
         }
-        let mut label: Vec<u16> = mode.label().encode_utf16().collect();
+        // A label wider than its item (a narrow pane) uses the short form
+        // ("Recent"); the tab item text, its UIA name, stays the full one.
+        let room = (body.right - body.left - px(8)).max(0);
+        let mut label: Vec<u16> = Vec::new();
         let mut measure = body;
-        // SAFETY: as above; DT_CALCRECT only measures.
-        unsafe {
+        for text in [mode.label(), mode.short_label()] {
+            label = text.encode_utf16().collect();
+            measure = body;
             super::style::draw_text(
                 dc,
                 &mut label,
                 &mut measure,
                 DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
             );
+            if measure.right - measure.left <= room {
+                break;
+            }
+        }
+        // SAFETY: as above.
+        unsafe {
             SetTextColor(
                 dc,
                 native_color(if is_selected {
@@ -999,4 +1022,34 @@ fn paint_splitter(hwnd: HWND, parent: Option<HWND>) {
     }
     // SAFETY: ends the paint started above.
     let _ = unsafe { EndPaint(hwnd, &paint) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Dip;
+
+    /// The three view items always fit inside the selector, at 100, 150
+    /// and 200 % and every pane width (the 220-DIP minimum, the 240-DIP
+    /// compact pane without a splitter, the 280-DIP default, the 520-DIP
+    /// maximum), so the tab control never shows its scroll arrows.
+    #[test]
+    fn the_view_items_always_fit_the_pane() {
+        for dpi in [96, 120, 144, 168, 192] {
+            for (pane, splitter) in [(220, true), (240, false), (280, true), (520, true)] {
+                let splitter = if splitter {
+                    Dip::SPLITTER_WIDTH.to_pixels(dpi)
+                } else {
+                    0
+                };
+                let width = Dip(pane).to_pixels(dpi) - splitter;
+                let item = selector_item_width(width, dpi);
+                // A 2-pixel lead and 2 pixels of selected-tab inflation on
+                // each side are the most the control adds.
+                assert!(3 * item + 6 <= width, "{pane} DIPs at {dpi} DPI");
+                // Equal shares: nothing wasted beyond the slack.
+                assert!(width - 3 * item <= dip(SELECTOR_SLACK, dpi) + 3);
+            }
+        }
+    }
 }
