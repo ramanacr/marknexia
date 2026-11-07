@@ -16,7 +16,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::identity::{INSTALL_FOLDER_NAME, SETUP_FILE_NAME, SHELL_FILE_NAME, SHORTCUT_FILE_NAME};
+use crate::identity::{INSTALL_FOLDER_NAME, SHORTCUT_FILE_NAME};
+use crate::names::FileNames;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayoutError {
@@ -51,6 +52,7 @@ pub struct InstallLayout {
     shortcut: PathBuf,
     updates_root: PathBuf,
     settings_file: PathBuf,
+    names: FileNames,
 }
 
 impl InstallLayout {
@@ -61,6 +63,20 @@ impl InstallLayout {
     ///
     /// Both must be absolute and free of quotation marks.
     pub fn new(local_app_data: &Path, start_menu_programs: &Path) -> Result<Self, LayoutError> {
+        Self::with_names(local_app_data, start_menu_programs, FileNames::release())
+    }
+
+    /// [`InstallLayout::new`] with other file names (tests use
+    /// non-executable stand-ins).
+    ///
+    /// # Errors
+    ///
+    /// As [`InstallLayout::new`].
+    pub fn with_names(
+        local_app_data: &Path,
+        start_menu_programs: &Path,
+        names: FileNames,
+    ) -> Result<Self, LayoutError> {
         for path in [local_app_data, start_menu_programs] {
             if !path.is_absolute() || path.parent().is_none() {
                 return Err(LayoutError::NotAbsolute(path.to_path_buf()));
@@ -76,6 +92,7 @@ impl InstallLayout {
             shortcut: start_menu_programs.join(SHORTCUT_FILE_NAME),
             updates_root: local_app_data.join("Marknexia").join("Updates"),
             settings_file: local_app_data.join("Marknexia").join("settings.json"),
+            names,
         })
     }
 
@@ -92,12 +109,18 @@ impl InstallLayout {
 
     #[must_use]
     pub fn shell_exe(&self) -> PathBuf {
-        self.install_dir.join(SHELL_FILE_NAME)
+        self.install_dir.join(self.names.shell())
     }
 
     #[must_use]
     pub fn setup_exe(&self) -> PathBuf {
-        self.install_dir.join(SETUP_FILE_NAME)
+        self.install_dir.join(self.names.setup())
+    }
+
+    /// The file names that this layout installs.
+    #[must_use]
+    pub fn names(&self) -> &FileNames {
+        &self.names
     }
 
     #[must_use]

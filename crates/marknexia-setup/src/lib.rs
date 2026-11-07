@@ -15,6 +15,7 @@ pub mod container;
 pub mod identity;
 pub mod install;
 pub mod layout;
+pub mod names;
 pub mod payload;
 pub mod registry;
 pub mod settings_probe;

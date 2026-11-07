@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::identity::{PRODUCT_NAME, SETUP_FILE_NAME, SHELL_FILE_NAME};
+use crate::identity::PRODUCT_NAME;
 use crate::layout::InstallLayout;
-use crate::payload::{EXPECTED_FILES, VerifiedPayload};
+use crate::payload::VerifiedPayload;
 use crate::registry::{self, RegistryBackend};
 use crate::settings_probe::{self, SettingsProbe};
 use crate::update_state::{self, UpdateStateReport, is_reparse_point};
@@ -169,7 +169,7 @@ pub fn is_in_use(path: &Path) -> bool {
 fn running_shells(layout: &InstallLayout) -> Result<Vec<PathBuf>, SetupError> {
     let mut shells = vec![layout.shell_exe()];
     shells.extend(
-        update_state::payload_shells(layout.updates_root())
+        update_state::payload_shells(layout.updates_root(), layout.names().shell())
             .map_err(io_error("read the update folder"))?,
     );
     Ok(shells
@@ -250,6 +250,7 @@ fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
 /// Removes staging and backup folders that an interrupted setup left.
 fn remove_leftovers(layout: &InstallLayout, temp_dir: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
+    let copy_suffix = format!(".{}", layout.names().setup_extension());
     if let Ok(entries) = fs::read_dir(layout.programs()) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -269,7 +270,7 @@ fn remove_leftovers(layout: &InstallLayout, temp_dir: &Path) -> Vec<String> {
     if let Ok(entries) = fs::read_dir(temp_dir) {
         for entry in entries.flatten() {
             if entry.file_name().to_str().is_some_and(|name| {
-                name.starts_with(UNINSTALL_COPY_PREFIX) && name.ends_with(".exe")
+                name.starts_with(UNINSTALL_COPY_PREFIX) && name.ends_with(&copy_suffix)
             }) {
                 let _ = fs::remove_file(entry.path());
             }
@@ -292,6 +293,22 @@ pub fn install(
     associations: Associations,
 ) -> Result<InstallReport, SetupError> {
     let install_dir = layout.install_dir();
+    let expected = layout.names().payload();
+    if payload.entries().len() != expected.len()
+        || payload
+            .entries()
+            .iter()
+            .zip(expected)
+            .any(|(entry, name)| entry.name != name)
+    {
+        return Err(SetupError::Io {
+            action: "match the payload to the install layout".to_owned(),
+            error: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the payload holds other files than the layout installs",
+            ),
+        });
+    }
     refuse_links(install_dir)?;
     if let Some(path) = running_shells(layout)?.into_iter().next() {
         return Err(SetupError::InUse {
@@ -308,7 +325,7 @@ pub fn install(
     let staging = layout.staging_dir(&(host.token)());
     fs::create_dir(&staging).map_err(io_error(format!("create {}", staging.display())))?;
     let staged = write_payload(&staging, payload).and_then(|()| {
-        let target = staging.join(SETUP_FILE_NAME);
+        let target = staging.join(layout.names().setup());
         fs::copy(host.setup_path, &target)
             .map(|_| ())
             .map_err(io_error(format!("copy the setup to {}", target.display())))
@@ -468,13 +485,14 @@ pub fn uninstall(
         ..UninstallReport::default()
     };
 
-    for name in EXPECTED_FILES {
+    let names = layout.names().clone();
+    for name in names.payload() {
         let path = install_dir.join(name);
         match remove_file_if_present(&path) {
             Ok(true) => report.removed.push(path),
             Ok(false) => {}
             Err(error)
-                if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && name == SHELL_FILE_NAME =>
+                if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && name == names.shell() =>
             {
                 return Err(SetupError::InUse {
                     uninstall: true,
@@ -495,9 +513,11 @@ pub fn uninstall(
     let setup = layout.setup_exe();
     if same_path(host.setup_path, &setup) {
         // A running executable can be renamed but not deleted.
-        let moved = host
-            .temp_dir
-            .join(format!("{UNINSTALL_COPY_PREFIX}{}.exe", (host.token)()));
+        let moved = host.temp_dir.join(format!(
+            "{UNINSTALL_COPY_PREFIX}{}.{}",
+            (host.token)(),
+            names.setup_extension()
+        ));
         match fs::rename(&setup, &moved) {
             Ok(()) => report.setup_moved_to = Some(moved),
             Err(_) => report.kept.push(setup),

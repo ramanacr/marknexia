@@ -8,17 +8,7 @@
 use std::fmt;
 
 use crate::container::{self, ContainerError, Entry};
-use crate::identity::SHELL_FILE_NAME;
-
-/// Exactly these files, in ordinal order. The portable ZIP's four files plus
-/// the SPDX SBOM that describes this setup.
-pub const EXPECTED_FILES: [&str; 5] = [
-    "README.txt",
-    "THIRD-PARTY-NOTICES.txt",
-    "WebView2Loader.dll",
-    "marknexia-sbom.spdx.json",
-    SHELL_FILE_NAME,
-];
+use crate::names::FileNames;
 
 /// The container that build.rs wrote. Empty unless CI set
 /// `MARKNEXIA_SETUP_PAYLOAD_DIR`.
@@ -65,20 +55,22 @@ pub struct VerifiedPayload<'a> {
 }
 
 impl<'a> VerifiedPayload<'a> {
-    /// Checks `bytes` completely.
+    /// Checks `bytes` completely against the payload of `names` (the
+    /// executable passes [`FileNames::release`]: the portable ZIP's four
+    /// files plus the SPDX SBOM that describes this setup).
     ///
     /// # Errors
     ///
     /// [`PayloadError`] when the container is empty, damaged, or holds a
     /// different file set.
-    pub fn verify(bytes: &'a [u8]) -> Result<Self, PayloadError> {
+    pub fn verify(bytes: &'a [u8], names: &FileNames) -> Result<Self, PayloadError> {
         if bytes.is_empty() {
             return Err(PayloadError::Missing);
         }
         let entries = container::decode(bytes).map_err(PayloadError::Container)?;
-        let names: Vec<String> = entries.iter().map(|entry| entry.name.to_owned()).collect();
-        if names.iter().map(String::as_str).ne(EXPECTED_FILES) {
-            return Err(PayloadError::UnexpectedFileSet(names));
+        let found: Vec<String> = entries.iter().map(|entry| entry.name.to_owned()).collect();
+        if found.as_slice() != names.payload() {
+            return Err(PayloadError::UnexpectedFileSet(found));
         }
         use sha2::Digest;
         let container_sha256: [u8; 32] = sha2::Sha256::digest(bytes).into();
@@ -123,10 +115,11 @@ impl<'a> VerifiedPayload<'a> {
 pub(crate) mod tests {
     use super::*;
 
-    /// Text stand-ins for every payload file. Tests never use executable
-    /// bytes; the shell and loader entries are plain text here.
+    /// Text stand-ins for every payload file, under the non-executable
+    /// stand-in names ([`FileNames::stand_ins`]).
     pub(crate) fn sample_files() -> Vec<(String, Vec<u8>)> {
-        EXPECTED_FILES
+        FileNames::stand_ins()
+            .payload()
             .iter()
             .map(|name| {
                 (
@@ -147,7 +140,7 @@ pub(crate) mod tests {
         if std::env::var_os("MARKNEXIA_SETUP_PAYLOAD_DIR").is_none() {
             assert!(embedded().is_empty());
             assert_eq!(
-                VerifiedPayload::verify(embedded()).unwrap_err(),
+                VerifiedPayload::verify(embedded(), &FileNames::release()).unwrap_err(),
                 PayloadError::Missing
             );
             assert_eq!(
@@ -160,9 +153,9 @@ pub(crate) mod tests {
     #[test]
     fn a_complete_payload_verifies_and_reports_its_hashes() {
         let bytes = sample_container();
-        let payload = VerifiedPayload::verify(&bytes).expect("verify");
+        let payload = VerifiedPayload::verify(&bytes, &FileNames::stand_ins()).expect("verify");
         let names: Vec<&str> = payload.entries().iter().map(|entry| entry.name).collect();
-        assert_eq!(names, EXPECTED_FILES);
+        assert_eq!(names, FileNames::stand_ins().payload());
         let report = payload.report("0.1.0");
         assert_eq!(report["files"].as_array().map(Vec::len), Some(5));
         assert_eq!(report["version"], "0.1.0");
@@ -184,14 +177,30 @@ pub(crate) mod tests {
         files.pop();
         let bytes = container::encode(&files).expect("encode");
         assert!(matches!(
-            VerifiedPayload::verify(&bytes),
+            VerifiedPayload::verify(&bytes, &FileNames::stand_ins()),
             Err(PayloadError::UnexpectedFileSet(_))
         ));
         let mut files = sample_files();
         files.push(("extra.txt".to_owned(), b"x".to_vec()));
         let bytes = container::encode(&files).expect("encode");
         assert!(matches!(
-            VerifiedPayload::verify(&bytes),
+            VerifiedPayload::verify(&bytes, &FileNames::stand_ins()),
+            Err(PayloadError::UnexpectedFileSet(_))
+        ));
+    }
+
+    #[test]
+    fn the_release_file_set_is_checked_in_memory() {
+        // Real names only in memory: this container is never written to disk.
+        let release: Vec<(String, Vec<u8>)> = FileNames::release()
+            .payload()
+            .iter()
+            .map(|name| (name.clone(), b"in-memory text".to_vec()))
+            .collect();
+        let bytes = container::encode(&release).expect("encode");
+        assert!(VerifiedPayload::verify(&bytes, &FileNames::release()).is_ok());
+        assert!(matches!(
+            VerifiedPayload::verify(&bytes, &FileNames::stand_ins()),
             Err(PayloadError::UnexpectedFileSet(_))
         ));
     }
@@ -202,7 +211,10 @@ pub(crate) mod tests {
         for index in (0..original.len()).step_by(7) {
             let mut bytes = original.clone();
             bytes[index] ^= 0x01;
-            assert!(VerifiedPayload::verify(&bytes).is_err(), "byte {index}");
+            assert!(
+                VerifiedPayload::verify(&bytes, &FileNames::stand_ins()).is_err(),
+                "byte {index}"
+            );
         }
     }
 }

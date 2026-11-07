@@ -15,6 +15,7 @@ use marknexia_setup::cli::{self, Command, Mode, exit};
 use marknexia_setup::identity::PRODUCT_NAME;
 use marknexia_setup::install::{self, Associations, Host};
 use marknexia_setup::layout::InstallLayout;
+use marknexia_setup::names::FileNames;
 use marknexia_setup::payload::{self, VerifiedPayload};
 use marknexia_setup::registry;
 
@@ -83,7 +84,7 @@ fn fail(command: &Command, log: &Log, text: &str) -> i32 {
 }
 
 fn verify(report: Option<&Path>, log: &Log) -> i32 {
-    match VerifiedPayload::verify(payload::embedded()) {
+    match VerifiedPayload::verify(payload::embedded(), &FileNames::release()) {
         Ok(verified) => {
             let json = verified.report(VERSION);
             for file in verified.entries() {
@@ -127,7 +128,7 @@ fn token() -> String {
 
 fn run_install(command: &Command, associations: Associations, log: &Log) -> i32 {
     // The payload is checked before anything is asked or written.
-    let verified = match VerifiedPayload::verify(payload::embedded()) {
+    let verified = match VerifiedPayload::verify(payload::embedded(), &FileNames::release()) {
         Ok(verified) => verified,
         Err(error) => return fail(command, log, &error.to_string()),
     };

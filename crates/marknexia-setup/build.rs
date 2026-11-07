@@ -16,7 +16,7 @@ use std::path::PathBuf;
 #[path = "src/container.rs"]
 mod container;
 
-/// Keep in step with `payload::EXPECTED_FILES`.
+/// Keep in step with `names::RELEASE_PAYLOAD`.
 const EXPECTED_FILES: [&str; 5] = [
     "README.txt",
     "THIRD-PARTY-NOTICES.txt",

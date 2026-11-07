@@ -7,13 +7,19 @@ use std::fs;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::identity::{PROG_ID, SETUP_FILE_NAME, SHELL_FILE_NAME};
+use crate::identity::PROG_ID;
 use crate::install::{Associations, Host, SetupError, install, uninstall};
 use crate::layout::InstallLayout;
+use crate::names::FileNames;
+use crate::payload::VerifiedPayload;
 use crate::payload::tests::{sample_container, sample_files};
-use crate::payload::{EXPECTED_FILES, VerifiedPayload};
 use crate::registry::{self, MemoryRegistry, RegValue, RegistryBackend};
 use crate::test_support::{FakeShell, TempDir};
+
+/// Non-executable stand-in names (`FileNames::stand_ins`): no test writes a
+/// file named `*.exe` or `*.dll`.
+const SHELL_STAND_IN: &str = "shell.bin.txt";
+const SETUP_STAND_IN: &str = "setup.bin.txt";
 
 struct Fixture {
     _dir: TempDir,
@@ -38,7 +44,8 @@ impl Fixture {
         fs::create_dir_all(setup_source.parent().expect("parent")).expect("downloads");
         fs::write(&setup_source, "setup stand-in (text)").expect("setup");
         Self {
-            layout: InstallLayout::new(&local, &start).expect("layout"),
+            layout: InstallLayout::with_names(&local, &start, FileNames::stand_ins())
+                .expect("layout"),
             _dir: dir,
             local,
             temp,
@@ -75,7 +82,7 @@ impl Fixture {
         associations: Associations,
     ) -> Result<crate::install::InstallReport, SetupError> {
         let bytes = sample_container();
-        let payload = VerifiedPayload::verify(&bytes).expect("payload");
+        let payload = VerifiedPayload::verify(&bytes, &FileNames::stand_ins()).expect("payload");
         self.run(None, |layout, host| {
             install(layout, &payload, host, "0.1.0", associations)
         })
@@ -113,11 +120,8 @@ fn names_in(folder: &Path) -> Vec<String> {
 }
 
 fn expected_install_names() -> Vec<String> {
-    let mut names: Vec<String> = EXPECTED_FILES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
-    names.push(SETUP_FILE_NAME.to_owned());
+    let mut names: Vec<String> = FileNames::stand_ins().payload().to_vec();
+    names.push(SETUP_STAND_IN.to_owned());
     names.sort();
     names
 }
@@ -139,7 +143,7 @@ fn a_first_install_writes_the_payload_entry_and_shortcut_only() {
         );
     }
     assert_eq!(
-        fs::read(install_dir.join(SETUP_FILE_NAME)).expect("setup"),
+        fs::read(install_dir.join(SETUP_STAND_IN)).expect("setup"),
         b"setup stand-in (text)"
     );
     assert_eq!(fixture.programs_entries(), ["Marknexia Rust Preview"]);
@@ -165,7 +169,7 @@ fn a_first_install_writes_the_payload_entry_and_shortcut_only() {
     assert_eq!(fixture.shell.shortcuts.len(), 1);
     let (link, target, working_dir) = &fixture.shell.shortcuts[0];
     assert_eq!(link, fixture.layout.shortcut());
-    assert_eq!(target, &install_dir.join(SHELL_FILE_NAME));
+    assert_eq!(target, &install_dir.join(SHELL_STAND_IN));
     assert_eq!(working_dir, &install_dir);
 }
 
@@ -318,7 +322,7 @@ fn leftovers_of_an_interrupted_setup_are_removed() {
     }
     let old_copy = fixture
         .temp
-        .join("marknexia-rust-preview-uninstall-t0001.exe");
+        .join("marknexia-rust-preview-uninstall-t0001.txt");
     fs::write(&old_copy, "old uninstall copy stand-in").expect("copy");
     fixture.install(Associations::Keep).expect("install");
     assert_eq!(
@@ -422,7 +426,7 @@ fn a_running_staged_update_blocks_uninstall_before_anything_is_removed() {
         .join("Updates")
         .join("versions")
         .join("0.2.0-x64")
-        .join(SHELL_FILE_NAME);
+        .join(SHELL_STAND_IN);
     fs::create_dir_all(shell.parent().expect("parent")).expect("payload");
     fs::write(&shell, "staged shell stand-in").expect("shell");
     let registry_before = fixture.registry.clone();

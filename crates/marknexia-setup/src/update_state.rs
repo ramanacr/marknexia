@@ -21,8 +21,6 @@ use std::path::{Path, PathBuf};
 
 use marknexia_update::layout::{Layout, is_payload_id};
 
-use crate::identity::SHELL_FILE_NAME;
-
 /// What uninstall found and removed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UpdateStateReport {
@@ -46,11 +44,12 @@ pub(crate) fn is_reparse_point(path: &Path) -> io::Result<bool> {
     Ok(metadata.file_type().is_symlink())
 }
 
-/// The shells of payloads that the updater staged.
+/// The shells (`shell_name`, `marknexia-win32.exe` in a release) of the
+/// payloads that the updater staged.
 ///
 /// # Errors
 /// The `versions` folder could not be listed.
-pub fn payload_shells(root: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn payload_shells(root: &Path, shell_name: &str) -> io::Result<Vec<PathBuf>> {
     let layout = Layout::new(root.to_path_buf());
     let versions = layout.versions();
     match is_reparse_point(root).and_then(|root_link| Ok(root_link || is_reparse_point(&versions)?))
@@ -65,7 +64,7 @@ pub fn payload_shells(root: &Path) -> io::Result<Vec<PathBuf>> {
         let entry = entry?;
         let name = entry.file_name();
         if name.to_str().is_some_and(is_payload_id) && !is_reparse_point(&entry.path())? {
-            let shell = entry.path().join(SHELL_FILE_NAME);
+            let shell = entry.path().join(shell_name);
             if shell.is_file() {
                 shells.push(shell);
             }
@@ -183,6 +182,9 @@ mod tests {
     use super::*;
     use crate::test_support::TempDir;
 
+    /// A non-executable stand-in name: tests never write `*.exe` files.
+    const SHELL_STAND_IN: &str = "shell.bin.txt";
+
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         fs::write(path, text).expect("write");
@@ -193,7 +195,11 @@ mod tests {
         let dir = TempDir::new("updates-missing");
         let root = dir.path().join("Updates");
         assert_eq!(remove(&root).expect("remove"), UpdateStateReport::default());
-        assert!(payload_shells(&root).expect("shells").is_empty());
+        assert!(
+            payload_shells(&root, SHELL_STAND_IN)
+                .expect("shells")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -206,10 +212,7 @@ mod tests {
         write(&root.join("highest-seen.json"), "{}");
         write(&root.join("last-update-failure.json"), "{}");
         write(
-            &root
-                .join("versions")
-                .join("0.2.0-x64")
-                .join(SHELL_FILE_NAME),
+            &root.join("versions").join("0.2.0-x64").join(SHELL_STAND_IN),
             "stand-in",
         );
         write(
@@ -232,11 +235,8 @@ mod tests {
         write(&root.join("notes.txt"), "user");
 
         assert_eq!(
-            payload_shells(&root).expect("shells"),
-            [root
-                .join("versions")
-                .join("0.2.0-x64")
-                .join(SHELL_FILE_NAME)]
+            payload_shells(&root, SHELL_STAND_IN).expect("shells"),
+            [root.join("versions").join("0.2.0-x64").join(SHELL_STAND_IN)]
         );
         let report = remove(&root).expect("remove");
 
@@ -284,10 +284,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let dir = TempDir::new("updates-locked");
         let root = dir.path().join("Updates");
-        let shell = root
-            .join("versions")
-            .join("0.2.0-x64")
-            .join(SHELL_FILE_NAME);
+        let shell = root.join("versions").join("0.2.0-x64").join(SHELL_STAND_IN);
         write(&shell, "stand-in");
         let _lock = fs::OpenOptions::new()
             .read(true)
