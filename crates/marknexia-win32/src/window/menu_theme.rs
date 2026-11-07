@@ -22,8 +22,8 @@ use windows::{
         Foundation::{HWND, LPARAM, LRESULT, SIZE, WPARAM},
         Graphics::Gdi::{
             CreateFontIndirectW, CreateSolidBrush, DT_CENTER, DT_HIDEPREFIX, DT_SINGLELINE,
-            DT_VCENTER, DeleteObject, DrawTextW, GetDC, GetTextExtentPoint32W, HBRUSH, HFONT,
-            HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            DT_VCENTER, DeleteObject, GetDC, GetTextExtentPoint32W, HBRUSH, HFONT, HGDIOBJ,
+            ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
         UI::{
             Accessibility::{MSAA_MENU_SIG, MSAAMENUINFO},
@@ -298,7 +298,7 @@ pub(super) fn draw(item: &DRAWITEMSTRUCT) -> bool {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, native_color(text_color));
         let previous = SelectObject(dc, HGDIOBJ(font.0));
-        DrawTextW(dc, &mut text, &mut rect, format);
+        super::style::draw_text(dc, &mut text, &mut rect, format);
         SelectObject(dc, previous);
     }
     true

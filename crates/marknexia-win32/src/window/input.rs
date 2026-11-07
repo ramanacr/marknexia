@@ -1641,7 +1641,7 @@ pub(super) fn paint_tab_content(
         SetTextColor(dc, text_color);
         SetBkMode(dc, TRANSPARENT);
         if text_rect.right > text_rect.left {
-            DrawTextW(
+            super::style::draw_text(
                 dc,
                 &mut text,
                 &mut text_rect,

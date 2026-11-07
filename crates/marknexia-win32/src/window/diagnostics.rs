@@ -6,8 +6,8 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, RECT},
         Graphics::Gdi::{
-            DT_CENTER, DT_SINGLELINE, DT_VCENTER, DrawTextW, HFONT, HGDIOBJ, SelectObject,
-            SetBkMode, SetTextColor, TRANSPARENT,
+            DT_CENTER, DT_SINGLELINE, DT_VCENTER, HFONT, HGDIOBJ, SelectObject, SetBkMode,
+            SetTextColor, TRANSPARENT,
         },
         UI::{
             Controls::DRAWITEMSTRUCT,
@@ -204,7 +204,7 @@ pub(super) fn draw_icon(
             left: rect.left + stripe,
             ..rect
         };
-        DrawTextW(
+        super::style::draw_text(
             dc,
             &mut glyph,
             &mut area,

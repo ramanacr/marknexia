@@ -10,7 +10,7 @@ use windows::{
         Foundation::{HWND, RECT},
         Graphics::Gdi::{
             BeginPaint, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-            DT_VCENTER, DrawFocusRect, DrawTextW, EndPaint, FW_NORMAL, FW_SEMIBOLD, HFONT, HGDIOBJ,
+            DT_VCENTER, DrawFocusRect, EndPaint, FW_NORMAL, FW_SEMIBOLD, HFONT, HGDIOBJ,
             InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
         UI::{
@@ -806,7 +806,7 @@ pub(super) fn draw_button(
         match label {
             None => {
                 let mut area = rect;
-                DrawTextW(
+                super::style::draw_text(
                     dc,
                     &mut glyph_text,
                     &mut area,
@@ -820,7 +820,7 @@ pub(super) fn draw_button(
                     right: face_rect.left + px(10) + px(20),
                     ..rect
                 };
-                DrawTextW(
+                super::style::draw_text(
                     dc,
                     &mut glyph_text,
                     &mut glyph_area,
@@ -833,7 +833,7 @@ pub(super) fn draw_button(
                     ..rect
                 };
                 let mut label: Vec<u16> = label.encode_utf16().collect();
-                DrawTextW(
+                super::style::draw_text(
                     dc,
                     &mut label,
                     &mut text_area,
@@ -915,7 +915,7 @@ pub(super) fn draw_theme_item(
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, native_color(text));
         let previous = SelectObject(dc, HGDIOBJ(font.0));
-        DrawTextW(
+        super::style::draw_text(
             dc,
             &mut wide_text,
             &mut area,
