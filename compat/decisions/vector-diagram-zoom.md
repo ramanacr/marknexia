@@ -2,7 +2,7 @@
 
 Status: **proposed — requires Task 8 approval**
 
-Scope: the bundled page assets `crates/marknexia-rendering/assets/bridge.js` and `crates/marknexia-rendering/assets/github-markdown.css`, and the parity gate `crates/marknexia-rendering/tests/parity_v1.rs` (new `parity-asset-patch` blocks). Owner report 2026-11-07: zooming a Mermaid diagram or a text diagram makes it blurry; diagrams must stay vector-sharp at every zoom level. No .NET source and no frozen fixture is changed.
+Scope: the bundled page assets `crates/marknexia-rendering/assets/bridge.js` and `crates/marknexia-rendering/assets/github-markdown.css`, and the page-parity tests `crates/marknexia-rendering/tests/parity_v1.rs` and `math_oracle.rs` with the shared `tests/support/asset_patches.rs` (new `parity-asset-patch` blocks). Owner report 2026-11-07: zooming a Mermaid diagram or a text diagram makes it blurry; diagrams must stay vector-sharp at every zoom level. No .NET source and no frozen fixture is changed.
 
 Evidence class: implemented and headless-tested in Chrome (the WebView2 engine) through the bridge functions and real compositor frames. **Not run:** the native shell and WebView2 itself, high-DPI displays other than 100%, a screen reader.
 
@@ -45,7 +45,7 @@ Other checks: a 100 px by 40 px drag at 300% moves the canvas by exactly 100 px 
 
 ## Parity gate
 
-Every frozen rendered page embeds both assets, so no rendered page keeps the .NET bytes. Instead of whole-page allowances, the gate now reads `parity-asset-patch` blocks: each names an asset, a `find` text (a JSON string that must occur exactly once when the blocks are applied in order) and its `replace` text, and needs one of the accepted status lines. `bundled_assets_match_the_dotnet_sources` checks that each bundled asset equals the .NET asset with exactly these edits, and `parity_v1` replaces the embedded .NET asset in each frozen page with that patched text before it compares the page. Any other difference still fails, and a stale or ambiguous edit fails too. If the owner rejects this record, removing it and restoring the two assets returns the gate to byte-identical .NET pages.
+Every frozen rendered page embeds both assets, so no rendered page keeps the .NET bytes. Instead of whole-page allowances, the gate now reads `parity-asset-patch` blocks: each names an asset, a `find` text (a JSON string that must occur exactly once when the blocks are applied in order) and its `replace` text, and needs one of the accepted status lines. `bundled_assets_match_the_dotnet_sources` checks that each bundled asset equals the .NET asset with exactly these edits, and `parity_v1` (5 of the 7 frozen rendering cases) and `math_oracle` (its one complete-page case) replace the embedded .NET asset in each frozen page with that patched text before they compare the page. The shared code is `crates/marknexia-rendering/tests/support/asset_patches.rs`. Any other difference still fails, and a stale or ambiguous edit fails too. If the owner rejects this record, removing it and restoring the two assets returns the gate to byte-identical .NET pages.
 
 ## Recorded asset edits
 
