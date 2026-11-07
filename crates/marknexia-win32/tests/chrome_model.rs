@@ -12,7 +12,7 @@ use marknexia_win32::{
         anchor_copied_notice, clamp_sidebar_width, compact_transition, diagnostics_report,
         dotnet_architecture, help_text, remote_assets_notice, repository_header, resize_sidebar,
         reveal_allowed, reveal_failed_notice, route_chrome_key, same_document_path,
-        sbom_components, sbom_rows, sidebar_resize_key, sidebar_width_dip,
+        sbom_components, sbom_rows, sidebar_resize_key, sidebar_width_dip, text_diagrams_notice,
     },
     layout::{Dip, ShellLayout, ShellLayoutRequest, is_compact},
 };
@@ -132,6 +132,15 @@ fn dialog_and_notice_text_matches_dotnet() {
     assert_eq!(
         remote_assets_notice(false),
         "Remote images are blocked by default."
+    );
+    // Rust edition only (TDG-8).
+    assert_eq!(
+        text_diagrams_notice(true),
+        "Text diagrams are drawn for documents rendered from now on."
+    );
+    assert_eq!(
+        text_diagrams_notice(false),
+        "Text diagrams are shown as code for documents rendered from now on."
     );
     let help = help_text();
     for line in [

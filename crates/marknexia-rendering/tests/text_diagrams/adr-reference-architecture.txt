@@ -1,0 +1,26 @@
+Claude Code session                 Codex session               MCP client
+  | PostToolUse (updatedToolOutput)   | AGENTS.md prefix +          | MCP proxy (P1)
+  | PreToolUse  (updatedInput →       | PreToolUse deny-redirect    |
+  |   `aaes run -- <cmd>`) fallback   |  → `aaes run -- <cmd>`      |
+  | SessionStart / Pre|PostCompact    |                             |
+  v                                   v                             v
+aaes hook / aaes run  (short-lived process per call — ADR-011; daemon only when M5 inference needs one)
+  identity (tier-appropriate, ADR-013) -> correlation -> command registry lookup (ADR-016) -> mode selection
+   |                                    |
+   |                                    +--> metrics event writer (content-free)
+   v
+Adaptive policy controller (deterministic-first, versioned config per command family)
+   |-- Pass-through (unknown / interactive / long-running / under size threshold)
+   |-- Format parsers and invariant extractors
+   |-- Session-private exact cache / version-aware invalidator (declared-pure only)
+   |-- Local LLM semantic summarizer (optional, sandboxed, gated — ADR-010)
+   |-- Session-private evidence retrieval: SQLite + FTS5 (redacted) + optional vectors
+   |-- Validator -> original-response fallback
+   |-- Renderer: native-format text + footer (ADR-012)
+   v
+Original tool execution: by the host agent (PostToolUse mode) or by `aaes run` (rewrite mode)
+   |
+   +--> immutable original evidence (per-session, encrypted at rest — ADR-015)
+
+Recovery: `aaes show <handle> [--lines|--grep|--tail|--head]`   (+ MCP tool, P1)
+Offline:  transcript miner (M-1) · improvement lab -> replay -> policy gate -> versioned release

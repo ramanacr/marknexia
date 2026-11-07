@@ -18,6 +18,13 @@
 //! edition ignores the new property, so it can still read a file that the
 //! Rust edition wrote (rollback). See
 //! `compat/decisions/settings-and-startup-differences.md`.
+//!
+//! `RenderTextDiagrams` (Rust edition only, TDG-8 in
+//! `compat/decisions/text-diagrams.md`) is written after the .NET
+//! properties. The .NET edition ignores it like any unknown property, so the
+//! schema version stays 2. A value that is not `true` or `false` keeps the
+//! default instead of rejecting the document: .NET accepts such a document,
+//! so rejecting it here would replace settings that .NET keeps.
 
 use std::fmt;
 
@@ -113,6 +120,9 @@ pub struct AppSettings {
     pub recent_files: Vec<String>,
     /// Newest first.
     pub recent_folders: Vec<String>,
+    /// Draw ASCII-art and box-drawing code blocks as diagrams (Rust edition
+    /// only, TDG-8). Default on.
+    pub render_text_diagrams: bool,
 }
 
 impl Default for AppSettings {
@@ -128,6 +138,7 @@ impl Default for AppSettings {
             repository_root: None,
             recent_files: Vec::new(),
             recent_folders: Vec::new(),
+            render_text_diagrams: true,
         }
     }
 }
@@ -300,11 +311,13 @@ pub fn serialize_settings(settings: &AppSettings) -> Vec<u8> {
         repository_root: settings.repository_root.as_deref(),
         recent_files: &settings.recent_files,
         recent_folders: &settings.recent_folders,
+        render_text_diagrams: settings.render_text_diagrams,
     };
     serde_json::to_vec_pretty(&document).expect("a settings document always serializes")
 }
 
-/// Property order follows the .NET class, with `SchemaVersion` first.
+/// Property order follows the .NET class, with `SchemaVersion` first and the
+/// Rust-only properties last.
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct SettingsDocument<'a> {
@@ -319,6 +332,7 @@ struct SettingsDocument<'a> {
     repository_root: Option<&'a str>,
     recent_files: &'a [String],
     recent_folders: &'a [String],
+    render_text_diagrams: bool,
 }
 
 /// The known properties, in document order of the .NET class.
@@ -335,9 +349,11 @@ enum Field {
     RepositoryRoot,
     RecentFiles,
     RecentFolders,
+    /// Rust edition only (TDG-8).
+    RenderTextDiagrams,
 }
 
-const FIELD_NAMES: [&str; 11] = [
+const FIELD_NAMES: [&str; 12] = [
     "SchemaVersion",
     "Theme",
     "EnforceRepositorySandbox",
@@ -349,6 +365,7 @@ const FIELD_NAMES: [&str; 11] = [
     "RepositoryRoot",
     "RecentFiles",
     "RecentFolders",
+    "RenderTextDiagrams",
 ];
 
 /// The top-level object, with the raw text of each known property.
@@ -469,6 +486,14 @@ fn read_fields(
                 Ok(list) => *target = list.into_iter().flatten().flatten().collect(),
                 Err(_) => invalid(field)?,
             }
+        }
+    }
+    // Unknown to .NET, so never a reason to reject the document (TDG-8).
+    for raw in document.occurrences(Field::RenderTextDiagrams) {
+        match raw {
+            "true" => settings.render_text_diagrams = true,
+            "false" => settings.render_text_diagrams = false,
+            _ => {}
         }
     }
     Ok(settings)

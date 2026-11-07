@@ -5,7 +5,9 @@
 //!
 //! 1. parse with a [`MarkdownEngine`] (raw, unsanitized body HTML);
 //! 2. wrap code blocks in the copy-button container and highlight them with
-//!    ColorCode parity (every ColorCode 2.0.15 language);
+//!    ColorCode parity (every ColorCode 2.0.15 language), or, in the Rust
+//!    edition only, draw ASCII-art and box-drawing blocks as text diagrams
+//!    (`compat/decisions/text-diagrams.md`);
 //! 3. replace Mermaid blocks with the diagram shell or a limit fallback;
 //! 4. render math spans with the local TeX subset;
 //! 5. sanitize with [`HtmlPolicy::sanitize_fragment`]; with remote assets off
@@ -32,6 +34,7 @@ mod math;
 mod passes;
 mod template;
 mod text;
+mod textdiagram;
 
 use std::{error::Error, fmt};
 
@@ -110,6 +113,35 @@ pub mod testing {
         (html.unwrap_or_default(), steps)
     }
 
+    /// What the text-diagram heuristic decides for an untagged block.
+    pub fn detect_text_diagram(code: &str) -> TextDiagramDetection {
+        let (accepted, features) = crate::textdiagram::detect_untagged(code);
+        let features = features.unwrap_or_default();
+        TextDiagramDetection {
+            accepted,
+            nonblank_rows: features.nonblank_rows,
+            diagram_rows: features.diagram_rows,
+            nonspace_cells: features.nonspace_cells,
+            drawn_cells: features.drawn_cells,
+            heads: features.heads,
+            box_cells: features.box_cells,
+            vertical_cells: features.vertical_cells,
+        }
+    }
+
+    /// The text-diagram heuristic's decision and measurements.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct TextDiagramDetection {
+        pub accepted: bool,
+        pub nonblank_rows: usize,
+        pub diagram_rows: usize,
+        pub nonspace_cells: usize,
+        pub drawn_cells: usize,
+        pub heads: usize,
+        pub box_cells: usize,
+        pub vertical_cells: usize,
+    }
+
     /// Every ColorCode language id, in `LanguageRepository` order.
     pub fn highlight_language_ids() -> Vec<&'static str> {
         crate::highlight::language_ids()
@@ -164,6 +196,9 @@ pub struct RenderContext {
     pub allow_remote_assets: bool,
     pub enable_diagrams: bool,
     pub enable_math: bool,
+    /// Draw ASCII-art and box-drawing code blocks as diagrams (Rust edition
+    /// only; the "Render text diagrams" setting, TDG-8). Default on.
+    pub enable_text_diagrams: bool,
     /// The document's directory relative to its asset root, `/`- or
     /// `\`-separated; empty or `.` for the root. It becomes the `<base href>`
     /// path, one percent-encoded segment each.
@@ -172,7 +207,8 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-    /// .NET defaults: diagrams and math on, remote assets off.
+    /// .NET defaults: diagrams and math on, remote assets off; text
+    /// diagrams on.
     #[must_use]
     pub fn new(theme: AppTheme, identity: PageIdentity) -> Self {
         Self {
@@ -180,6 +216,7 @@ impl RenderContext {
             allow_remote_assets: false,
             enable_diagrams: true,
             enable_math: true,
+            enable_text_diagrams: true,
             document_directory: String::new(),
             identity,
         }
@@ -300,6 +337,7 @@ pub struct RenderedDocument {
     head: template::PageHead,
     page_bytes: usize,
     has_mermaid: bool,
+    text_diagrams: usize,
     headings: Vec<RenderedHeading>,
     anchors: Vec<AnchorTarget>,
     image_references: Vec<PlainText>,
@@ -339,6 +377,13 @@ impl RenderedDocument {
     #[must_use]
     pub const fn has_mermaid(&self) -> bool {
         self.has_mermaid
+    }
+
+    /// Code blocks drawn as text diagrams (Rust edition, TDG-1). The page
+    /// carries the text-diagram stylesheet only when this is not zero.
+    #[must_use]
+    pub const fn text_diagrams(&self) -> usize {
+        self.text_diagrams
     }
 
     #[must_use]
@@ -502,13 +547,13 @@ impl<E: MarkdownEngine> Renderer<E> {
         if body.len() > budget {
             return Err(over_budget(passes::Overflow));
         }
+        let mut text_diagrams = textdiagram::Converter::new(context.enable_text_diagrams);
         let body =
-            passes::highlight_code_blocks_cancellable(body, budget, cancel).map_err(|error| {
-                match error {
+            passes::highlight_code_blocks_cancellable(body, budget, &mut text_diagrams, cancel)
+                .map_err(|error| match error {
                     highlight::HighlightError::Overflow => over_budget(passes::Overflow),
                     highlight::HighlightError::Cancelled => RenderError::Cancelled,
-                }
-            })?;
+                })?;
         checkpoint()?;
         let (body, has_mermaid) = passes::transform_diagrams(
             body,
@@ -527,6 +572,7 @@ impl<E: MarkdownEngine> Renderer<E> {
             parsed,
             body,
             has_mermaid,
+            text_diagrams: text_diagrams.converted(),
             segments,
         })
     }
@@ -551,6 +597,7 @@ impl<E: MarkdownEngine> Renderer<E> {
             parsed,
             body,
             has_mermaid,
+            text_diagrams,
             segments,
         } = self.prepare(source, context, cancel)?;
         let body = sanitize_body(body, context.allow_remote_assets, cancel)?;
@@ -564,6 +611,7 @@ impl<E: MarkdownEngine> Renderer<E> {
             &segments,
             &context.identity,
             has_mermaid && context.enable_diagrams,
+            text_diagrams > 0,
         );
         let mut counter = template::Counter(0);
         head.write(body.as_str(), &mut counter);
@@ -574,7 +622,14 @@ impl<E: MarkdownEngine> Renderer<E> {
                 maximum_bytes: maximum_bytes as u64,
             });
         }
-        Ok(assemble(parsed, body, head, counter.0, has_mermaid))
+        Ok(assemble(
+            parsed,
+            body,
+            head,
+            counter.0,
+            has_mermaid,
+            text_diagrams,
+        ))
     }
 }
 
@@ -583,6 +638,7 @@ struct Prepared<'c> {
     parsed: ParsedDocument,
     body: String,
     has_mermaid: bool,
+    text_diagrams: usize,
     segments: Vec<&'c str>,
 }
 
@@ -662,6 +718,7 @@ fn assemble(
     head: template::PageHead,
     page_bytes: usize,
     has_mermaid: bool,
+    text_diagrams: usize,
 ) -> RenderedDocument {
     let mut seen = std::collections::HashSet::new();
     let mut anchors = Vec::new();
@@ -690,6 +747,7 @@ fn assemble(
         head,
         page_bytes,
         has_mermaid,
+        text_diagrams,
         headings: parsed
             .headings
             .into_iter()

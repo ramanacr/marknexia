@@ -287,6 +287,7 @@ fn job(tab_id: u64, path: PathBuf) -> (RenderJob, Arc<AtomicBool>) {
             title: format!("doc-{tab_id}.md"),
             theme: AppTheme::System,
             allow_remote_assets: false,
+            render_text_diagrams: true,
             cancelled: Arc::clone(&cancelled),
         },
         cancelled,

@@ -95,7 +95,7 @@ use crate::{
         anchor_clipboard_text, anchor_copied_notice, clamp_sidebar_width, compact_transition,
         diagnostics_report, dotnet_architecture, remote_assets_notice, repository_header,
         resize_sidebar, reveal_failed_notice, route_chrome_key, same_document_path,
-        sidebar_width_dip,
+        sidebar_width_dip, text_diagrams_notice,
     },
     documents::{OpenError, check_document_path},
     keyboard::ShellCommand,
@@ -135,6 +135,8 @@ pub(super) const MENU_TOGGLE_SIDEBAR: usize = 2111;
 pub(super) const MENU_RELOAD: usize = 2112;
 /// input: View > Find in document; handled by `input`.
 pub(super) const MENU_FIND: usize = 2113;
+/// View > Render text diagrams (Rust edition only, TDG-8).
+pub(super) const MENU_TEXT_DIAGRAMS: usize = 2114;
 pub(super) const MENU_REMOTE_ASSETS: usize = 2121;
 pub(super) const MENU_HELP: usize = 2131;
 pub(super) const MENU_ABOUT: usize = 2132;
@@ -390,6 +392,8 @@ pub(super) struct ChromeState {
     controls: Option<ChromeControls>,
     store: Option<SettingsStore>,
     allow_remote_assets: bool,
+    /// The "Render text diagrams" setting (TDG-8).
+    render_text_diagrams: bool,
     mode: SidebarMode,
     sidebar_width: f64,
     dragging: bool,
@@ -444,6 +448,7 @@ impl ChromeState {
             controls: None,
             store: None,
             allow_remote_assets: false,
+            render_text_diagrams: true,
             mode: SidebarMode::Outline,
             sidebar_width: clamp_sidebar_width(f64::NAN),
             dragging: false,
@@ -489,6 +494,11 @@ impl ChromeState {
     /// .NET `RenderContext.AllowRemoteAssets` for new renders.
     pub(super) fn allow_remote_assets(&self) -> bool {
         self.allow_remote_assets
+    }
+
+    /// `RenderContext::enable_text_diagrams` for new renders (TDG-8).
+    pub(super) fn render_text_diagrams(&self) -> bool {
+        self.render_text_diagrams
     }
 
     /// Sidebar width and diagnostics state for `ShellLayout`. The compact
@@ -818,6 +828,7 @@ pub(super) fn install(
         chrome.link.window = hwnd.0 as isize;
         ACTION_WINDOW.with(|window| window.set(hwnd.0 as isize));
         chrome.allow_remote_assets = settings.allow_remote_assets;
+        chrome.render_text_diagrams = settings.render_text_diagrams;
         chrome.mode = mode;
         chrome.sidebar_width = clamp_sidebar_width(settings.sidebar_width);
         // Restored in `after_startup`; until then a startup document may
@@ -1307,6 +1318,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         MENU_OPEN_FILE if clicked => ChromeAction::Command(ChromeCommand::OpenFile),
         MENU_CLOSE_TAB if clicked => ChromeAction::Command(ChromeCommand::CloseTab),
         MENU_REMOTE_ASSETS if clicked => ChromeAction::Command(ChromeCommand::ToggleRemoteAssets),
+        MENU_TEXT_DIAGRAMS if clicked => ChromeAction::Command(ChromeCommand::ToggleTextDiagrams),
         MENU_HELP if clicked => ChromeAction::Command(ChromeCommand::ShowHelp),
         MENU_ABOUT if clicked => ChromeAction::Command(ChromeCommand::ShowAbout),
         MENU_TROUBLESHOOTING if clicked => {
@@ -1778,6 +1790,7 @@ fn run_command(hwnd: HWND, command: ChromeCommand) {
         }
         ChromeCommand::ToggleSidebar => toggle_sidebar(hwnd),
         ChromeCommand::ToggleRemoteAssets => toggle_remote_assets(hwnd),
+        ChromeCommand::ToggleTextDiagrams => toggle_text_diagrams(hwnd),
         ChromeCommand::SetTheme(theme) => set_theme(hwnd, theme),
         ChromeCommand::ShowHelp => dialogs::show_help(hwnd),
         ChromeCommand::ShowAbout => dialogs::show_about(hwnd),
@@ -2265,6 +2278,24 @@ fn toggle_remote_assets(hwnd: HWND) {
     sync_ui(hwnd);
 }
 
+/// View > Render text diagrams (Rust edition only, TDG-8): saves the
+/// setting and reloads the active document, like the remote-images toggle.
+fn toggle_text_diagrams(hwnd: HWND) {
+    let Some(state) = state_of(hwnd) else {
+        return;
+    };
+    {
+        let mut state = state.borrow_mut();
+        let chrome = &mut state.chrome;
+        let enabled = !chrome.render_text_diagrams;
+        chrome.render_text_diagrams = enabled;
+        chrome.save(|settings| settings.render_text_diagrams = enabled);
+        chrome.diagnostic(text_diagrams_notice(enabled), DiagnosticSeverity::Info);
+    }
+    reload_active(hwnd);
+    sync_ui(hwnd);
+}
+
 /// .NET `ThemeSelector_SelectionChanged`.
 fn set_theme(hwnd: HWND, theme: ThemePreference) {
     let Some(state) = state_of(hwnd) else {
@@ -2597,6 +2628,7 @@ fn sync_ui(hwnd: HWND) {
         forward: bool,
         reload: bool,
         remote: bool,
+        text_diagrams: bool,
         mode: SidebarMode,
         header: &'static str,
         diagnostic: Option<String>,
@@ -2684,6 +2716,7 @@ fn sync_ui(hwnd: HWND) {
             forward: location.is_some_and(TabLocation::can_go_forward),
             reload: location.is_some(),
             remote: chrome.allow_remote_assets,
+            text_diagrams: chrome.render_text_diagrams,
             mode: chrome.mode,
             header,
             diagnostic,
@@ -2740,6 +2773,12 @@ fn sync_ui(hwnd: HWND) {
                 MF_UNCHECKED
             };
             CheckMenuItem(menu, MENU_REMOTE_ASSETS as u32, (MF_BYCOMMAND | check).0);
+            let check = if snapshot.text_diagrams {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+            CheckMenuItem(menu, MENU_TEXT_DIAGRAMS as u32, (MF_BYCOMMAND | check).0);
         }
     }
     send(controls.toolbar.theme, CB_SETCURSEL, theme_index(theme), 0);

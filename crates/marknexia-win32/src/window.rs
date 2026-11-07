@@ -779,6 +779,7 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
     // chrome: tab location, recent files, repository root detection.
     state_ref.chrome.note_render(tab_id, &path);
     let allow_remote_assets = state_ref.chrome.allow_remote_assets();
+    let render_text_diagrams = state_ref.chrome.render_text_diagrams();
     let pool = state_ref.render_pool.get_or_insert_with(|| {
         let window = hwnd.0 as isize;
         let notify: documents::Notify = Arc::new(move || {
@@ -808,6 +809,7 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
         title,
         theme,
         allow_remote_assets,
+        render_text_diagrams,
         cancelled,
     });
     if let Err(error) = submitted {
