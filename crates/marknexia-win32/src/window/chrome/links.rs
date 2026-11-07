@@ -193,6 +193,17 @@ fn is_current(state: &Rc<RefCell<AppState>>, tab: u64, epoch: u64, active: bool)
     current
 }
 
+/// True while `tab` waits for the render of a document it navigates to:
+/// its location already names that document, but the page still shows the
+/// previous one. Clicks, hover and scroll reports from that page are then
+/// ignored, so they never resolve against, or write into, the pending
+/// location (history steps still apply).
+fn awaiting_document(state: &Rc<RefCell<AppState>>, tab: u64) -> bool {
+    state
+        .try_borrow()
+        .map_or(true, |state| state.chrome.navigating.contains_key(&tab))
+}
+
 /// `input::after_poll`: the link adapter's messages, in arrival order.
 pub(in crate::window) fn page_messages(hwnd: HWND, messages: Vec<PageToHost>) {
     for message in messages {
@@ -253,7 +264,10 @@ fn open_link(hwnd: HWND, tab: u64, epoch: u64, href: String) {
         return;
     };
     // .NET returns on a blank destination before anything else.
-    if href.trim().is_empty() || !is_current(&state, tab, epoch, true) {
+    if href.trim().is_empty()
+        || awaiting_document(&state, tab)
+        || !is_current(&state, tab, epoch, true)
+    {
         return;
     }
     timing_begin(tab, "link");
@@ -302,7 +316,9 @@ pub(in crate::window) fn finish_link(
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if state.borrow().chrome.link_generation != generation || !is_current(&state, tab, epoch, true)
+    if state.borrow().chrome.link_generation != generation
+        || awaiting_document(&state, tab)
+        || !is_current(&state, tab, epoch, true)
     {
         return;
     }
@@ -426,22 +442,40 @@ pub(in crate::window) fn rename_tab(
 }
 
 /// Scrolls `tab`'s loaded document: to `top` when known (back and
-/// forward), else to the anchor, else to the top.
+/// forward), else to the anchor, else to the top. While the tab's document
+/// is still loading (or rendering, or its controller is being created), the
+/// scroll waits as a pending location (`pending_scroll`, `pending_top`) and
+/// `chrome::after_poll` applies it after the load, so it is never lost.
 pub(in crate::window) fn scroll_location(
     state: &Rc<RefCell<AppState>>,
     tab: u64,
     fragment: Option<&str>,
     top: u32,
 ) {
-    if let Some(session) = take_session(state) {
-        if let Some(host) = session.host(tab) {
-            let _ = if top > 0 {
-                host.scroll_to_offset(top)
-            } else {
-                host.scroll_to_anchor(fragment)
-            };
-        }
+    let applied = take_session(state).is_some_and(|session| {
+        let applied = session
+            .host(tab)
+            .filter(|host| host.document_loaded())
+            .is_some_and(|host| {
+                if top > 0 {
+                    host.scroll_to_offset(top).is_ok()
+                } else {
+                    host.scroll_to_anchor(fragment).is_ok()
+                }
+            });
         restore_session(state, session);
+        applied
+    });
+    if !applied {
+        // `after_poll` scrolls to the location's fragment, or to `top`.
+        let mut guard = state.borrow_mut();
+        let chrome = &mut guard.chrome;
+        chrome.pending_scroll.insert(tab);
+        if top > 0 {
+            chrome.pending_top.insert(tab, top);
+        } else {
+            chrome.pending_top.remove(&tab);
+        }
     }
 }
 
@@ -538,7 +572,7 @@ fn hover(hwnd: HWND, tab: u64, epoch: u64, href: Option<&str>) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if !is_current(&state, tab, epoch, true) {
+    if awaiting_document(&state, tab) || !is_current(&state, tab, epoch, true) {
         return;
     }
     let text = href.map(|href| {
@@ -578,7 +612,8 @@ fn scrolled(hwnd: HWND, tab: u64, epoch: u64, top: u32) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    if is_current(&state, tab, epoch, false)
+    if !awaiting_document(&state, tab)
+        && is_current(&state, tab, epoch, false)
         && let Some(location) = state.borrow_mut().chrome.locations.get_mut(&tab)
     {
         location.set_scroll_top(top);

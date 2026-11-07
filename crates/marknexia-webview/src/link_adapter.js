@@ -17,6 +17,12 @@
     || !Number.isSafeInteger(documentEpoch) || documentEpoch < 0) return;
   const PROTOCOL = 1;
   const MAX_HREF_BYTES = 8192;
+  // An adapter whose removal had not completed when the tab moved to a new
+  // document (same origin) also runs on that page. Every adapter records
+  // its epoch here as it installs, in registration order, so only the
+  // newest one acts; the others return without touching the event.
+  window.__mnLinkEpoch = documentEpoch;
+  const live = () => window.__mnLinkEpoch === documentEpoch;
   const encoder = new TextEncoder();
   const post = (type, fields) => {
     try {
@@ -43,6 +49,7 @@
   let scrollTimer = 0;
   let reportedTop = -1;
   const reportScroll = () => {
+    if (!live()) return;
     if (scrollTimer) { clearTimeout(scrollTimer); scrollTimer = 0; }
     const top = Math.max(0, Math.min(4294967295, Math.round(window.scrollY || 0)));
     if (top !== reportedTop) {
@@ -51,6 +58,7 @@
     }
   };
   window.addEventListener('scroll', () => {
+    if (!live()) return;
     if (scrollTimer) clearTimeout(scrollTimer);
     scrollTimer = setTimeout(reportScroll, 150);
   }, { passive: true });
@@ -59,7 +67,7 @@
   // browser raises a click for both). Ctrl, Shift and Alt clicks follow the
   // link the same way, as in .NET, whose bridge ignores the modifiers.
   window.addEventListener('click', event => {
-    if (event.button !== 0 || isBridgeButton(event.target)) return;
+    if (!live() || event.button !== 0 || isBridgeButton(event.target)) return;
     const href = linkHref(event.target);
     if (href === null) return;
     event.preventDefault();
@@ -69,7 +77,7 @@
   }, true);
   // A middle click never opens anything (.NET opens nothing either).
   window.addEventListener('auxclick', event => {
-    if (event.button === 1 && linkHref(event.target) !== null) {
+    if (live() && event.button === 1 && linkHref(event.target) !== null) {
       event.preventDefault();
       event.stopImmediatePropagation();
     }
@@ -79,7 +87,7 @@
   const historyButton = event => event.button === 3 || event.button === 4;
   for (const type of ['mousedown', 'mouseup', 'pointerdown', 'pointerup']) {
     window.addEventListener(type, event => {
-      if (!historyButton(event)) return;
+      if (!live() || !historyButton(event)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (type === 'mouseup') {
@@ -92,7 +100,7 @@
   // Hovered or focused link, for the shell's status bar.
   let shown = null;
   const show = href => {
-    if (href === shown) return;
+    if (!live() || href === shown) return;
     shown = href;
     post('linkHover', { href });
   };

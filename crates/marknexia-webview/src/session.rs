@@ -1297,6 +1297,50 @@ mod native_tests {
                 PageToHost::Ready { tab_id: 7, document_epoch, .. } if *document_epoch != epoch
             )));
         }
+        // Two replacements before the first adapter registration completes
+        // (same origin: probe pages use the tab origin). The superseded
+        // adapter may still run, but only the newest epoch acts on a click.
+        session.replace_document(probe::document(7, 9)).unwrap();
+        session.replace_document(probe::document(7, 10)).unwrap();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session
+                .host(7)
+                .is_some_and(super::WebViewHost::document_loaded)
+        });
+        messages.borrow_mut().clear();
+        let clicked = Rc::new(RefCell::new(None));
+        session
+            .host(7)
+            .unwrap()
+            .evaluate_for_test(
+                "(() => { const a = document.createElement('a'); a.href = 'next.md'; \
+                 a.textContent = 'next'; document.body.appendChild(a); a.click(); \
+                 return window.__mnLinkEpoch; })()",
+                Rc::clone(&clicked),
+            )
+            .unwrap();
+        pump_until(&mut session, Duration::from_secs(10), |_| {
+            clicked.borrow().is_some()
+                && messages
+                    .borrow()
+                    .iter()
+                    .any(|message| matches!(message, PageToHost::OpenLink { .. }))
+        });
+        assert_eq!(clicked.borrow().as_deref(), Some("10"));
+        let links: Vec<(u64, String)> = messages
+            .borrow()
+            .iter()
+            .filter_map(|message| match message {
+                PageToHost::OpenLink {
+                    document_epoch,
+                    href,
+                    ..
+                } => Some((*document_epoch, href.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, vec![(10, "next.md".to_owned())]);
+
         // The earlier path, for comparison: close the controller and create
         // a new one for the next document.
         let started = Instant::now();

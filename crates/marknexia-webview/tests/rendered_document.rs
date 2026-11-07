@@ -472,6 +472,11 @@ fn the_link_adapter_is_bound_to_one_document_identity() {
     // Inert outside its own origin and in frames.
     assert!(LINK_ADAPTER_JS.contains("window.location.origin !== expectedOrigin"));
     assert!(LINK_ADAPTER_JS.contains("window.top !== window"));
+    // A stale adapter (its removal not yet possible when the tab moved on)
+    // stays passive: only the newest epoch acts on an event.
+    assert!(LINK_ADAPTER_JS.contains("window.__mnLinkEpoch = documentEpoch;"));
+    assert!(LINK_ADAPTER_JS.contains("if (!live() || event.button !== 0"));
+    assert!(LINK_ADAPTER_JS.contains("if (!live() || !historyButton(event)) return;"));
     // The posted types are the ones the strict protocol accepts.
     for kind in [
         "'openLink'",
