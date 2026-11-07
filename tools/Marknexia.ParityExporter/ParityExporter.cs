@@ -605,7 +605,21 @@ public sealed class ParityExporter
         {
             // A v1 replay is valid only while the files that define the oracle still
             // match its declared revision. Exporter/test changes do not affect this check.
-            RunGitExpectSuccess(repositoryRoot, $"diff --quiet {revision} -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json");
+            // Release version stamps (the default VersionMajor/Minor/Patch in
+            // Directory.Build.props and the package manifest's Version) do not
+            // change behavior, so a release that only bumps them keeps the oracle.
+            // `-I` filters the patch but not git's exit status, so the check
+            // requires an empty patch instead of `--quiet`. The patterns are
+            // POSIX extended regular expressions.
+            RunGitExpectEmptyDiff(repositoryRoot,
+            [
+                "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                "-I", "<Version(Major|Minor|Patch)[[:space:]>]",
+                "-I", @"^[[:space:]]*Version=""[0-9]+(\.[0-9]+){3}""[[:space:]]*/?>[[:space:]]*$",
+                revision, "--",
+                "src", "test-fixtures", "Directory.Packages.props", "Directory.Build.props",
+                "Directory.Build.targets", "global.json", "NuGet.config", "packages.lock.json"
+            ]);
         }
         if (!string.IsNullOrWhiteSpace(RunGit(repositoryRoot, "status --porcelain --untracked-files=all -- src test-fixtures Directory.Packages.props Directory.Build.props Directory.Build.targets global.json NuGet.config packages.lock.json")))
         {
@@ -632,15 +646,30 @@ public sealed class ParityExporter
         return process.StandardOutput.ReadToEnd().Trim();
     }
 
-    private static void RunGitExpectSuccess(string repositoryRoot, string arguments)
+    private static void RunGitExpectEmptyDiff(string repositoryRoot, IEnumerable<string> arguments)
     {
-        using var process = Process.Start(new ProcessStartInfo("git", arguments)
+        var startInfo = new ProcessStartInfo("git")
         {
             WorkingDirectory = repositoryRoot,
+            RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
-        }) ?? throw new InvalidOperationException("Could not start git to validate parity provenance.");
-        if (!process.WaitForExit(5000) || process.ExitCode != 0)
+        };
+        foreach (string argument in arguments)
+            startInfo.ArgumentList.Add(argument);
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git to validate parity provenance.");
+        // Read before waiting so a large patch cannot fill the pipe and block git.
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(15000))
+        {
+            process.Kill();
+            throw new InvalidOperationException("Timed out while validating parity provenance.");
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"Could not validate parity provenance: {error.Result.Trim()}");
+        if (!string.IsNullOrWhiteSpace(output.Result))
             throw new InvalidOperationException("The behavioral oracle differs from the frozen parity revision; regenerate a new baseline instead of relabeling it.");
     }
 
