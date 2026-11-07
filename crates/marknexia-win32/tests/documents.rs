@@ -528,3 +528,28 @@ fn a_cancelled_job_stops_its_render() {
             .is_err_and(|error| matches!(error, OpenError::Render(RenderError::Cancelled)))
     );
 }
+
+/// .NET hides `WelcomePanel` when a document opens: the first document
+/// takes over the start-page tab instead of opening beside "Welcome".
+#[test]
+fn first_document_takes_over_the_open_start_page_tab() {
+    use marknexia_win32::{app::AppState, documents::reusable_start_page};
+    let mut app = AppState::new();
+    let welcome = app
+        .open_tab(marknexia_win32::documents::WELCOME_TITLE)
+        .unwrap();
+    assert_eq!(
+        reusable_start_page(Some(welcome.get()), &app),
+        Some(welcome)
+    );
+    // No start page (a startup document, or it was already replaced).
+    assert_eq!(reusable_start_page(None, &app), None);
+    // The start-page tab was closed: a new tab opens instead.
+    assert!(app.close_tab(welcome));
+    let other = app.open_tab("other.md").unwrap();
+    assert_eq!(reusable_start_page(Some(welcome.get()), &app), None);
+    assert_ne!(
+        reusable_start_page(Some(other.get() + 1), &app),
+        Some(other)
+    );
+}

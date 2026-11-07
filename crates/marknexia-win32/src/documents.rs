@@ -23,7 +23,7 @@ use marknexia_files::{
 use marknexia_rendering::{PageIdentity, RenderContext, RenderError, Renderer};
 use marknexia_webview::policy::HostDocument;
 
-use crate::chrome_model::OutlineEntry;
+use crate::{chrome_model::OutlineEntry, tabs::TabId};
 
 /// Paths to open from the command line (arguments after the program name).
 /// Every non-empty argument is a path; one leading `--` separator is dropped.
@@ -549,6 +549,20 @@ Your recent files are in the sidebar, under **Recent files**.
 
 /// The tab title of the start page (.NET has no tab for it; CHROME-27).
 pub const WELCOME_TITLE: &str = "Welcome";
+
+/// The start-page tab a newly opened document takes over, if `welcome` (the
+/// start page's tab id) is still open. .NET has no tab for the start page:
+/// `WelcomePanel` is hidden as soon as a document opens, so the first
+/// document replaces the "Welcome" tab instead of opening beside it.
+#[must_use]
+pub fn reusable_start_page(welcome: Option<u64>, app: &crate::app::AppState) -> Option<TabId> {
+    let welcome = welcome?;
+    app.tabs()
+        .tabs()
+        .iter()
+        .map(crate::tabs::Tab::id)
+        .find(|id| id.get() == welcome)
+}
 
 /// Escapes `text` for a Markdown paragraph: every ASCII punctuation
 /// character gets a backslash (CommonMark backslash escapes), so file

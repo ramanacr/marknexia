@@ -1094,6 +1094,30 @@ fn open_document(hwnd: HWND, path: PathBuf) {
         return;
     }
     let portable = Rc::clone(&state.borrow().portable);
+    // .NET hides `WelcomePanel` when a document opens; it has no tab. The
+    // start-page tab (CHROME-27) is therefore reused for the first document,
+    // as a startup path replaces it, so "Welcome" never stays beside it.
+    let welcome = {
+        let mut state = state.borrow_mut();
+        let welcome = state.welcome_tab.take();
+        documents::reusable_start_page(welcome, &portable.borrow())
+    };
+    if let Some(tab_id) = welcome {
+        {
+            let mut app = portable.borrow_mut();
+            app.rename_tab(tab_id, documents::tab_title(&path));
+            app.select_tab(tab_id);
+        }
+        // The start page stays shown until the document replaces it in place.
+        start_render(hwnd, &state, tab_id.get(), path);
+        let _ = select_webview(&state, tab_id.get());
+        let a11y = state.borrow().accessibility.clone();
+        if let Some(a11y) = a11y {
+            a11y.notify_children_changed();
+        }
+        refresh_tabs(&state, Some(tab_id));
+        return;
+    }
     let opened = portable.borrow_mut().open_tab(documents::tab_title(&path));
     let Ok(tab_id) = opened else {
         state.borrow_mut().notice = Some("No more tabs can be opened.".to_owned());
