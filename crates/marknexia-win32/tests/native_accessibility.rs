@@ -175,16 +175,19 @@ struct Launched {
     _apartment: Apartment,
     hwnd: HWND,
     _shell: ShellProcess,
+    /// Removed after the shell exits.
+    _documents: shell_support::TwoDocuments,
 }
 
-/// Launches the shell with no document (two placeholder tabs) and binds the
+/// Launches the shell with two documents (two tabs) and binds the
 /// UIA client to its custom tab control. The test thread is made
 /// per-monitor-v2 aware first, so UIA rectangles and Win32 metrics read here
 /// are physical pixels, the same unit the shell uses.
 fn launch_shell() -> Launched {
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let executable = std::env::var_os("MARKNEXIA_SHELL_EXE").expect("MARKNEXIA_SHELL_EXE");
-    let shell = ShellProcess::launch(&executable, &[]);
+    let documents = shell_support::TwoDocuments::new();
+    let shell = ShellProcess::launch(&executable, &documents.args());
     let hwnd = wait_for("the launched shell HWND", || find_shell_window(shell.id()));
     let apartment = Apartment::enter();
     let automation: IUIAutomation =
@@ -206,6 +209,7 @@ fn launch_shell() -> Launched {
         _apartment: apartment,
         hwnd,
         _shell: shell,
+        _documents: documents,
     }
 }
 

@@ -46,6 +46,37 @@ use windows::{
 
 pub const SHELL_CLASS: &str = "MarknexiaRustWindow";
 
+/// Two small Markdown documents in a fresh temporary folder, removed on
+/// drop. Tests that need two tabs open them: without documents the shell
+/// starts with one start-page tab ("Welcome"; CHROME-27).
+pub struct TwoDocuments {
+    folder: PathBuf,
+    paths: [PathBuf; 2],
+}
+
+impl TwoDocuments {
+    pub fn new() -> Self {
+        let folder = std::env::temp_dir().join(format!("mnx-docs-{}", unique_suffix()));
+        std::fs::create_dir(&folder).expect("document folder");
+        let folder = std::path::absolute(&folder).expect("absolute document folder");
+        let paths = [folder.join("first.md"), folder.join("second.md")];
+        std::fs::write(&paths[0], "# First\n\nThe first document.\n").expect("first.md");
+        std::fs::write(&paths[1], "# Second\n\nThe second document.\n").expect("second.md");
+        Self { folder, paths }
+    }
+
+    /// The command-line arguments that open both documents.
+    pub fn args(&self) -> [&OsStr; 2] {
+        [self.paths[0].as_os_str(), self.paths[1].as_os_str()]
+    }
+}
+
+impl Drop for TwoDocuments {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
 /// The launched shell. Drop closes it (WM_CLOSE, then kill), waits for it
 /// and its WebView2 processes to release the profile, and removes the
 /// profile folder.

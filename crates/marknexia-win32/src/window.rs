@@ -11,7 +11,6 @@ use std::{
 
 use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::PageIdentity;
-use marknexia_security::{ContentPolicy, HtmlPolicy};
 use marknexia_webview::{
     environment::StaApartment,
     host::{HostColor, ViewportBounds},
@@ -191,6 +190,8 @@ struct AppState {
     input: input::InputState,
     /// runtime: the WebView2 missing-runtime state.
     runtime: runtime::RuntimeUi,
+    /// The start-page tab (no document), re-rendered on theme changes.
+    welcome_tab: Option<u64>,
 }
 
 impl AppState {
@@ -207,6 +208,7 @@ impl AppState {
             chrome: chrome::ChromeState::new(),
             input: input::InputState::default(),
             runtime: runtime::RuntimeUi::new(),
+            welcome_tab: None,
             portable: Rc::new(RefCell::new(PortableAppState::new())),
             controls: None,
             webview: None,
@@ -509,8 +511,9 @@ fn initialize(
     let startup_documents = {
         let mut app = portable.borrow_mut();
         if paths.is_empty() {
-            let _ = app.open_tab("Welcome");
-            let _ = app.open_tab("Security and privacy");
+            // The start page (.NET `WelcomePanel`), one tab, rendered like
+            // a document below.
+            let _ = app.open_tab(documents::WELCOME_TITLE);
             Vec::new()
         } else {
             paths
@@ -540,6 +543,15 @@ fn initialize(
     }
     for (tab_id, path) in startup_documents {
         start_render(hwnd, &state, tab_id.get(), path);
+    }
+    if !document_mode {
+        // The start page renders through the document pipeline, so it
+        // has the themed template; it stays the startup tab.
+        let welcome = portable.borrow().active_tab();
+        if let Some(welcome) = welcome {
+            state.borrow_mut().welcome_tab = Some(welcome.get());
+            render_welcome(hwnd, &state, welcome.get());
+        }
     }
     // Every startup render may already have failed to queue.
     update_startup_readiness(&state);
@@ -674,13 +686,15 @@ fn start_session(hwnd: HWND, state: &Rc<RefCell<AppState>>, apartment: Rc<StaApa
         if state.borrow().renders.is_pending(tab_id.get()) {
             continue;
         }
-        // Startup placeholders without documents: plain text only,
-        // through the sealed sanitized constructor.
-        let document = text_document(
-            tab_id.get(),
-            &title,
-            &format!("{title}: Marknexia native document viewport."),
-        );
+        // A tab without a pending render (the start page after a
+        // WebView2 install): its shell page, on the themed template.
+        let markdown = if state.borrow().welcome_tab == Some(tab_id.get()) {
+            documents::WELCOME_MARKDOWN.to_owned()
+        } else {
+            documents::markdown_text(&title)
+        };
+        let theme = app_theme(state);
+        let document = text_document(tab_id.get(), &title, &markdown, theme);
         let added = document.and_then(|document| {
             session
                 .add_document(document)
@@ -733,16 +747,73 @@ fn start_session(hwnd: HWND, state: &Rc<RefCell<AppState>>, apartment: Rc<StaApa
     }
 }
 
-/// A plain-text document (placeholder or error) through the sealed
-/// sanitized constructor.
-fn text_document(tab_id: u64, title: &str, text: &str) -> Result<HostDocument, String> {
-    HtmlPolicy::new(ContentPolicy::default())
-        .encode_text(text)
+/// A page the shell writes itself (the start page, an error message) from
+/// Markdown, through the document renderer: the themed template, its
+/// stylesheet, the sanitizer and the page policy, so no shell page ever
+/// renders unstyled. Text from elsewhere must be escaped with
+/// `documents::markdown_text` first.
+fn text_document(
+    tab_id: u64,
+    title: &str,
+    markdown: &str,
+    theme: AppTheme,
+) -> Result<HostDocument, String> {
+    documents::build_shell_page(tab_id, title, markdown, theme, page_identity)
         .map_err(|error| format!("{error}"))
-        .and_then(|body| {
-            HostDocument::new_titled(tab_id, 1, title, body, BTreeMap::new())
-                .map_err(|error| format!("{error:?}"))
+}
+
+/// The document theme for the current preference.
+fn app_theme(state: &Rc<RefCell<AppState>>) -> AppTheme {
+    let preference = crate::reentry::read(state, |state| {
+        crate::reentry::read(&state.portable, |app| app.theme())
+    })
+    .flatten()
+    .unwrap_or(crate::theme::ThemePreference::System);
+    match preference {
+        crate::theme::ThemePreference::System => AppTheme::System,
+        crate::theme::ThemePreference::Light => AppTheme::Light,
+        crate::theme::ThemePreference::Dark => AppTheme::Dark,
+    }
+}
+
+/// Renders (or re-renders, after a theme change) the start page in `tab`
+/// on the render pool, like a document but from built-in Markdown: no
+/// file, no recent-file entry, no repository detection.
+fn render_welcome(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab: u64) {
+    queue_render(
+        hwnd,
+        state,
+        tab,
+        PathBuf::new(),
+        Some(documents::WELCOME_MARKDOWN.to_owned()),
+    );
+}
+
+/// chrome: after a theme change, the start page follows the new theme
+/// (documents reload through `reload_active`).
+fn rerender_shell_pages(hwnd: HWND) {
+    let Some(state) = (unsafe { app_state_handle(hwnd) }) else {
+        return;
+    };
+    let welcome = crate::reentry::read(&state, |state| state.welcome_tab).flatten();
+    let open = welcome.is_some_and(|tab| {
+        crate::reentry::read(&state, |state| {
+            crate::reentry::read(&state.portable, |app| {
+                app.tabs()
+                    .tabs()
+                    .iter()
+                    .any(|candidate| candidate.id().get() == tab)
+            })
         })
+        .flatten()
+        .unwrap_or(false)
+    });
+    match welcome {
+        Some(tab) if open => render_welcome(hwnd, &state, tab),
+        _ => {
+            let _ = crate::reentry::write(&state, |state| state.welcome_tab = None);
+        }
+    }
 }
 
 /// A fresh per-document page identity from the OS RNG. `PageIdentity`
@@ -771,18 +842,32 @@ fn page_identity() -> Result<PageIdentity, String> {
 /// touch HWND state, `AppState` or WebView2, and wake the UI thread with
 /// `WM_RENDER_COMPLETE` after queueing the result.
 fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: PathBuf) {
+    queue_render(hwnd, state, tab_id, path, None);
+}
+
+/// `start_render`, or with `builtin` Markdown (the start page) instead of
+/// the file at `path`.
+fn queue_render(
+    hwnd: HWND,
+    state: &Rc<RefCell<AppState>>,
+    tab_id: u64,
+    path: PathBuf,
+    builtin: Option<String>,
+) {
+    let theme = app_theme(state);
     let mut guard = state.borrow_mut();
     let state_ref = &mut *guard;
-    let theme = match state_ref.portable.borrow().theme() {
-        crate::theme::ThemePreference::System => AppTheme::System,
-        crate::theme::ThemePreference::Light => AppTheme::Light,
-        crate::theme::ThemePreference::Dark => AppTheme::Dark,
+    let title = if builtin.is_some() {
+        documents::WELCOME_TITLE.to_owned()
+    } else {
+        documents::tab_title(&path)
     };
-    let title = documents::tab_title(&path);
     let (ticket, cancelled) = state_ref.renders.begin(tab_id);
     state_ref.tab_errors.remove(&tab_id);
-    // chrome: tab location, recent files, repository root detection.
-    state_ref.chrome.note_render(tab_id, &path);
+    if builtin.is_none() {
+        // chrome: tab location, recent files, repository root detection.
+        state_ref.chrome.note_render(tab_id, &path);
+    }
     let allow_remote_assets = state_ref.chrome.allow_remote_assets();
     let render_text_diagrams = state_ref.chrome.render_text_diagrams();
     let pool = state_ref.render_pool.get_or_insert_with(|| {
@@ -815,6 +900,7 @@ fn start_render(hwnd: HWND, state: &Rc<RefCell<AppState>>, tab_id: u64, path: Pa
         theme,
         allow_remote_assets,
         render_text_diagrams,
+        builtin,
         cancelled,
     });
     if let Err(error) = submitted {
@@ -894,13 +980,14 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
         return;
     };
     let rendered = result.is_ok();
+    let theme = app_theme(state);
     let document = result.or_else(|error| {
         let message = format!("Could not open {title}: {error}");
         state
             .borrow_mut()
             .tab_errors
             .insert(tab_id, message.clone());
-        text_document(tab_id, &title, &message)
+        text_document(tab_id, &title, &documents::markdown_text(&message), theme)
     });
     let mut displayed = true;
     input::document_replaced(state, tab_id);

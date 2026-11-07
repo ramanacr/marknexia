@@ -426,11 +426,14 @@ pub fn build_document_with_outline(
 ) -> Result<(HostDocument, Vec<OutlineEntry>), OpenError> {
     let identity = identity().map_err(OpenError::Identity)?;
     let renderer = Renderer::new();
-    let source = read_source(
-        &job.path,
-        |size| renderer.check_source_size(size),
-        renderer.limits().max_source_bytes,
-    )?;
+    let source = match &job.builtin {
+        Some(markdown) => markdown.clone(),
+        None => read_source(
+            &job.path,
+            |size| renderer.check_source_size(size),
+            renderer.limits().max_source_bytes,
+        )?,
+    };
     let mut context = RenderContext::new(job.theme, identity);
     // The .NET `AllowRemoteAssets` setting selects the sanitizer's
     // `RemoteImagePolicy` (`AllowHttps` or `Blank`).
@@ -464,6 +467,73 @@ pub fn build_document_with_outline(
     )
     .map(|document| (document, outline))
     .map_err(|error| OpenError::Display(format!("{error:?}")))
+}
+
+/// The start page (.NET `WelcomePanel`, shown while no document is open):
+/// the product name, the tagline, the description and how to begin. It is
+/// Markdown rendered like any document, so it has the document template,
+/// its stylesheet and the theme (light, dark, high contrast), and passes
+/// the sanitizer and the page policy.
+pub const WELCOME_MARKDOWN: &str = "\
+# Marknexia
+
+**Read. Explore. Understand.**
+
+GitHub-style Markdown. Native on Windows.
+
+Open a file or folder to begin:
+
+- **Open** (Ctrl+O) opens a Markdown file.
+- **Folder** (Ctrl+Shift+O) opens a repository; its files appear in the sidebar.
+- Drop a Markdown file or a folder on the window.
+
+Your recent files are in the sidebar, under **Recent files**.
+";
+
+/// The tab title of the start page (.NET has no tab for it; CHROME-27).
+pub const WELCOME_TITLE: &str = "Welcome";
+
+/// Escapes `text` for a Markdown paragraph: every ASCII punctuation
+/// character gets a backslash (CommonMark backslash escapes), so file
+/// names and error texts render literally and never as markup or HTML.
+#[must_use]
+pub fn markdown_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() * 2);
+    for character in text.chars() {
+        match character {
+            '\r' | '\n' => escaped.push(' '),
+            character if character.is_ascii_punctuation() => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+/// A page the shell writes itself (a start page or an error message),
+/// rendered on the calling thread through the document renderer, so it
+/// always has the themed template: no shell page renders unstyled.
+pub fn build_shell_page(
+    tab_id: u64,
+    title: &str,
+    markdown: &str,
+    theme: AppTheme,
+    identity: impl FnOnce() -> Result<PageIdentity, String>,
+) -> Result<HostDocument, OpenError> {
+    let job = RenderJob {
+        tab_id,
+        ticket: 0,
+        path: PathBuf::new(),
+        title: title.to_owned(),
+        theme,
+        allow_remote_assets: false,
+        render_text_diagrams: false,
+        builtin: Some(markdown.to_owned()),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    build_document(&job, identity)
 }
 
 /// A startup readiness signal for a measurement harness.
@@ -620,6 +690,9 @@ pub struct RenderJob {
     /// `RenderContext::enable_text_diagrams` (the persisted
     /// `RenderTextDiagrams` setting, Rust edition only).
     pub render_text_diagrams: bool,
+    /// Shell-generated Markdown (the start page) rendered instead of the
+    /// file at `path`, through the same renderer, template and theme.
+    pub builtin: Option<String>,
     pub cancelled: Arc<AtomicBool>,
 }
 

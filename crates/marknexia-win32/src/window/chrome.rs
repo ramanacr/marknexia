@@ -2504,6 +2504,8 @@ fn set_theme(hwnd: HWND, theme: ThemePreference) {
     update_theme(hwnd);
     relayout(hwnd, &state);
     reload_active(hwnd);
+    // The start page follows the theme too.
+    super::rerender_shell_pages(hwnd);
 }
 
 /// Splitter drag start (.NET `SidebarResizeHandle_PointerPressed`).

@@ -197,7 +197,7 @@ fn command_line_markdown_file_opens_as_a_named_rendered_document() {
             unsafe { element.CurrentControlType() }.is_ok_and(|kind| kind == UIA_TabControlTypeId)
         })
     });
-    // A document path replaces the startup placeholder tabs.
+    // A document path replaces the start-page tab.
     let tabs = children(&automation, &tab_control);
     let names: Vec<String> = tabs.iter().map(name).collect();
     assert_eq!(names, ["features.md"], "one tab named after the file");
@@ -225,7 +225,9 @@ fn command_line_markdown_file_opens_as_a_named_rendered_document() {
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn two_named_tab_items_expose_selection_and_change_active_tab() {
     let executable = std::env::var_os("MARKNEXIA_SHELL_EXE").expect("MARKNEXIA_SHELL_EXE");
-    let shell = ShellProcess::launch(&executable, &[]);
+    // Two documents give two tabs (the start page is a single tab).
+    let documents = shell_support::TwoDocuments::new();
+    let shell = ShellProcess::launch(&executable, &documents.args());
     let hwnd = wait_for("the launched shell HWND", || find_shell_window(shell.id()));
 
     let _apartment = Apartment::enter();

@@ -145,6 +145,17 @@ struct Launched {
     _apartment: Apartment,
     hwnd: HWND,
     shell: ShellProcess,
+    /// The opened documents, removed after the shell exits.
+    _documents: Option<shell_support::TwoDocuments>,
+}
+
+/// Launches the shell with two documents: two tabs (without documents the
+/// shell starts with the single start-page tab).
+fn launch_two_documents(key: &str) -> Launched {
+    let documents = shell_support::TwoDocuments::new();
+    let mut launched = launch(&documents.args(), key, 2);
+    launched._documents = Some(documents);
+    launched
 }
 
 fn launch(args: &[&std::ffi::OsStr], key: &str, tabs: usize) -> Launched {
@@ -172,6 +183,7 @@ fn launch(args: &[&std::ffi::OsStr], key: &str, tabs: usize) -> Launched {
         _apartment: apartment,
         hwnd,
         shell,
+        _documents: None,
     }
 }
 
@@ -294,9 +306,9 @@ impl Drop for Fixtures {
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and an interactive desktop"]
 fn invoking_a_close_button_closes_that_inactive_tab() {
-    let shell = launch(&[], &unique_instance_key(), 2);
+    let shell = launch_two_documents(&unique_instance_key());
     let names = shell.tab_names();
-    // The second placeholder is active; close the first, inactive one.
+    // The second document is active; close the first, inactive one.
     assert_eq!(shell.selected_name().as_deref(), Some(names[1].as_str()));
     let (events, _registration) = record_structure(&shell);
     let tabs = shell.tabs();
@@ -363,7 +375,8 @@ fn second_launch(key: &str, args: &[&std::ffi::OsStr], directory: &std::path::Pa
 fn a_second_launch_hands_its_file_to_the_running_instance() {
     let fixtures = Fixtures::new(&[("first.md", "# First\n"), ("second.md", "# Second\n")]);
     let key = unique_instance_key();
-    let shell = launch(&[], &key, 2);
+    // The start page is the only tab without documents.
+    let shell = launch(&[], &key, 1);
     let first = fixtures.0.join("first.md");
 
     assert!(second_launch(
@@ -391,7 +404,7 @@ fn a_second_launch_hands_its_file_to_the_running_instance() {
     wait_for("first.md selected again", || {
         (shell.selected_name().as_deref() == Some("first.md")).then_some(())
     });
-    assert_eq!(shell.tabs().len(), 4);
+    assert_eq!(shell.tabs().len(), 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +488,7 @@ const FIND_CLOSE_ID: u32 = 1008;
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and an interactive desktop"]
 fn the_toolbar_opens_the_find_bar_and_its_close_button_closes_it() {
-    let shell = launch(&[], &unique_instance_key(), 2);
+    let shell = launch_two_documents(&unique_instance_key());
     let visible = |id: u32| {
         by_control_id(&shell.automation, &shell.root, id).is_some_and(|element| {
             unsafe { element.CurrentIsOffscreen() }.is_ok_and(|offscreen| !offscreen.as_bool())
@@ -551,7 +564,7 @@ impl Drop for LeftButtonGuard {
 #[test]
 #[ignore = "requires MARKNEXIA_SHELL_EXE and a controlled interactive desktop"]
 fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
-    let shell = launch(&[], &unique_instance_key(), 2);
+    let shell = launch_two_documents(&unique_instance_key());
     let names = shell.tab_names();
     let (events, _registration) = record_structure(&shell);
     let tabs = shell.tabs();
@@ -563,7 +576,7 @@ fn dragging_a_tab_reorders_it_and_raises_children_reordered() {
     let start = first.left + (first.right - first.left) / 4;
     let end = second.left + (second.right - second.left) / 2;
 
-    // The second placeholder starts selected; the press selects the first.
+    // The second document starts selected; the press selects the first.
     assert_eq!(shell.selected_name().as_deref(), Some(names[1].as_str()));
     shell.activate();
     let id = shell.shell.id();

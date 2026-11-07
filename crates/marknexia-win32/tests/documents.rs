@@ -288,10 +288,37 @@ fn job(tab_id: u64, path: PathBuf) -> (RenderJob, Arc<AtomicBool>) {
             theme: AppTheme::System,
             allow_remote_assets: false,
             render_text_diagrams: true,
+            builtin: None,
             cancelled: Arc::clone(&cancelled),
         },
         cancelled,
     )
+}
+
+/// Pages the shell writes itself (the start page, error pages) go through
+/// the document renderer: the themed template and its stylesheet, never a
+/// bare page; and text in them is escaped, never markup.
+#[test]
+fn shell_pages_use_the_themed_document_template() {
+    use marknexia_win32::documents::{
+        WELCOME_MARKDOWN, WELCOME_TITLE, build_shell_page, markdown_text,
+    };
+    for theme in [AppTheme::Light, AppTheme::Dark, AppTheme::System] {
+        let page = build_shell_page(1, WELCOME_TITLE, WELCOME_MARKDOWN, theme, fixed_identity)
+            .expect("start page renders");
+        let html = String::from_utf8_lossy(page.html()).into_owned();
+        assert!(
+            html.contains("<style"),
+            "{theme:?}: the template stylesheet"
+        );
+        assert!(html.contains("Read. Explore. Understand."));
+        assert!(html.contains("<h1"));
+    }
+    let escaped = markdown_text("Could not open <b>x</b>_*[a](b)\r\nnext");
+    assert_eq!(escaped, r"Could not open \<b\>x\<\/b\>\_\*\[a\]\(b\)  next");
+    let page = build_shell_page(2, "x.md", &escaped, AppTheme::Dark, fixed_identity)
+        .expect("error page renders");
+    assert!(!String::from_utf8_lossy(page.html()).contains("<b>x</b>"));
 }
 
 fn fixed_identity() -> Result<PageIdentity, String> {
