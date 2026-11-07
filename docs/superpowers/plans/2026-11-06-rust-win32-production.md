@@ -107,6 +107,8 @@ Exit: tampered updates accepted = 0; rollback proven; separate from Store/MSIX u
 
 Exit: installer ≤ 15 MB, unpacked ≤ 35 MB, cold start p95 ≤ 500 ms and idle host ≤ 35 MB on reference hardware for x64 and ARM64.
 
+Update 2026-11-07 (owner decision: unsigned setup and MSIX for x64 and ARM64, CI only, workflow artifacts only): task 1 is implemented as `crates/marknexia-setup` (per-user setup, distinct identity, opt-in associations, hash-verified embedded payload, updater-aware uninstall) and an unsigned MSIX (`packaging/rust-msix`), built and verified in `rust-release-build` (`scripts/New-RustInstallerPackages.ps1`; x64 install round trip `scripts/Test-RustSetupInstall.ps1`). Headless-tested only until the next CI run; record `compat/decisions/rust-installers.md` (proposed).
+
 ### Phase 8 — Side-by-side preview (4–6 weeks, after G4)
 
 1. Publish the Rust edition as a preview alongside .NET with distinct identity, associations and update channel.

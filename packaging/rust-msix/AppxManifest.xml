@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Marknexia (Rust preview): MSIX manifest template for CI evidence packages only.
-  scripts/New-RustInstallerPackages.ps1 replaces @VERSION@ (four numeric parts) and
-  @ARCHITECTURE@ (x64 or arm64). The package is UNSIGNED: the Publisher carries the
+  scripts/New-RustInstallerPackages.ps1 fills in the Identity Version (four numeric parts)
+  and ProcessorArchitecture (x64 or arm64) tokens. The package is UNSIGNED: the Publisher carries the
   unsigned-package OID, so it can be added only with Add-AppxPackage -AllowUnsigned.
   The identity differs from the .NET edition (RRCLabs.Marknexia), so both install
   side by side. The file type association only adds an "Open with" entry; Windows
