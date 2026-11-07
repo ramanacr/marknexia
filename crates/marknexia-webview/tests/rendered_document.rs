@@ -458,3 +458,42 @@ fn a_page_with_a_text_diagram_is_hosted_without_the_mermaid_runtime() {
     assert!(page[..style_end].contains("/* Text diagrams (Rust edition, TDG-7) */"));
     assert!(page[style_end..].contains("<svg class=\"marknexia-text-diagram-svg\""));
 }
+
+#[test]
+fn the_link_adapter_is_bound_to_one_document_identity() {
+    use marknexia_webview::host::{LINK_ADAPTER_JS, link_adapter_script, scroll_offset_script};
+    let script = link_adapter_script("https://document-ab.marknexia.invalid", 3, 9).unwrap();
+    assert!(script.ends_with(r#")("https://document-ab.marknexia.invalid", 3, 9);"#));
+    // Capture phase on the window, before bridge.js's body listener, and
+    // stopped there, so the .NET bridge never posts its flat message.
+    assert!(LINK_ADAPTER_JS.contains("window.addEventListener('click'"));
+    assert!(LINK_ADAPTER_JS.contains("event.stopImmediatePropagation();"));
+    assert!(LINK_ADAPTER_JS.contains("}, true);"));
+    // Inert outside its own origin and in frames.
+    assert!(LINK_ADAPTER_JS.contains("window.location.origin !== expectedOrigin"));
+    assert!(LINK_ADAPTER_JS.contains("window.top !== window"));
+    // The posted types are the ones the strict protocol accepts.
+    for kind in [
+        "'openLink'",
+        "'linkHover'",
+        "'scrollChanged'",
+        "'historyStep'",
+    ] {
+        assert!(LINK_ADAPTER_JS.contains(kind), "{kind}");
+    }
+    assert_eq!(
+        scroll_offset_script(640),
+        "window.scrollTo({ left: 0, top: 640, behavior: 'instant' })"
+    );
+}
+
+#[test]
+fn the_frozen_bridge_is_unchanged_and_still_posts_the_flat_message() {
+    // Decision LNK-1: bridge.js stays byte-identical to .NET; the adapter
+    // stops the click before it.
+    let bridge = include_str!("../../marknexia-rendering/assets/bridge.js");
+    assert!(
+        bridge.contains("window.chrome.webview.postMessage({ type: 'openLink', href: href });")
+    );
+    assert!(bridge.contains("document.body.addEventListener('click', (e) => {"));
+}

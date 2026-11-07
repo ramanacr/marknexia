@@ -282,6 +282,63 @@ pub fn probe_is_dir(path: &Path) -> bool {
     probe_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// The link resolver's file probe (.NET `FileService.FileExists`): `path`
+/// passes the document path gate and opens, for attributes only and with
+/// identification-only QoS, as a regular disk file. With `root`, the opened
+/// handle must also lie inside the opened root (`GetFinalPathNameByHandleW`
+/// on both, compared component-wise with the ASCII-only case fold of
+/// `GatedPath::is_within`), so a reparse point inside the repository cannot
+/// lead outside it (`compat/decisions/navigation-probe-order.md`, "native
+/// file adapter"). Call off the UI thread.
+#[must_use]
+pub fn probe_document_file(path: &Path, root: Option<&Path>) -> bool {
+    if path
+        .to_str()
+        .is_none_or(|text| check_document_path(text).is_err())
+    {
+        return false;
+    }
+    let Ok(file) = open_for_attributes(path) else {
+        return false;
+    };
+    if !is_disk_file(&file) || !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Some(root) = root else {
+        return true;
+    };
+    let Some(target) = final_path(&file).and_then(|text| GatedPath::new(&text).ok()) else {
+        return false;
+    };
+    let root = root
+        .to_str()
+        .filter(|text| check_document_path(text).is_ok())
+        .and_then(|_| open_for_attributes(root).ok())
+        .and_then(|handle| final_path(&handle))
+        .and_then(|text| GatedPath::new(&text).ok());
+    root.is_some_and(|root| target.is_within(&root))
+}
+
+/// A handle for attributes only (files and folders), as `probe_metadata`.
+fn open_for_attributes(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const SHARE_ALL: u32 = 0x7;
+        options
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(path)
+}
+
 /// Reads a Markdown source like .NET `FileService.ReadTextAsync`, with
 /// stricter checks on what may be opened:
 /// - the path passes [`check_document_path`] (drive and UNC share paths);

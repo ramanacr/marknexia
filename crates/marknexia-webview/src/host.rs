@@ -53,23 +53,76 @@ pub fn find_adapter_script(origin: &str) -> Result<String, HostError> {
     Ok(format!("({})({origin});", FIND_ADAPTER_JS.trim_end()))
 }
 
-/// Registers the find adapter, bound to the pinned document's origin, for
-/// every document this controller loads. The completion result is not
-/// needed: WebView2 orders the registration before a later `Navigate` on the
-/// same controller.
-fn add_find_adapter(core: &ICoreWebView2, document_uri: &str) -> Result<(), HostError> {
-    let origin = document_origin(document_uri).ok_or(HostError::InvalidDocument)?;
-    let script: Vec<u16> = find_adapter_script(origin)?
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
-        |_result, _id| Ok(()),
-    ));
-    // SAFETY: the script buffer outlives this synchronous call; WebView2
-    // copies it. The handler is a refcounted COM object owned by WebView2.
-    unsafe { core.AddScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(script.as_ptr()), &handler) }
-        .map_err(HostError::from_com)
+/// The host-injected link adapter (see `link_adapter.js`): a function
+/// expression that takes the document's origin, tab id and epoch.
+pub const LINK_ADAPTER_JS: &str = include_str!("link_adapter.js");
+
+/// The link adapter invoked with the document identity as JSON data: it
+/// posts typed `openLink`, `linkHover`, `scrollChanged` and `historyStep`
+/// messages for exactly this document, and stays inert in any other origin
+/// or frame.
+///
+/// # Errors
+///
+/// Only when the origin cannot be serialized (never for a `&str`).
+pub fn link_adapter_script(
+    origin: &str,
+    tab_id: u64,
+    document_epoch: u64,
+) -> Result<String, HostError> {
+    let origin = serde_json::to_string(origin).map_err(|_| HostError::InvalidDocument)?;
+    Ok(format!(
+        "({})({origin}, {tab_id}, {document_epoch});",
+        LINK_ADAPTER_JS.trim_end()
+    ))
+}
+
+/// Script ids returned by `AddScriptToExecuteOnDocumentCreated`, so the
+/// adapters of a replaced document can be removed.
+type ScriptIds = Rc<RefCell<Vec<String>>>;
+
+/// Registers the find and link adapters, bound to `document`'s origin and
+/// identity, for the next document this controller loads. WebView2 orders
+/// the registration before a later `Navigate` on the same controller; the
+/// ids arrive in the completion and are kept for removal.
+fn add_document_scripts(
+    core: &ICoreWebView2,
+    document: &HostDocument,
+    ids: &ScriptIds,
+) -> Result<(), HostError> {
+    let uri = document.document_uri();
+    let origin = document_origin(&uri).ok_or(HostError::InvalidDocument)?;
+    for script in [
+        find_adapter_script(origin)?,
+        link_adapter_script(origin, document.tab_id(), document.document_epoch())?,
+    ] {
+        let script: Vec<u16> = script.encode_utf16().chain(std::iter::once(0)).collect();
+        let ids = Rc::downgrade(ids);
+        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+            move |result, id| {
+                if result.is_ok()
+                    && let Some(ids) = ids.upgrade()
+                    && let Ok(mut ids) = ids.try_borrow_mut()
+                {
+                    ids.push(id);
+                }
+                Ok(())
+            },
+        ));
+        // SAFETY: the script buffer outlives this synchronous call; WebView2
+        // copies it. The handler is a refcounted COM object owned by WebView2.
+        unsafe {
+            core.AddScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(script.as_ptr()), &handler)
+        }
+        .map_err(HostError::from_com)?;
+    }
+    Ok(())
+}
+
+/// The script that restores a vertical scroll offset (back and forward).
+#[must_use]
+pub fn scroll_offset_script(top: u32) -> String {
+    format!("window.scrollTo({{ left: 0, top: {top}, behavior: 'instant' }})")
 }
 
 use crate::{
@@ -168,6 +221,10 @@ pub struct WebViewHost {
     callbacks: Option<CallbackTokens>,
     security_abort: Option<Rc<dyn Fn() -> windows::core::Result<()>>>,
     document: Option<Rc<HostDocument>>,
+    /// What the callbacks serve; swapped by `rebind_document`.
+    document_slot: Rc<RefCell<Weak<HostDocument>>>,
+    /// The adapters registered for the current document.
+    script_ids: ScriptIds,
     page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
     accelerator_token: Option<i64>,
     accelerators: Rc<RefCell<VecDeque<ShellAccelerator>>>,
@@ -268,6 +325,8 @@ impl WebViewHost {
             callbacks: None,
             security_abort: None,
             document: None,
+            document_slot: Rc::new(RefCell::new(Weak::new())),
+            script_ids: Rc::new(RefCell::new(Vec::new())),
             page_messages: Rc::new(RefCell::new(VecDeque::new())),
             accelerator_token: None,
             accelerators: Rc::new(RefCell::new(VecDeque::new())),
@@ -449,10 +508,11 @@ impl WebViewHost {
         self.callbacks = Some(CallbackTokens::new(&core));
         self.security_abort = Some(Rc::clone(&security_abort));
         self.document = Some(Rc::clone(&document));
+        *self.document_slot.borrow_mut() = Rc::downgrade(&document);
         if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
             Rc::downgrade(&security_abort),
             self._environment.native_environment(),
-            &document,
+            &self.document_slot,
             Rc::downgrade(&self.page_messages),
             &self.callback_panics,
         ) {
@@ -461,10 +521,10 @@ impl WebViewHost {
             let _ = self.close();
             return Err(error);
         }
-        // The find adapter is registered before the pinned document's
+        // The adapters are registered before the pinned document's
         // navigation starts. A failure closes this controller, like any other
         // binding failure.
-        if let Err(error) = add_find_adapter(&core, &document.document_uri()) {
+        if let Err(error) = add_document_scripts(&core, &document, &self.script_ids) {
             let _ = self.close();
             return Err(error);
         }
@@ -478,6 +538,86 @@ impl WebViewHost {
             return Err(HostError::from_com(error));
         }
         Ok(())
+    }
+
+    /// Replaces the pinned document in place (.NET navigates the tab's own
+    /// WebView2): the controller, its renderer and its callbacks stay, so a
+    /// followed link costs one navigation, not a new controller. The old
+    /// page stays painted until the new one commits. The old adapters are
+    /// removed, the new document's adapters registered, queued page messages
+    /// of the old document dropped, and the load state reset; then the
+    /// controller navigates to the new document. Only a document for the
+    /// same tab is accepted. A failure leaves the controller to be closed by
+    /// the caller.
+    pub fn rebind_document(&mut self, document: HostDocument) -> Result<(), HostError> {
+        let current = self.document.as_ref().ok_or(HostError::Closed)?;
+        if document.tab_id() != current.tab_id() {
+            return Err(HostError::InvalidDocument);
+        }
+        document
+            .validate()
+            .map_err(|_| HostError::InvalidDocument)?;
+        let core = self.core.as_ref().ok_or(HostError::Closed)?.clone();
+        let callbacks = self.callbacks.as_ref().ok_or(HostError::Closed)?;
+        let document = Rc::new(document);
+        // Serve the new document before anything can navigate to it.
+        *self
+            .document_slot
+            .try_borrow_mut()
+            .map_err(|_| HostError::InvalidDocument)? = Rc::downgrade(&document);
+        self.document = Some(Rc::clone(&document));
+        callbacks.reset_for_new_document();
+        self.page_messages.borrow_mut().clear();
+        let old_ids: Vec<String> = self.script_ids.borrow_mut().drain(..).collect();
+        for id in old_ids {
+            let id: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            // SAFETY: synchronous call on the owning STA; WebView2 copies
+            // the id. A failure leaves an adapter that its origin and epoch
+            // checks keep inert or rejected.
+            let _ = unsafe {
+                core.RemoveScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(id.as_ptr()))
+            };
+        }
+        add_document_scripts(&core, &document, &self.script_ids)?;
+        let uri: Vec<u16> = document
+            .document_uri()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the URI remains live for this synchronous COM call. The
+        // resource handler now serves exactly the new document.
+        unsafe { core.Navigate(PCWSTR::from_raw(uri.as_ptr())) }.map_err(HostError::from_com)
+    }
+
+    /// User-initiated navigations away from the document that WebView2
+    /// started without the link adapter (and that were cancelled), as
+    /// absolute URIs, in order.
+    pub fn drain_navigation_requests(&self) -> Vec<String> {
+        self.callbacks
+            .as_ref()
+            .map(CallbackTokens::drain_navigation_requests)
+            .unwrap_or_default()
+    }
+
+    /// Restores a vertical scroll offset in the loaded document (back and
+    /// forward). Fire and forget, like [`Self::scroll_to_anchor`].
+    pub fn scroll_to_offset(&self, top: u32) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        if self.document.is_none() || !self.document_loaded() {
+            return Err(HostError::InvalidDocument);
+        }
+        let script: Vec<u16> = scroll_offset_script(top)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: as in `scroll_to_anchor`.
+        unsafe {
+            core.ExecuteScript(
+                PCWSTR::from_raw(script.as_ptr()),
+                None::<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ExecuteScriptCompletedHandler>,
+            )
+        }
+        .map_err(HostError::from_com)
     }
 
     pub fn document_identity(&self) -> Result<(u64, u64), HostError> {
@@ -623,6 +763,10 @@ impl WebViewHost {
         self.callbacks.take();
         self.security_abort.take();
         self.document.take();
+        if let Ok(mut slot) = self.document_slot.try_borrow_mut() {
+            *slot = Weak::new();
+        }
+        self.script_ids.borrow_mut().clear();
         self.page_messages.borrow_mut().clear();
         self.accelerators.borrow_mut().clear();
         Ok(())
@@ -653,6 +797,10 @@ impl WebViewHost {
         self.callbacks.take();
         self.security_abort.take();
         self.document.take();
+        if let Ok(mut slot) = self.document_slot.try_borrow_mut() {
+            *slot = Weak::new();
+        }
+        self.script_ids.borrow_mut().clear();
         self.page_messages.borrow_mut().clear();
         self.accelerators.borrow_mut().clear();
         Ok(())

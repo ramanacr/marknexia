@@ -35,6 +35,19 @@ use crate::{
     protocol::PageToHost,
 };
 
+/// The document a controller serves now. The host swaps it when the tab
+/// navigates in place; callbacks hold only a weak reference to it.
+pub(crate) type DocumentSlot = Rc<RefCell<Weak<HostDocument>>>;
+
+/// The current document from `slot`, or `None` while the slot is being
+/// swapped (callbacks then fail closed).
+fn current_document(slot: &DocumentSlot) -> Option<Rc<HostDocument>> {
+    slot.try_borrow().ok().and_then(|weak| weak.upgrade())
+}
+
+/// Most user-initiated navigations kept for the shell between two polls.
+const MAX_NAVIGATION_REQUESTS: usize = 16;
+
 pub(crate) struct CallbackTokens {
     core: ICoreWebView2,
     resource: Option<i64>,
@@ -48,6 +61,12 @@ pub(crate) struct CallbackTokens {
     /// The pinned document's navigation completed without success before
     /// it ever loaded.
     navigation_failed: Rc<Cell<bool>>,
+    /// The id of the permitted navigation to the pinned document; only its
+    /// completion counts as loaded or failed.
+    pinned_navigation: Rc<Cell<Option<u64>>>,
+    /// User-initiated navigations away from the document that were
+    /// cancelled (a link followed without the link adapter), in order.
+    navigation_requests: Rc<RefCell<VecDeque<String>>>,
     pending_deferrals: Rc<RefCell<Vec<ICoreWebView2Deferral>>>,
 }
 
@@ -64,6 +83,8 @@ impl CallbackTokens {
             resource_failed: Rc::new(Cell::new(false)),
             document_loaded: Rc::new(Cell::new(false)),
             navigation_failed: Rc::new(Cell::new(false)),
+            pinned_navigation: Rc::new(Cell::new(None)),
+            navigation_requests: Rc::new(RefCell::new(VecDeque::new())),
             pending_deferrals: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -72,7 +93,7 @@ impl CallbackTokens {
         &mut self,
         security_abort: Weak<dyn Fn() -> windows::core::Result<()>>,
         environment: &ICoreWebView2Environment,
-        document: &Rc<HostDocument>,
+        document: &DocumentSlot,
         messages: Weak<RefCell<VecDeque<PageToHost>>>,
         panics: &PanicFlag,
     ) -> Result<(), HostError> {
@@ -83,6 +104,9 @@ impl CallbackTokens {
             unsafe { settings.SetAreDefaultScriptDialogsEnabled(false) },
             unsafe { settings.SetAreDefaultContextMenusEnabled(false) },
             unsafe { settings.SetIsWebMessageEnabled(true) },
+            // The shell's status bar shows the resolved link target; the
+            // WebView2 bubble would show the internal virtual-origin URL.
+            unsafe { settings.SetIsStatusBarEnabled(false) },
         ] {
             operation.map_err(HostError::from_com)?;
         }
@@ -97,7 +121,7 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         self.filter = true;
 
-        let weak_document = Rc::downgrade(document);
+        let weak_document = Rc::clone(document);
         let response_environment = environment.clone();
         // Allocate a controller-owned fallback before the first navigation.
         // If allocation fails, registration fails and this controller must
@@ -154,11 +178,14 @@ impl CallbackTokens {
                             let assignment = install_response(
                                 gate,
                                 || {
-                                    response_decision(&args, weak_document.upgrade().as_deref())
-                                        .and_then(|response| {
-                                            create_response(&response_environment, response)
-                                        })
-                                        .and_then(|response| unsafe { args.SetResponse(&response) })
+                                    response_decision(
+                                        &args,
+                                        current_document(&weak_document).as_deref(),
+                                    )
+                                    .and_then(|response| {
+                                        create_response(&response_environment, response)
+                                    })
+                                    .and_then(|response| unsafe { args.SetResponse(&response) })
                                 },
                                 || unsafe { args.SetResponse(&deny_response) },
                             );
@@ -207,8 +234,10 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         self.resource = Some(token);
 
-        let weak_document = Rc::downgrade(document);
+        let weak_document = Rc::clone(document);
         let navigation_panics = panics.clone();
+        let pinned_navigation = Rc::clone(&self.pinned_navigation);
+        let navigation_requests = Rc::clone(&self.navigation_requests);
         let navigation_handler =
             NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else {
@@ -219,9 +248,27 @@ impl CallbackTokens {
                     let uri_result = unsafe { args.Uri(&mut uri) };
                     let uri = webview2_com::take_pwstr(uri);
                     uri_result.map(|()| {
-                        weak_document
-                            .upgrade()
-                            .is_some_and(|doc| doc.permits_navigation(&uri))
+                        let permitted = current_document(&weak_document)
+                            .is_some_and(|doc| doc.permits_navigation(&uri));
+                        let mut id = 0_u64;
+                        let known = unsafe { args.NavigationId(&mut id) }.is_ok();
+                        if permitted {
+                            pinned_navigation.set(known.then_some(id));
+                        } else {
+                            // A link the user followed without the link
+                            // adapter: the shell resolves it like a click.
+                            let mut user = windows::core::BOOL::default();
+                            let user_initiated = unsafe { args.IsUserInitiated(&mut user) }.is_ok()
+                                && user.as_bool();
+                            if user_initiated
+                                && uri.len() <= 8 * 1024
+                                && let Ok(mut requests) = navigation_requests.try_borrow_mut()
+                                && requests.len() < MAX_NAVIGATION_REQUESTS
+                            {
+                                requests.push_back(uri);
+                            }
+                        }
+                        permitted
                     })
                 });
                 // Only an explicit permit lets the navigation continue; a
@@ -244,7 +291,7 @@ impl CallbackTokens {
         // application code runs inside the COM callback.
         let document_loaded = Rc::clone(&self.document_loaded);
         let navigation_failed = Rc::clone(&self.navigation_failed);
-        let first_completion = Cell::new(true);
+        let pinned_navigation = Rc::clone(&self.pinned_navigation);
         let completed_panics = panics.clone();
         let completed_handler =
             NavigationCompletedEventHandler::create(Box::new(move |_, args| {
@@ -253,14 +300,18 @@ impl CallbackTokens {
                         if let Some(args) = args {
                             let mut success = windows::core::BOOL::default();
                             unsafe { args.IsSuccess(&mut success) }?;
-                            // Only the first completion is the pinned document's
-                            // own navigation; later failures are canceled
-                            // in-page navigations and do not count.
-                            let first = first_completion.replace(false);
-                            if success.as_bool() {
-                                document_loaded.set(true);
-                            } else if first {
-                                navigation_failed.set(true);
+                            let mut id = 0_u64;
+                            unsafe { args.NavigationId(&mut id) }?;
+                            // Only the pinned document's own navigation
+                            // counts; cancelled navigations away from it (and
+                            // a replaced document's late completion) do not.
+                            if pinned_navigation.get() == Some(id) {
+                                pinned_navigation.set(None);
+                                if success.as_bool() {
+                                    document_loaded.set(true);
+                                } else if !document_loaded.get() {
+                                    navigation_failed.set(true);
+                                }
                             }
                         }
                         Ok(())
@@ -274,7 +325,7 @@ impl CallbackTokens {
         .map_err(HostError::from_com)?;
         self.navigation_completed = Some(token);
 
-        let weak_document = Rc::downgrade(document);
+        let weak_document = Rc::clone(document);
         let message_panics = panics.clone();
         let message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
             // The whole body, including parsing the untrusted JSON, runs
@@ -282,7 +333,7 @@ impl CallbackTokens {
             // state; application code runs later in session.poll.
             message_panics
                 .call(|| {
-                    if let (Some(args), Some(document)) = (args, weak_document.upgrade()) {
+                    if let (Some(args), Some(document)) = (args, current_document(&weak_document)) {
                         let mut source = PWSTR::null();
                         let mut json = PWSTR::null();
                         let source_result = unsafe { args.Source(&mut source) };
@@ -388,6 +439,25 @@ impl CallbackTokens {
 
     pub(crate) fn document_loaded(&self) -> bool {
         self.document_loaded.get()
+    }
+
+    /// A new document replaces the pinned one in place: its navigation
+    /// starts unloaded, and earlier link requests no longer apply.
+    pub(crate) fn reset_for_new_document(&self) {
+        self.document_loaded.set(false);
+        self.navigation_failed.set(false);
+        self.pinned_navigation.set(None);
+        if let Ok(mut requests) = self.navigation_requests.try_borrow_mut() {
+            requests.clear();
+        }
+    }
+
+    /// User-initiated navigations cancelled since the last drain.
+    pub(crate) fn drain_navigation_requests(&self) -> Vec<String> {
+        self.navigation_requests
+            .try_borrow_mut()
+            .map(|mut requests| requests.drain(..).collect())
+            .unwrap_or_default()
     }
 }
 

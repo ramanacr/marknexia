@@ -78,6 +78,18 @@ impl TabStore {
         self.select_adjacent(true)
     }
 
+    /// A tab now shows another document (a followed link, back or forward):
+    /// its header follows (.NET `tabItem.Header = state.Title`).
+    pub fn rename(&mut self, id: TabId, title: impl Into<String>) -> bool {
+        match self.tabs.iter_mut().find(|tab| tab.id == id) {
+            Some(tab) => {
+                tab.title = title.into();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn close(&mut self, id: TabId) -> bool {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return false;

@@ -15,7 +15,10 @@
 //!   and post `WM_CHROME_ACTION`; the action runs from the message loop, as
 //!   the Open dialog does (`WM_OPEN_DIALOG`).
 
+mod links;
 mod updater;
+
+pub(super) use links::{page_messages as link_page_messages, timing_step as link_timing_step};
 
 use std::{
     cell::{Cell, RefCell},
@@ -291,6 +294,9 @@ enum ChromeAction {
     ShowSbom(Result<(String, Vec<String>), shell_ops::SbomFailure>),
     /// An update check or install finished (`updater`).
     Update(updater::UpdateResult),
+    /// A failed link render restored the tab's previous document: its
+    /// header follows.
+    TabTitle(u64),
     Sync,
 }
 
@@ -341,6 +347,15 @@ enum WorkerResult {
     Revealed(Result<(), String>),
     /// The data folder opened, or the error message.
     DataFolderOpened(Result<(), String>),
+    /// A followed link, resolved (`links`).
+    LinkResolved {
+        tab: u64,
+        epoch: u64,
+        generation: u64,
+        intent: marknexia_navigation::NavigationOutcome,
+    },
+    /// An external link was handed to the system, or the error message.
+    ExternalOpened(Result<(), String>),
 }
 
 // Chrome actions are queued outside `AppState`, so queueing never needs a
@@ -452,6 +467,13 @@ pub(super) struct ChromeState {
     recent_pending: BTreeSet<u64>,
     reloading: BTreeSet<u64>,
     pending_scroll: BTreeSet<u64>,
+    /// Tabs showing a followed link (or back / forward) whose render has not
+    /// finished, with the location to restore if it fails.
+    navigating: BTreeMap<u64, TabLocation>,
+    /// Scroll offsets to restore once the tab's new document loaded.
+    pending_top: BTreeMap<u64, u32>,
+    /// The newest link resolution; older results are dropped.
+    link_generation: u64,
     repository_root: Option<PathBuf>,
     /// The saved root, restored after startup when no document was given.
     saved_root: Option<PathBuf>,
@@ -506,6 +528,9 @@ impl ChromeState {
             recent_pending: BTreeSet::new(),
             reloading: BTreeSet::new(),
             pending_scroll: BTreeSet::new(),
+            navigating: BTreeMap::new(),
+            pending_top: BTreeMap::new(),
+            link_generation: 0,
             repository_root: None,
             saved_root: None,
             detecting_root: false,
@@ -967,6 +992,9 @@ pub(super) fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
+    if let Some(result) = links::handle_message(hwnd, message, wparam, lparam) {
+        return Some(result);
+    }
     match message {
         WM_COMMAND => on_command(hwnd, wparam, lparam),
         WM_NOTIFY => on_notify(hwnd, lparam),
@@ -1097,15 +1125,30 @@ pub(super) fn filter_render_outcome(
     let mut state = state.borrow_mut();
     let chrome = &mut state.chrome;
     let reloading = chrome.reloading.remove(&tab_id);
+    let navigated = chrome.navigating.remove(&tab_id);
     match &result {
         Ok(_) => {
             chrome.outline_generation = chrome.outline_generation.wrapping_add(1);
             chrome
                 .outlines
                 .insert(tab_id, (chrome.outline_generation, outline));
-            if reloading {
+            if reloading || navigated.is_some() {
                 // .NET `PendingScroll`: restore the location after the load.
                 chrome.pending_scroll.insert(tab_id);
+            }
+            if navigated.is_some() {
+                // .NET `OpenDocumentInTabCoreAsync`: the document joins the
+                // recent files, and sets the repository when none is open.
+                if let Some(path) = chrome
+                    .locations
+                    .get(&tab_id)
+                    .map(|location| location.path().to_path_buf())
+                {
+                    chrome.add_recent(&path);
+                    if chrome.repository_root.is_none() && !chrome.detecting_root {
+                        chrome.spawn_root_detection(path.to_string_lossy().into_owned());
+                    }
+                }
             }
             if chrome.recent_pending.remove(&tab_id)
                 && let Some(path) = chrome
@@ -1117,6 +1160,20 @@ pub(super) fn filter_render_outcome(
             }
             chrome.post(ChromeAction::Sync);
             Some(result)
+        }
+        Err(error) if navigated.is_some() => {
+            // .NET `ReplaceActiveDocumentAsync` restores the tab's previous
+            // document and reports "Unable to open document".
+            if let Some(previous) = navigated {
+                chrome.locations.insert(tab_id, previous);
+            }
+            chrome.pending_top.remove(&tab_id);
+            chrome.post(ChromeAction::TabTitle(tab_id));
+            chrome.diagnostic(
+                format!("Unable to open document: {error}"),
+                DiagnosticSeverity::Error,
+            );
+            None
         }
         Err(error) if reloading => {
             chrome.diagnostic(
@@ -1139,7 +1196,20 @@ pub(super) fn filter_render_outcome(
 
 /// Scrolls reloaded documents to their stored location once they loaded.
 pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
-    let pending: Vec<(u64, Option<String>)> = {
+    // Links followed without the link adapter (LNK-7).
+    if let Some(session) = take_session(state) {
+        let requests = session.drain_navigation_requests();
+        restore_session(state, session);
+        if !requests.is_empty()
+            && let Some(hwnd) = state
+                .try_borrow()
+                .ok()
+                .and_then(|state| state.chrome.window())
+        {
+            links::navigation_requests(hwnd, requests);
+        }
+    }
+    let pending: Vec<(u64, Option<String>, u32)> = {
         let Ok(state) = state.try_borrow() else {
             return;
         };
@@ -1158,6 +1228,7 @@ pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
                         .locations
                         .get(tab)
                         .and_then(|location| location.fragment().map(str::to_owned)),
+                    state.chrome.pending_top.get(tab).copied().unwrap_or(0),
                 )
             })
             .collect()
@@ -1166,15 +1237,22 @@ pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
         return;
     };
     let mut done = Vec::new();
-    for (tab, fragment) in pending {
+    for (tab, fragment, top) in pending {
         match session.host(tab) {
             Some(host) if host.document_loaded() => {
-                if fragment.is_some() {
+                links::timing_loaded(tab);
+                // .NET `ApplyPendingLocationAsync`; back and forward restore
+                // the scroll offset instead (LNK-3).
+                if top > 0 {
+                    let _ = host.scroll_to_offset(top);
+                } else if fragment.is_some() {
                     let _ = host.scroll_to_anchor(fragment.as_deref());
                 }
                 done.push(tab);
             }
             Some(_) => {}
+            // The controller is being created for the tab's document.
+            None if session.has_document(tab) => {}
             // The tab closed or lost its controller.
             None => done.push(tab),
         }
@@ -1183,6 +1261,7 @@ pub(super) fn after_poll(state: &Rc<RefCell<AppState>>) {
     let mut state = state.borrow_mut();
     for tab in done {
         state.chrome.pending_scroll.remove(&tab);
+        state.chrome.pending_top.remove(&tab);
     }
 }
 
@@ -1724,6 +1803,20 @@ fn run_action(hwnd: HWND, action: ChromeAction) {
         ChromeAction::ShowTroubleshooting(facts) => show_troubleshooting(hwnd, &facts),
         ChromeAction::ShowSbom(result) => show_sbom(hwnd, result),
         ChromeAction::Update(result) => updater::apply(hwnd, result),
+        ChromeAction::TabTitle(tab) => {
+            let path = state_of(hwnd).and_then(|state| {
+                state.try_borrow().ok().and_then(|state| {
+                    state
+                        .chrome
+                        .locations
+                        .get(&tab)
+                        .map(|location| location.path().to_path_buf())
+                })
+            });
+            if let (Some(state), Some(path)) = (state_of(hwnd), path) {
+                links::rename_tab(&state, tab, &path);
+            }
+        }
         ChromeAction::Sync => sync_ui(hwnd),
     }
 }
@@ -2165,33 +2258,9 @@ fn reload_active(hwnd: HWND) {
 }
 
 /// Back or forward within the tab's history (.NET `Back_Click`,
-/// `Forward_Click`). History entries come from outline jumps in the same
-/// document, so the entry is shown by scrolling (CHROME-4).
+/// `Forward_Click`), across documents (`links`).
 fn history_step(hwnd: HWND, back: bool) {
-    let Some(state) = state_of(hwnd) else {
-        return;
-    };
-    let Some(active) = active_tab(&state) else {
-        return;
-    };
-    let entry = {
-        let mut state = state.borrow_mut();
-        state
-            .chrome
-            .locations
-            .get_mut(&active)
-            .and_then(|location| {
-                if back {
-                    location.go_back()
-                } else {
-                    location.go_forward()
-                }
-            })
-    };
-    if let Some(entry) = entry {
-        scroll_tab(&state, active, entry.fragment.as_deref());
-    }
-    sync_ui(hwnd);
+    links::history_step(hwnd, back);
 }
 
 fn scroll_tab(state: &Rc<RefCell<AppState>>, tab: u64, fragment: Option<&str>) {
@@ -2645,6 +2714,15 @@ pub(super) fn apply_worker_results(hwnd: HWND) {
                 updater::deliver(result);
                 continue;
             }
+            WorkerResult::LinkResolved {
+                tab,
+                epoch,
+                generation,
+                intent,
+            } => {
+                links::finish_link(hwnd, tab, epoch, generation, &intent);
+                continue;
+            }
             result => apply_worker_result(&mut state.borrow_mut().chrome, result),
         }
     }
@@ -2708,6 +2786,7 @@ fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
         WorkerResult::DataFolderOpened(Err(_)) => {
             chrome.diagnostic(TROUBLESHOOTING_FAILED, DiagnosticSeverity::Warning);
         }
+        WorkerResult::ExternalOpened(Err(error)) => links::external_failed(chrome, &error),
         WorkerResult::Tree { .. }
         | WorkerResult::Recent { .. }
         | WorkerResult::OpenChecked { .. }
@@ -2716,7 +2795,9 @@ fn apply_worker_result(chrome: &mut ChromeState, result: WorkerResult) {
         | WorkerResult::Sbom(_)
         | WorkerResult::Update(_)
         | WorkerResult::Revealed(Ok(()))
-        | WorkerResult::DataFolderOpened(Ok(())) => {}
+        | WorkerResult::DataFolderOpened(Ok(()))
+        | WorkerResult::LinkResolved { .. }
+        | WorkerResult::ExternalOpened(Ok(())) => {}
     }
 }
 
@@ -2854,6 +2935,8 @@ fn sync_ui(hwnd: HWND) {
         chrome.outlines.retain(|tab, _| open_tabs.contains(tab));
         chrome.reloading.retain(|tab| open_tabs.contains(tab));
         chrome.pending_scroll.retain(|tab| open_tabs.contains(tab));
+        chrome.navigating.retain(|tab, _| open_tabs.contains(tab));
+        chrome.pending_top.retain(|tab, _| open_tabs.contains(tab));
         let outline_key = active.map(|tab| {
             (
                 tab,

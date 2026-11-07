@@ -128,6 +128,15 @@ Invoke-Gate 'uia-native-runtime' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_runtime -- --ignored --test-threads=1 --nocapture
 } -Attempts 1
+# Link navigation in a two-file wiki repository: relative links followed by
+# UIA Invoke on the page's hyperlinks, anchors, Back and the mouse back
+# button (WM_APPCOMMAND), the hovered-link status text, the .NET messages for
+# missing and escaping links, and click-to-first-render timings. The Enter
+# test sends one key only while the launched shell owns the foreground.
+Invoke-Gate 'uia-native-links' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_links -- --ignored --test-threads=1 --nocapture
+} -Attempts 1
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
 }

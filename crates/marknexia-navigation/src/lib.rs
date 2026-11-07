@@ -5,6 +5,33 @@ pub mod history;
 
 pub use marknexia_files::virtual_fs::VirtualFileSystem;
 
+/// The file-existence probe the resolver asks, in the .NET probe order
+/// (`compat/decisions/navigation-probe-order.md`). Each call must add one
+/// to `probes`. The fixture model is [`VirtualFileSystem`]; the shell's
+/// native probe asks the file system off the UI thread.
+pub trait FileProbe {
+    fn file_exists(&self, path: &str, probes: &mut u64) -> bool;
+}
+
+impl FileProbe for VirtualFileSystem {
+    fn file_exists(&self, path: &str, probes: &mut u64) -> bool {
+        VirtualFileSystem::file_exists(self, path, probes)
+    }
+}
+
+/// A probe that never touches the file system and reports every target as
+/// present: the resolved target of a link, for display only (the status
+/// text while a link is hovered). Never use it to open anything.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AssumeExists;
+
+impl FileProbe for AssumeExists {
+    fn file_exists(&self, _path: &str, probes: &mut u64) -> bool {
+        *probes += 1;
+        true
+    }
+}
+
 use marknexia_files::path::{CanonicalPath, PathError, RepositoryScope};
 use serde::Serialize;
 use serde_json::Value;
@@ -317,7 +344,7 @@ fn complete_local_target(
     fragment: Option<String>,
     scope: Option<&RepositoryScope>,
     context: &ResolutionContext,
-    vfs: &VirtualFileSystem,
+    vfs: &(impl FileProbe + ?Sized),
     outside_message: &'static str,
     not_found_prefix: &'static str,
 ) -> ResolutionResult {
@@ -372,7 +399,7 @@ fn resolve_relative_to_current(
     fragment: Option<String>,
     scope: &RepositoryScope,
     context: &ResolutionContext,
-    vfs: &VirtualFileSystem,
+    vfs: &(impl FileProbe + ?Sized),
 ) -> ResolutionResult {
     let from_directory = current.parent().and_then(|parent| parent.join(decoded));
     if context.enforce_repository_sandbox
@@ -409,7 +436,7 @@ fn resolve_relative_to_current(
 fn complete_virtual_target(
     target: String,
     fragment: Option<String>,
-    vfs: &VirtualFileSystem,
+    vfs: &(impl FileProbe + ?Sized),
 ) -> ResolutionResult {
     let mut probes = 0;
     let exists = vfs.file_exists(&target, &mut probes);
@@ -487,7 +514,7 @@ fn normalize_external_uri(destination: &str) -> Option<String> {
 pub fn resolve(
     destination: Option<&str>,
     context: &ResolutionContext,
-    vfs: &VirtualFileSystem,
+    vfs: &(impl FileProbe + ?Sized),
 ) -> ResolutionResult {
     let destination = destination.unwrap_or_default().trim();
     if destination.is_empty() {

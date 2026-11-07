@@ -1128,6 +1128,7 @@ pub(super) fn after_poll(hwnd: HWND) {
         queue.borrow_mut().drain(..).collect()
     };
     let visible = find_bar_visible(&state);
+    let mut link_messages = Vec::new();
     for message in messages {
         let text = match message {
             PageToHost::FindResult {
@@ -1153,12 +1154,22 @@ pub(super) fn after_poll(hwnd: HWND) {
                 tab_id,
                 marknexia_core::search_state::SearchRequestId(request_id),
             ),
-            // Links, copy and focus are not wired yet.
+            message @ (PageToHost::OpenLink { .. }
+            | PageToHost::LinkHover { .. }
+            | PageToHost::ScrollChanged { .. }
+            | PageToHost::HistoryStep { .. }) => {
+                link_messages.push(message);
+                None
+            }
+            // Copy and focus are not wired yet.
             _ => None,
         };
         if let Some(text) = text {
             controls.set_count(&text);
         }
+    }
+    if !link_messages.is_empty() {
+        super::chrome::link_page_messages(hwnd, link_messages);
     }
     // Newly loaded documents. The session is taken only to read state.
     let tabs: Vec<u64> = {

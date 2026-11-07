@@ -182,6 +182,8 @@ impl ShellProcess {
             .env("MARKNEXIA_SBOM_PATH", profile.join("sbom.spdx.json"))
             // Each Reveal in File Explorer hand-off is recorded here.
             .env("MARKNEXIA_REVEAL_LOG", profile.join("reveal.log"))
+            // Each followed link's timeline is recorded here.
+            .env("MARKNEXIA_LINK_TIMING_LOG", profile.join("link-timing.log"))
             .env("MARKNEXIA_INSTANCE_KEY", instance_key);
         match browser_folder {
             Some(folder) => {
@@ -213,6 +215,10 @@ impl ShellProcess {
     /// The File Explorer hand-off record (`MARKNEXIA_REVEAL_LOG`).
     pub fn reveal_log_path(&self) -> PathBuf {
         self.profile.join("reveal.log")
+    }
+    /// The link navigation timelines (`MARKNEXIA_LINK_TIMING_LOG`).
+    pub fn link_timing_log_path(&self) -> PathBuf {
+        self.profile.join("link-timing.log")
     }
 }
 

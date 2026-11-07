@@ -551,6 +551,9 @@ fn same_fragment(left: Option<&str>, right: Option<&str>) -> bool {
 pub struct TabLocation {
     path: PathBuf,
     fragment: Option<String>,
+    /// The document's last reported vertical scroll offset (CSS pixels).
+    /// History entries keep it, so back and forward restore it (LNK-3).
+    scroll_top: u32,
     history: NavigationHistory,
 }
 
@@ -560,6 +563,7 @@ impl TabLocation {
         Self {
             path,
             fragment: None,
+            scroll_top: 0,
             history: NavigationHistory::new(),
         }
     }
@@ -584,8 +588,42 @@ impl TabLocation {
         self.history.can_go_forward()
     }
 
+    /// The last reported scroll offset of the shown document.
+    #[must_use]
+    pub fn scroll_top(&self) -> u32 {
+        self.scroll_top
+    }
+
+    /// The page reported a new scroll offset.
+    pub fn set_scroll_top(&mut self, top: u32) {
+        self.scroll_top = top;
+    }
+
     fn entry(&self) -> HistoryEntry {
-        HistoryEntry::new(&self.path.to_string_lossy(), self.fragment.as_deref(), 0)
+        HistoryEntry::new(
+            &self.path.to_string_lossy(),
+            self.fragment.as_deref(),
+            self.scroll_top,
+        )
+    }
+
+    /// A followed link replaces the tab's document (.NET
+    /// `ReplaceActiveDocumentAsync`): the current location, with its scroll
+    /// offset, is pushed (which clears forward), and `path` at `fragment`
+    /// becomes current, at the top.
+    pub fn navigate_document(&mut self, path: PathBuf, fragment: Option<&str>) {
+        let previous = self.entry();
+        self.history.push(previous);
+        self.path = path;
+        self.fragment = fragment.map(str::to_owned);
+        self.scroll_top = 0;
+    }
+
+    /// Applies a history entry as the current location.
+    fn show(&mut self, entry: &HistoryEntry) {
+        self.path = PathBuf::from(&entry.document_path);
+        self.fragment.clone_from(&entry.fragment);
+        self.scroll_top = history_offset(entry.scroll_top);
     }
 
     /// An outline jump in the open document. Returns whether the location
@@ -612,7 +650,7 @@ impl TabLocation {
     pub fn go_back(&mut self) -> Option<HistoryEntry> {
         let current = self.entry();
         let previous = self.history.go_back(current)?;
-        self.fragment.clone_from(&previous.fragment);
+        self.show(&previous);
         Some(previous)
     }
 
@@ -620,8 +658,18 @@ impl TabLocation {
     pub fn go_forward(&mut self) -> Option<HistoryEntry> {
         let current = self.entry();
         let next = self.history.go_forward(current)?;
-        self.fragment.clone_from(&next.fragment);
+        self.show(&next);
         Some(next)
+    }
+}
+
+/// A history entry's scroll offset as whole CSS pixels.
+#[must_use]
+pub fn history_offset(scroll_top: f64) -> u32 {
+    if scroll_top.is_finite() && scroll_top > 0.0 {
+        scroll_top.min(f64::from(u32::MAX)) as u32
+    } else {
+        0
     }
 }
 
@@ -708,3 +756,165 @@ pub fn repository_header(incomplete: bool) -> &'static str {
 /// The diagnostics text for a tree shortened by scan limits.
 pub const REPOSITORY_INCOMPLETE_NOTICE: &str =
     "The repository tree is incomplete: the folder is larger than the scan limits.";
+
+// ---------------------------------------------------------------------------
+// Link navigation (.NET `HandleLinkClick`). Decision record:
+// `compat/decisions/link-navigation.md`.
+// ---------------------------------------------------------------------------
+
+/// .NET `HandleLinkClick` fallbacks when the resolver gives no diagnostic.
+pub const BROKEN_LINK_NOTICE: &str = "Broken link or missing target file.";
+pub const BLOCKED_LINK_NOTICE: &str = "Blocked unsafe link destination.";
+
+/// What the shell does for a resolved link (.NET `HandleLinkClick`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkAction {
+    /// `SameDocumentAnchor`: scroll the open document to the anchor and
+    /// record the previous location.
+    ScrollToAnchor(String),
+    /// `CrossDocument` and `CrossDocumentWithAnchor`: show `path` in the
+    /// same tab (.NET `reuseActiveTab: true`), then scroll to `fragment`.
+    OpenDocument {
+        path: PathBuf,
+        fragment: Option<String>,
+    },
+    /// `ExternalBrowser` with an `http`, `https` or `mailto` URI: hand it to
+    /// the system (`ShellExecuteExW`, .NET `Launcher.LaunchUriAsync`).
+    OpenExternal(String),
+    /// `BrokenTarget` (warning) and `BlockedOrInvalid` (error).
+    Diagnostic(DiagnosticMessage),
+    /// An anchor-only link without an anchor (`#`): nothing happens.
+    Nothing,
+}
+
+/// The schemes handed to the system. .NET also launches `ftp:` and `tel:`
+/// (LNK-5).
+#[must_use]
+pub fn external_scheme_allowed(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
+/// The resolver's target without its `#fragment`, as a Windows path.
+#[must_use]
+pub fn link_target_path(target_document: &str, fragment: Option<&str>) -> PathBuf {
+    let path = match fragment {
+        Some(fragment) => target_document
+            .strip_suffix(fragment)
+            .and_then(|rest| rest.strip_suffix('#'))
+            .unwrap_or(target_document),
+        None => target_document,
+    };
+    PathBuf::from(path.replace('/', "\\"))
+}
+
+/// The shell action for a resolver outcome, as .NET `HandleLinkClick`
+/// switches on `NavigationIntent.Kind`.
+#[must_use]
+pub fn link_action(intent: &marknexia_navigation::NavigationOutcome) -> LinkAction {
+    let fragment = intent
+        .fragment
+        .clone()
+        .filter(|fragment| !fragment.is_empty());
+    match intent.kind.as_str() {
+        "SameDocumentAnchor" => fragment.map_or(LinkAction::Nothing, LinkAction::ScrollToAnchor),
+        "CrossDocument" | "CrossDocumentWithAnchor" => match intent.target_document.as_deref() {
+            Some(target) => LinkAction::OpenDocument {
+                path: link_target_path(target, intent.fragment.as_deref()),
+                fragment,
+            },
+            None => LinkAction::Nothing,
+        },
+        "ExternalBrowser" => match intent.external_uri.as_deref() {
+            Some(uri) if external_scheme_allowed(uri) => LinkAction::OpenExternal(uri.to_owned()),
+            Some(_) => LinkAction::Diagnostic(DiagnosticMessage::new(
+                BLOCKED_LINK_NOTICE,
+                DiagnosticSeverity::Error,
+            )),
+            None => LinkAction::Nothing,
+        },
+        "BrokenTarget" => LinkAction::Diagnostic(DiagnosticMessage::new(
+            intent.diagnostic.as_deref().unwrap_or(BROKEN_LINK_NOTICE),
+            DiagnosticSeverity::Warning,
+        )),
+        _ => LinkAction::Diagnostic(DiagnosticMessage::new(
+            intent.diagnostic.as_deref().unwrap_or(BLOCKED_LINK_NOTICE),
+            DiagnosticSeverity::Error,
+        )),
+    }
+}
+
+/// The status-bar text while a link is hovered or focused, as a browser
+/// shows the target URL: the resolved document (relative to the repository
+/// when inside it) with its anchor, the external URI, or why the link is
+/// blocked. Lexical only: no file is probed, so it runs on the UI thread.
+#[must_use]
+pub fn link_status_text(
+    href: &str,
+    current_file: &Path,
+    repository_root: Option<&Path>,
+    allow_external_links: bool,
+    enforce_repository_sandbox: bool,
+) -> String {
+    let context = marknexia_navigation::ResolutionContext {
+        current_file: current_file.to_string_lossy().into_owned(),
+        repository_root: repository_root.map(|root| root.to_string_lossy().into_owned()),
+        allow_external_links,
+        enforce_repository_sandbox,
+    };
+    let intent =
+        marknexia_navigation::resolve(Some(href), &context, &marknexia_navigation::AssumeExists)
+            .intent;
+    let anchor = |fragment: Option<&str>| fragment.map_or(String::new(), |f| format!("#{f}"));
+    match link_action(&intent) {
+        LinkAction::ScrollToAnchor(fragment) => {
+            format!("{}#{fragment}", crate::documents::tab_title(current_file))
+        }
+        LinkAction::OpenDocument { path, fragment } => {
+            let shown = repository_root
+                .and_then(|root| relative_to(&path, root))
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            format!("{shown}{}", anchor(fragment.as_deref()))
+        }
+        LinkAction::OpenExternal(uri) => uri,
+        LinkAction::Diagnostic(message) => message.message,
+        LinkAction::Nothing => String::new(),
+    }
+}
+
+/// `path` relative to `root` with `/` separators, when inside it (ASCII
+/// case-insensitive, like the sandbox).
+fn relative_to(path: &Path, root: &Path) -> Option<String> {
+    let path = path.to_string_lossy().replace('/', "\\");
+    let root = root.to_string_lossy().replace('/', "\\");
+    let root = root.trim_end_matches('\\');
+    let head = path.get(..root.len())?;
+    let rest = path.get(root.len()..)?.strip_prefix('\\')?;
+    head.eq_ignore_ascii_case(root)
+        .then(|| rest.replace('\\', "/"))
+        .filter(|rest| !rest.is_empty())
+}
+
+/// The link a navigation that bypassed the link adapter asked for, from its
+/// absolute URI (LNK-7). The page's `<base href>` is the virtual origin's
+/// root, so a URI on the document's origin is read as relative to the
+/// current document; any other URI is followed as it is (external links).
+#[must_use]
+pub fn fallback_link_href(document_origin: &str, uri: &str) -> String {
+    match uri
+        .strip_prefix(document_origin)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        Some(rest) if rest.is_empty() || rest.starts_with('#') => {
+            if rest.is_empty() {
+                "#".to_owned()
+            } else {
+                rest.to_owned()
+            }
+        }
+        Some(rest) => format!("./{rest}"),
+        None => uri.to_owned(),
+    }
+}

@@ -171,6 +171,33 @@ pub(super) fn open_folder(folder: &Path) -> Result<(), String> {
     })
 }
 
+/// Hands an approved external link to its system handler (.NET
+/// `Launcher.LaunchUriAsync`): only `http:`, `https:` and `mailto:` URIs,
+/// with the "open" verb and no class override, so a URI can never name a
+/// local program. Runs on a worker thread.
+pub(super) fn open_external(uri: &str) -> Result<(), String> {
+    if !crate::chrome_model::external_scheme_allowed(uri)
+        || uri
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("The link destination is not supported.".to_owned());
+    }
+    with_apartment(|| {
+        let file = HSTRING::from(uri);
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+            lpVerb: w!("open"),
+            lpFile: PCWSTR(file.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        // SAFETY: every string outlives the call.
+        unsafe { ShellExecuteExW(&mut info) }.map_err(|error| error.message())
+    })
+}
+
 /// Runs `work` inside a single-threaded apartment on this worker thread.
 fn with_apartment(work: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     // SAFETY: balanced with CoUninitialize below on success.

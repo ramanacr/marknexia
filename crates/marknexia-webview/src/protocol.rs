@@ -219,6 +219,31 @@ pub enum PageToHost {
         tab_id: u64,
         request_id: u64,
     },
+    /// The link adapter: the pointer or the keyboard focus is on a link
+    /// (its raw `href` attribute), or on no link (`None`). The shell shows
+    /// the resolved target in its status bar, as a browser does.
+    LinkHover {
+        protocol: u16,
+        document_epoch: u64,
+        tab_id: u64,
+        href: Option<String>,
+    },
+    /// The link adapter: the document's vertical scroll offset in CSS
+    /// pixels, reported after scrolling settles. Back and forward restore it.
+    ScrollChanged {
+        protocol: u16,
+        document_epoch: u64,
+        tab_id: u64,
+        top: u32,
+    },
+    /// The link adapter: the mouse back (`back: true`) or forward button
+    /// was released over the document.
+    HistoryStep {
+        protocol: u16,
+        document_epoch: u64,
+        tab_id: u64,
+        back: bool,
+    },
 }
 
 impl PageToHost {
@@ -258,6 +283,24 @@ impl PageToHost {
                 document_epoch,
                 tab_id,
                 ..
+            }
+            | Self::LinkHover {
+                protocol,
+                document_epoch,
+                tab_id,
+                ..
+            }
+            | Self::ScrollChanged {
+                protocol,
+                document_epoch,
+                tab_id,
+                ..
+            }
+            | Self::HistoryStep {
+                protocol,
+                document_epoch,
+                tab_id,
+                ..
             } => (*protocol, *tab_id, *document_epoch),
         }
     }
@@ -266,7 +309,12 @@ impl PageToHost {
     /// consistent position (the `DocumentSearchState` rules) within bounds.
     fn validate_payload(&self) -> Result<(), MessageError> {
         let valid = match self {
-            Self::OpenLink { href, .. } => BoundedUrl::try_new(href.clone()).is_ok(),
+            Self::OpenLink { href, .. } => {
+                !href.trim().is_empty() && BoundedUrl::try_new(href.clone()).is_ok()
+            }
+            Self::LinkHover { href, .. } => href
+                .as_ref()
+                .is_none_or(|href| BoundedUrl::try_new(href.clone()).is_ok()),
             Self::FindResult {
                 request_id,
                 query,
@@ -282,7 +330,11 @@ impl PageToHost {
                     && (!query.is_empty() || *match_count == 0)
             }
             Self::FindUnavailable { request_id, .. } => *request_id > 0,
-            Self::Ready { .. } | Self::CopyText { .. } | Self::FocusChanged { .. } => true,
+            Self::Ready { .. }
+            | Self::CopyText { .. }
+            | Self::FocusChanged { .. }
+            | Self::ScrollChanged { .. }
+            | Self::HistoryStep { .. } => true,
         };
         if valid {
             Ok(())

@@ -364,3 +364,103 @@ fn refuses_to_serialize_oversized_or_unnumbered_find_requests() {
         Err(MessageError::InvalidPayload)
     );
 }
+
+// The link adapter's messages (`link_adapter.js`).
+
+#[test]
+fn accepts_the_link_adapters_typed_messages() {
+    let open = br##"{"type":"openLink","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":"00-overview/product-overview.md#goals"}}"##;
+    assert_eq!(
+        parse_page_message(open, SOURCE, &context()),
+        Ok(PageToHost::OpenLink {
+            protocol: 1,
+            tab_id: 7,
+            document_epoch: 42,
+            href: "00-overview/product-overview.md#goals".to_owned(),
+        })
+    );
+    let hover = br##"{"type":"linkHover","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":"#intro"}}"##;
+    assert!(matches!(
+        parse_page_message(hover, SOURCE, &context()),
+        Ok(PageToHost::LinkHover { href: Some(href), .. }) if href == "#intro"
+    ));
+    let leave = br#"{"type":"linkHover","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":null}}"#;
+    assert!(matches!(
+        parse_page_message(leave, SOURCE, &context()),
+        Ok(PageToHost::LinkHover { href: None, .. })
+    ));
+    let scroll = br#"{"type":"scrollChanged","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"top":1280}}"#;
+    assert!(matches!(
+        parse_page_message(scroll, SOURCE, &context()),
+        Ok(PageToHost::ScrollChanged { top: 1280, .. })
+    ));
+    let step = br#"{"type":"historyStep","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"back":true}}"#;
+    assert!(matches!(
+        parse_page_message(step, SOURCE, &context()),
+        Ok(PageToHost::HistoryStep { back: true, .. })
+    ));
+}
+
+#[test]
+fn rejects_malformed_or_foreign_link_messages() {
+    for (json, error) in [
+        // The frozen .NET bridge's flat message.
+        (
+            br#"{"type":"openLink","href":"a.md"}"#.as_slice(),
+            MessageError::InvalidPayload,
+        ),
+        // A blank destination (.NET returns before resolving it).
+        (
+            br#"{"type":"openLink","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":"  "}}"#,
+            MessageError::InvalidPayload,
+        ),
+        // Unknown fields, wrong types, negative offsets.
+        (
+            br#"{"type":"openLink","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":"a.md","newTab":true}}"#,
+            MessageError::InvalidPayload,
+        ),
+        (
+            br#"{"type":"openLink","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"href":5}}"#,
+            MessageError::InvalidPayload,
+        ),
+        (
+            br#"{"type":"scrollChanged","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"top":-1}}"#,
+            MessageError::InvalidPayload,
+        ),
+        (
+            br#"{"type":"historyStep","payload":{"protocol":1,"tabId":7,"documentEpoch":42,"back":"yes"}}"#,
+            MessageError::InvalidPayload,
+        ),
+        // Another tab's or an older document's link.
+        (
+            br#"{"type":"openLink","payload":{"protocol":1,"tabId":8,"documentEpoch":42,"href":"a.md"}}"#,
+            MessageError::CrossTab,
+        ),
+        (
+            br#"{"type":"openLink","payload":{"protocol":1,"tabId":7,"documentEpoch":41,"href":"a.md"}}"#,
+            MessageError::StaleEpoch,
+        ),
+        (
+            br#"{"type":"openLink","payload":{"protocol":2,"tabId":7,"documentEpoch":42,"href":"a.md"}}"#,
+            MessageError::WrongProtocol,
+        ),
+    ] {
+        assert_eq!(
+            parse_page_message(json, SOURCE, &context()),
+            Err(error),
+            "{}",
+            String::from_utf8_lossy(json)
+        );
+    }
+    let long = "a".repeat(8 * 1024 + 1);
+    for kind in ["openLink", "linkHover"] {
+        let json = format!(
+            r#"{{"type":"{kind}","payload":{{"protocol":1,"tabId":7,"documentEpoch":42,"href":"{long}"}}}}"#
+        );
+        assert_eq!(
+            parse_page_message(json.as_bytes(), SOURCE, &context()),
+            Err(MessageError::InvalidPayload),
+            "{kind}"
+        );
+    }
+}
