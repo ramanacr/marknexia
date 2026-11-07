@@ -2891,9 +2891,14 @@ fn sync_ui(hwnd: HWND) {
     let Some(state) = state_of(hwnd) else {
         return;
     };
-    let Some(active) = state.try_borrow().ok().map(|_| active_tab(&state)) else {
+    // Reached re-entrantly (a message pumped while a caller holds the shell
+    // state or the portable state mutably), the sync runs again from the
+    // queue instead of panicking on the busy borrow.
+    if !crate::reentry::is_free_nested(&state, |state| &*state.portable) {
+        queue_action(ChromeAction::Sync);
         return;
-    };
+    }
+    let active = active_tab(&state);
     let portable = Rc::clone(&state.borrow().portable);
     let theme = portable.borrow().theme();
     struct Snapshot {
