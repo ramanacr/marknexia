@@ -388,6 +388,9 @@ fn a_second_launch_hands_its_file_to_the_running_instance() {
         (shell.tab_names().last().map(String::as_str) == Some("first.md")).then_some(())
     });
     assert_eq!(shell.selected_name().as_deref(), Some("first.md"));
+    // The first document takes over the start-page tab (.NET hides its
+    // welcome panel; CHROME-27), so "Welcome" does not stay beside it.
+    assert_eq!(shell.tab_names(), ["first.md"]);
 
     // A relative argument resolves against the second launch's directory.
     assert!(second_launch(&key, &["second.md".as_ref()], &fixtures.0));
@@ -404,7 +407,7 @@ fn a_second_launch_hands_its_file_to_the_running_instance() {
     wait_for("first.md selected again", || {
         (shell.selected_name().as_deref() == Some("first.md")).then_some(())
     });
-    assert_eq!(shell.tabs().len(), 3);
+    assert_eq!(shell.tabs().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
