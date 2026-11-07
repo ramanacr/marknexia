@@ -110,3 +110,11 @@ asset: bridge.js
 find: "    updateDiagramZoomUi(diagram);\n  }, { passive: false });\n"
 replace: "    updateDiagramZoomUi(diagram);\n    // The re-layout can move the canvas (the viewport's scroll position is\n    // clamped when the content shrinks): correct the pan by what it moved.\n    const moved = canvas.getBoundingClientRect();\n    const errorX = event.clientX - anchorX * ratio - moved.left;\n    const errorY = event.clientY - anchorY * ratio - moved.top;\n    if (Math.abs(errorX) >= 0.5 || Math.abs(errorY) >= 0.5) {\n      state.panX += errorX;\n      state.panY += errorY;\n      updateDiagramZoomUi(diagram);\n    }\n  }, { passive: false });\n"
 -->
+
+VZ-7 (owner report 2026-11-07): the per-diagram zoom status box (`.marknexia-diagram-zoom-status`) is a sibling of the positioned viewport, so its `position: absolute; right; bottom` anchored it to the page's initial containing block: a stray "100%" box floated near the bottom-right of the first screen and scrolled with the document (the same in .NET). It is now visually hidden but still announced (`aria-live`); the toolbar's reset button already shows the zoom percentage.
+
+<!-- parity-asset-patch
+asset: github-markdown.css
+find: "  right: 12px;\n  bottom: 8px;\n  padding: 2px 6px;\n  border: 1px solid var(--color-border-muted);\n  border-radius: 4px;\n  color: var(--color-fg-muted);\n  background-color: var(--color-canvas-subtle);\n  font-size: 11px;\n  pointer-events: none;\n"
+replace: "  /* Announced to screen readers only: the toolbar's reset button already\n     shows the zoom, and this box was anchored to the page, not the diagram,\n     so it floated over the document and scrolled with it. */\n  width: 1px;\n  height: 1px;\n  margin: -1px;\n  padding: 0;\n  overflow: hidden;\n  clip: rect(0 0 0 0);\n  white-space: nowrap;\n  border: 0;\n  pointer-events: none;\n"
+-->
