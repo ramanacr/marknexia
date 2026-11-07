@@ -351,6 +351,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "marknexia-setup"
+version = "0.1.0"
+dependencies = [
+ "marknexia-core",
+ "marknexia-update",
+ "serde_json",
+ "sha2",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "marknexia-update"
 version = "0.1.0"
 dependencies = [

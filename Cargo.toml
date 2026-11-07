@@ -9,6 +9,7 @@ members = [
     "crates/marknexia-webview",
     "crates/marknexia-update",
     "crates/marknexia-win32",
+    "crates/marknexia-setup",
 ]
 resolver = "3"
 
