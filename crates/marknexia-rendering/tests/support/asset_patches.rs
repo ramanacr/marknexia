@@ -14,9 +14,10 @@ use std::{fs, path::PathBuf};
 pub(crate) const PROPOSED_STATUS: &str = "proposed — requires Task 8 approval";
 /// Status of a record the owner approved at gate G0 (2026-11-06).
 pub(crate) const APPROVED_STATUS: &str = "approved — owner decision 2026-11-06 (G0)";
-/// The only statuses under which a parity allowance is accepted.
-/// Records approved after G0 by the owner's 2026-11-07 decision.
+/// Status of a record approved after G0 by the owner's 2026-11-07 decision.
 pub(crate) const APPROVED_LATER_STATUS: &str = "approved — owner decision 2026-11-07";
+/// The only statuses under which a parity allowance or asset patch is
+/// accepted.
 pub(crate) const ALLOWANCE_STATUSES: [&str; 3] =
     [APPROVED_STATUS, APPROVED_LATER_STATUS, PROPOSED_STATUS];
 pub(crate) const ASSET_PATCH_OPEN: &str = "<!-- parity-asset-patch";
@@ -72,7 +73,7 @@ pub(crate) fn require_status(decision: &str, text: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
+            "{decision}: parity allowances require the line `Status: **{APPROVED_STATUS}**`, `Status: **{APPROVED_LATER_STATUS}**` or `Status: **{PROPOSED_STATUS}**`"
         ))
     }
 }

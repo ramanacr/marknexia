@@ -21,6 +21,9 @@ window.marknexiaBridge = {
       } else {
         srcEl.style.display = 'none';
         viewEl.style.display = 'block';
+        // A zoom changed while the source was shown is laid out now.
+        const diagram = document.getElementById(diagramId);
+        if (diagram && diagram._marknexiaZoomState) updateDiagramZoomUi(diagram);
       }
     }
   },
@@ -264,6 +267,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Render Mermaid diagrams offline safely
   document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);
+  // A zoomed canvas is fixed at its 100% width: lay it out again for the
+  // new viewport width after the window is resized.
+  let diagramResizeTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(diagramResizeTimer);
+    diagramResizeTimer = setTimeout(() => {
+      document.querySelectorAll('.marknexia-mermaid').forEach(diagram => {
+        if (diagramState(diagram).zoom !== 1) updateDiagramZoomUi(diagram, true);
+      });
+    }, 150);
+  });
   if (typeof mermaid !== 'undefined') {
     try {
       const requestedTheme = document.documentElement.getAttribute('data-theme');
@@ -344,12 +358,15 @@ function clampDiagramZoom(value) {
 // Chromium lay out and rasterise the SVG and its text again at the new size,
 // so they stay sharp. A `scale()` transform on a composited layer only
 // magnifies the pixels rasterised at 100%.
+// Returns false when the viewport is hidden (the source is shown): nothing
+// can be measured then, so the layout is left for when it is shown again.
 function layoutDiagramCanvas(diagram, canvas, viewport, zoom) {
   canvas.style.zoom = '';
   canvas.style.width = '';
   canvas.style.minWidth = '';
   if (viewport) viewport.style.height = '';
-  if (zoom === 1) return;
+  if (zoom === 1) return true;
+  if (canvas.getClientRects().length === 0) return false;
   // Fix the canvas at its 100% layout width, so content sized in percent
   // (the Mermaid SVG is `width: 100%` with a `max-width`) scales with the
   // zoom instead of filling the viewport.
@@ -361,6 +378,7 @@ function layoutDiagramCanvas(diagram, canvas, viewport, zoom) {
     viewport.style.height = getComputedStyle(viewport).height;
   }
   canvas.style.zoom = String(zoom);
+  return true;
 }
 
 function applyDiagramPan(canvas, state) {
@@ -378,8 +396,8 @@ function updateDiagramZoomUi(diagram, relayout) {
   const status = diagram.querySelector('[data-marknexia-zoom-status]');
   if (canvas) {
     if (relayout || state.layoutZoom !== state.zoom) {
-      layoutDiagramCanvas(diagram, canvas, viewport, state.zoom);
-      state.layoutZoom = state.zoom;
+      // `null` marks the layout as pending: the next update lays it out.
+      state.layoutZoom = layoutDiagramCanvas(diagram, canvas, viewport, state.zoom) ? state.zoom : null;
     }
     applyDiagramPan(canvas, state);
   }

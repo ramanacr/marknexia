@@ -19,7 +19,7 @@ The .NET bridge zooms with `canvas.style.transform = translate(...) scale(zoom)`
 | VZ-3 | Compositor layer | `will-change: transform` always. | Only while dragging (`.marknexia-diagram-viewport.is-panning .marknexia-diagram-canvas`), removed on `pointerup` and `pointercancel`; the canvas at rest is painted at the current zoom. |
 | VZ-4 | Viewport size while zoomed | The transform does not change layout, so the viewport keeps its height and the zoomed canvas scrolls inside it. | The same: the bridge fixes the viewport `height` at its 100% height while zoomed (not in full-window mode, where the viewport fills the window). The scroll area now includes the bottom padding of the viewport. |
 | VZ-5 | Mouse-wheel zoom anchor | Computed from the viewport origin, without its padding and scroll offset. | Computed from the canvas's on-screen origin, then corrected once after the re-layout (for example when the viewport's scroll position is clamped as the content shrinks). Measured drift of the point under the pointer: 0 px horizontally and at most 0.04 diagram pixels vertically over four wheel steps. |
-| VZ-6 | Full-window mode and Mermaid re-render | No re-layout needed. | Opening or closing full window, and a Mermaid re-render (first render or system theme change) while zoomed, lay the canvas out again for the new viewport or drawing. |
+| VZ-6 | Full window, Mermaid re-render, hidden viewport and window resize | No re-layout needed. | Opening or closing full window, and a Mermaid re-render (first render or system theme change) while zoomed, lay the canvas out again for the new viewport or drawing. While the source is shown, the viewport is hidden and cannot be measured: a zoom change (the zoom buttons stay visible) or a re-render then leaves the layout pending, and showing the diagram again (`toggleSource`) lays it out. A window resize lays every zoomed diagram out again for the new width, 150 ms after the last resize event. |
 
 The zoom status, the reset button text, the `is-zoomed` class, the zoom limits and step (25% to 400% in steps of 25%), the keyboard controls (`+`, `=`, `-`, `_`, `0`, Escape), the full-window mode and every aria label are unchanged.
 
@@ -41,7 +41,7 @@ The page was rendered with `cargo run -p marknexia-rendering --example text_diag
 
 Text layer against the SVG grid of the text diagram (36 characters, each compared with its `1ch` by `2ch` cell): the SVG box equals the figure box exactly at 50%, 100%, 200% and 400%. The largest horizontal offset of a character from its cell is 0.012 px; the largest vertical offset of a glyph centre from its cell centre is 0.8 px at 50% (0.06 px with the old transform; the font is 6.5 px there and the browser rounds its line metrics), and 0.12 px, 0.23 px and 0.47 px at 100%, 200% and 400%, the same as the old transform.
 
-Other checks: a 100 px by 40 px drag at 300% moves the canvas by exactly 100 px by 40 px, with `will-change: transform` during the drag and `auto` after it; the viewport height is the same at 50%, 100% and 300%; the reset (`0`) removes every style the bridge set.
+Other checks: a 100 px by 40 px drag at 300% moves the canvas by exactly 100 px by 40 px, with `will-change: transform` during the drag and `auto` after it; the viewport height is the same at 50%, 100% and 300%; the reset (`0`) removes every style the bridge set. With the source shown, zooming both diagrams to 300% with the buttons leaves the layout pending, and showing the diagram again gives the canvas its 100% width (946 px) and the Mermaid SVG exactly 3 × 754.97 px; a system theme change (Mermaid re-render) while hidden at 200% behaves the same. After a resize from 1200 px to 760 px wide at 200%, the canvas width becomes the new 100% width (630 px) and the Mermaid SVG is 1196 px, exactly 2 × its new 100% width (598 px).
 
 ## Parity gate
 
@@ -59,6 +59,18 @@ replace: "  transform-origin: 0 0;\n}\n\n/* A composited layer only while draggi
 
 <!-- parity-asset-patch
 asset: bridge.js
+find: "        viewEl.style.display = 'block';\n      }\n"
+replace: "        viewEl.style.display = 'block';\n        // A zoom changed while the source was shown is laid out now.\n        const diagram = document.getElementById(diagramId);\n        if (diagram && diagram._marknexiaZoomState) updateDiagramZoomUi(diagram);\n      }\n"
+-->
+
+<!-- parity-asset-patch
+asset: bridge.js
+find: "  document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);\n  if (typeof mermaid !== 'undefined') {\n"
+replace: "  document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);\n  // A zoomed canvas is fixed at its 100% width: lay it out again for the\n  // new viewport width after the window is resized.\n  let diagramResizeTimer = 0;\n  window.addEventListener('resize', () => {\n    clearTimeout(diagramResizeTimer);\n    diagramResizeTimer = setTimeout(() => {\n      document.querySelectorAll('.marknexia-mermaid').forEach(diagram => {\n        if (diagramState(diagram).zoom !== 1) updateDiagramZoomUi(diagram, true);\n      });\n    }, 150);\n  });\n  if (typeof mermaid !== 'undefined') {\n"
+-->
+
+<!-- parity-asset-patch
+asset: bridge.js
 find: "            mermaid.render(renderId, code).then(res => {\n              if (container.dataset.marknexiaMermaidRenderId === renderId) preEl.innerHTML = res.svg;\n            }).catch(err => {\n"
 replace: "            mermaid.render(renderId, code).then(res => {\n              if (container.dataset.marknexiaMermaidRenderId !== renderId) return;\n              preEl.innerHTML = res.svg;\n              // The drawing replaced the source text: size a zoomed canvas again.\n              if (diagramState(container).zoom !== 1) updateDiagramZoomUi(container, true);\n            }).catch(err => {\n"
 -->
@@ -72,13 +84,13 @@ replace: "  if (!diagram._marknexiaZoomState) {\n    diagram._marknexiaZoomState
 <!-- parity-asset-patch
 asset: bridge.js
 find: "\nfunction updateDiagramZoomUi(diagram) {\n  const state = diagramState(diagram);\n"
-replace: "\n// Diagrams zoom by re-layout, not by a bitmap scale: CSS `zoom` makes\n// Chromium lay out and rasterise the SVG and its text again at the new size,\n// so they stay sharp. A `scale()` transform on a composited layer only\n// magnifies the pixels rasterised at 100%.\nfunction layoutDiagramCanvas(diagram, canvas, viewport, zoom) {\n  canvas.style.zoom = '';\n  canvas.style.width = '';\n  canvas.style.minWidth = '';\n  if (viewport) viewport.style.height = '';\n  if (zoom === 1) return;\n  // Fix the canvas at its 100% layout width, so content sized in percent\n  // (the Mermaid SVG is `width: 100%` with a `max-width`) scales with the\n  // zoom instead of filling the viewport.\n  canvas.style.width = `${canvas.getBoundingClientRect().width}px`;\n  canvas.style.minWidth = '0';\n  // Keep the viewport at its 100% height, as the transform did: the zoomed\n  // canvas scrolls inside it instead of moving the rest of the page.\n  if (viewport && !diagram.classList.contains('is-expanded')) {\n    viewport.style.height = getComputedStyle(viewport).height;\n  }\n  canvas.style.zoom = String(zoom);\n}\n\nfunction applyDiagramPan(canvas, state) {\n  // The pan is kept in screen pixels. CSS zoom also scales the canvas's own\n  // transform lengths, so it is given in unzoomed pixels.\n  canvas.style.transform = state.panX === 0 && state.panY === 0\n    ? ''\n    : `translate(${state.panX / state.zoom}px, ${state.panY / state.zoom}px)`;\n}\n\nfunction updateDiagramZoomUi(diagram, relayout) {\n  const state = diagramState(diagram);\n"
+replace: "\n// Diagrams zoom by re-layout, not by a bitmap scale: CSS `zoom` makes\n// Chromium lay out and rasterise the SVG and its text again at the new size,\n// so they stay sharp. A `scale()` transform on a composited layer only\n// magnifies the pixels rasterised at 100%.\n// Returns false when the viewport is hidden (the source is shown): nothing\n// can be measured then, so the layout is left for when it is shown again.\nfunction layoutDiagramCanvas(diagram, canvas, viewport, zoom) {\n  canvas.style.zoom = '';\n  canvas.style.width = '';\n  canvas.style.minWidth = '';\n  if (viewport) viewport.style.height = '';\n  if (zoom === 1) return true;\n  if (canvas.getClientRects().length === 0) return false;\n  // Fix the canvas at its 100% layout width, so content sized in percent\n  // (the Mermaid SVG is `width: 100%` with a `max-width`) scales with the\n  // zoom instead of filling the viewport.\n  canvas.style.width = `${canvas.getBoundingClientRect().width}px`;\n  canvas.style.minWidth = '0';\n  // Keep the viewport at its 100% height, as the transform did: the zoomed\n  // canvas scrolls inside it instead of moving the rest of the page.\n  if (viewport && !diagram.classList.contains('is-expanded')) {\n    viewport.style.height = getComputedStyle(viewport).height;\n  }\n  canvas.style.zoom = String(zoom);\n  return true;\n}\n\nfunction applyDiagramPan(canvas, state) {\n  // The pan is kept in screen pixels. CSS zoom also scales the canvas's own\n  // transform lengths, so it is given in unzoomed pixels.\n  canvas.style.transform = state.panX === 0 && state.panY === 0\n    ? ''\n    : `translate(${state.panX / state.zoom}px, ${state.panY / state.zoom}px)`;\n}\n\nfunction updateDiagramZoomUi(diagram, relayout) {\n  const state = diagramState(diagram);\n"
 -->
 
 <!-- parity-asset-patch
 asset: bridge.js
 find: "  const status = diagram.querySelector('[data-marknexia-zoom-status]');\n  if (canvas) canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;\n  const percent = `${Math.round(state.zoom * 100)}%`;\n"
-replace: "  const status = diagram.querySelector('[data-marknexia-zoom-status]');\n  if (canvas) {\n    if (relayout || state.layoutZoom !== state.zoom) {\n      layoutDiagramCanvas(diagram, canvas, viewport, state.zoom);\n      state.layoutZoom = state.zoom;\n    }\n    applyDiagramPan(canvas, state);\n  }\n  const percent = `${Math.round(state.zoom * 100)}%`;\n"
+replace: "  const status = diagram.querySelector('[data-marknexia-zoom-status]');\n  if (canvas) {\n    if (relayout || state.layoutZoom !== state.zoom) {\n      // `null` marks the layout as pending: the next update lays it out.\n      state.layoutZoom = layoutDiagramCanvas(diagram, canvas, viewport, state.zoom) ? state.zoom : null;\n    }\n    applyDiagramPan(canvas, state);\n  }\n  const percent = `${Math.round(state.zoom * 100)}%`;\n"
 -->
 
 <!-- parity-asset-patch
