@@ -21,6 +21,9 @@ window.marknexiaBridge = {
       } else {
         srcEl.style.display = 'none';
         viewEl.style.display = 'block';
+        // A zoom changed while the source was shown is laid out now.
+        const diagram = document.getElementById(diagramId);
+        if (diagram && diagram._marknexiaZoomState) updateDiagramZoomUi(diagram);
       }
     }
   },
@@ -264,6 +267,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Render Mermaid diagrams offline safely
   document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);
+  // A zoomed canvas is fixed at its 100% width: lay it out again for the
+  // new viewport width after the window is resized.
+  let diagramResizeTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(diagramResizeTimer);
+    diagramResizeTimer = setTimeout(() => {
+      document.querySelectorAll('.marknexia-mermaid').forEach(diagram => {
+        if (diagramState(diagram).zoom !== 1) updateDiagramZoomUi(diagram, true);
+      });
+    }, 150);
+  });
   if (typeof mermaid !== 'undefined') {
     try {
       const requestedTheme = document.documentElement.getAttribute('data-theme');
@@ -304,7 +318,10 @@ document.addEventListener('DOMContentLoaded', () => {
           container.dataset.marknexiaMermaidRenderId = renderId;
           try {
             mermaid.render(renderId, code).then(res => {
-              if (container.dataset.marknexiaMermaidRenderId === renderId) preEl.innerHTML = res.svg;
+              if (container.dataset.marknexiaMermaidRenderId !== renderId) return;
+              preEl.innerHTML = res.svg;
+              // The drawing replaced the source text: size a zoomed canvas again.
+              if (diagramState(container).zoom !== 1) updateDiagramZoomUi(container, true);
             }).catch(err => {
               if (container.dataset.marknexiaMermaidRenderId === renderId) showDiagramError(id, err);
             });
@@ -328,7 +345,7 @@ const DIAGRAM_ZOOM_STEP = 0.25;
 
 function diagramState(diagram) {
   if (!diagram._marknexiaZoomState) {
-    diagram._marknexiaZoomState = { zoom: 1, panX: 0, panY: 0, pointerId: null, lastX: 0, lastY: 0 };
+    diagram._marknexiaZoomState = { zoom: 1, layoutZoom: 1, panX: 0, panY: 0, pointerId: null, lastX: 0, lastY: 0 };
   }
   return diagram._marknexiaZoomState;
 }
@@ -337,12 +354,53 @@ function clampDiagramZoom(value) {
   return Math.min(MAX_DIAGRAM_ZOOM, Math.max(MIN_DIAGRAM_ZOOM, value));
 }
 
-function updateDiagramZoomUi(diagram) {
+// Diagrams zoom by re-layout, not by a bitmap scale: CSS `zoom` makes
+// Chromium lay out and rasterise the SVG and its text again at the new size,
+// so they stay sharp. A `scale()` transform on a composited layer only
+// magnifies the pixels rasterised at 100%.
+// Returns false when the viewport is hidden (the source is shown): nothing
+// can be measured then, so the layout is left for when it is shown again.
+function layoutDiagramCanvas(diagram, canvas, viewport, zoom) {
+  canvas.style.zoom = '';
+  canvas.style.width = '';
+  canvas.style.minWidth = '';
+  if (viewport) viewport.style.height = '';
+  if (zoom === 1) return true;
+  if (canvas.getClientRects().length === 0) return false;
+  // Fix the canvas at its 100% layout width, so content sized in percent
+  // (the Mermaid SVG is `width: 100%` with a `max-width`) scales with the
+  // zoom instead of filling the viewport.
+  canvas.style.width = `${canvas.getBoundingClientRect().width}px`;
+  canvas.style.minWidth = '0';
+  // Keep the viewport at its 100% height, as the transform did: the zoomed
+  // canvas scrolls inside it instead of moving the rest of the page.
+  if (viewport && !diagram.classList.contains('is-expanded')) {
+    viewport.style.height = getComputedStyle(viewport).height;
+  }
+  canvas.style.zoom = String(zoom);
+  return true;
+}
+
+function applyDiagramPan(canvas, state) {
+  // The pan is kept in screen pixels. CSS zoom also scales the canvas's own
+  // transform lengths, so it is given in unzoomed pixels.
+  canvas.style.transform = state.panX === 0 && state.panY === 0
+    ? ''
+    : `translate(${state.panX / state.zoom}px, ${state.panY / state.zoom}px)`;
+}
+
+function updateDiagramZoomUi(diagram, relayout) {
   const state = diagramState(diagram);
   const canvas = diagram.querySelector('.marknexia-diagram-canvas');
   const viewport = diagram.querySelector('.marknexia-diagram-viewport');
   const status = diagram.querySelector('[data-marknexia-zoom-status]');
-  if (canvas) canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+  if (canvas) {
+    if (relayout || state.layoutZoom !== state.zoom) {
+      // `null` marks the layout as pending: the next update lays it out.
+      state.layoutZoom = layoutDiagramCanvas(diagram, canvas, viewport, state.zoom) ? state.zoom : null;
+    }
+    applyDiagramPan(canvas, state);
+  }
   const percent = `${Math.round(state.zoom * 100)}%`;
   if (status) status.textContent = percent;
   const reset = diagram.querySelector('[data-marknexia-action="zoom-reset"]');
@@ -399,6 +457,8 @@ function toggleDiagramExpanded(diagram) {
     if (state.previousFocus instanceof HTMLElement) state.previousFocus.focus();
     state.previousFocus = null;
   }
+  // The viewport changed size: lay the zoomed canvas out again.
+  updateDiagramZoomUi(diagram, true);
 }
 
 function installDiagramInteractions(diagram) {
@@ -417,14 +477,28 @@ function installDiagramInteractions(diagram) {
     const oldZoom = state.zoom;
     const nextZoom = clampDiagramZoom(oldZoom + (event.deltaY < 0 ? DIAGRAM_ZOOM_STEP : -DIAGRAM_ZOOM_STEP));
     if (nextZoom === oldZoom) return;
-    const bounds = viewport.getBoundingClientRect();
-    const anchorX = event.clientX - bounds.left - state.panX;
-    const anchorY = event.clientY - bounds.top - state.panY;
+    const canvas = diagram.querySelector('.marknexia-diagram-canvas');
+    if (!canvas) return;
+    // Keep the diagram point under the pointer in place. Offsets are in
+    // screen pixels from the canvas's on-screen origin.
+    const origin = canvas.getBoundingClientRect();
+    const anchorX = event.clientX - origin.left;
+    const anchorY = event.clientY - origin.top;
     const ratio = nextZoom / oldZoom;
     state.panX -= anchorX * (ratio - 1);
     state.panY -= anchorY * (ratio - 1);
     state.zoom = nextZoom;
     updateDiagramZoomUi(diagram);
+    // The re-layout can move the canvas (the viewport's scroll position is
+    // clamped when the content shrinks): correct the pan by what it moved.
+    const moved = canvas.getBoundingClientRect();
+    const errorX = event.clientX - anchorX * ratio - moved.left;
+    const errorY = event.clientY - anchorY * ratio - moved.top;
+    if (Math.abs(errorX) >= 0.5 || Math.abs(errorY) >= 0.5) {
+      state.panX += errorX;
+      state.panY += errorY;
+      updateDiagramZoomUi(diagram);
+    }
   }, { passive: false });
 
   viewport.addEventListener('pointerdown', event => {

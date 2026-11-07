@@ -38,6 +38,8 @@ Owner options: (a) keep the in-house renderer (this record); (b) approve `BSD-3-
 | TDG-9 | Accessibility | — | The figure is `role="img"` with the whole original text as its accessible name; the SVG and the text layer are `aria-hidden`. The Source button shows the original text as a code block. **Known gap:** the bridge (a frozen .NET asset) labels every diagram viewport "Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore." Changing it needs a bridge change outside the frozen asset. |
 | TDG-10 | Frozen v1 fixtures | — | No frozen fixture contains an untagged, `text` or tagged diagram fence (the fixture fences are `c#`, `csharp` and `mermaid`), so no expected result changes. `parity_v1` passes with no new allowance. |
 
+Later change (2026-11-07): `vector-diagram-zoom.md` (proposed) changes the bundled `bridge.js` and `github-markdown.css` so that diagrams zoom without blur. From that change on, no page keeps the exact .NET bytes; text-diagram pages still differ from other pages only by the conditional stylesheet (TDG-7).
+
 ## Detection corpus (`crates/marknexia-rendering/tests/text_diagrams.rs`)
 
 Diagram rows / non-blank rows, drawn / non-space cells, arrowheads, box-drawing cells, vertical cells.

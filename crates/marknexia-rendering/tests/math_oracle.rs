@@ -8,12 +8,21 @@
 //! [`KNOWN_DIFFERENCES`], which must still differ (a stale entry fails).
 //! Each one names its record: REND-5 in `compat/decisions/rendering-differences.md`,
 //! MATH-1 to MATH-3 in `compat/decisions/math-differences.md`.
+//!
+//! The complete page of the one case that carries it is compared with the
+//! embedded .NET assets replaced by the bundled assets' recorded edits
+//! (`parity-asset-patch` blocks, see `support/asset_patches.rs`).
 
 use std::collections::BTreeMap;
 
 use marknexia_core::contracts::AppTheme;
 use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, Renderer};
 use serde_json::Value;
+
+// Only the page patching is used here.
+#[allow(dead_code)]
+#[path = "support/asset_patches.rs"]
+mod asset_patches;
 
 const ORACLE: &str = include_str!("oracle/math.v1.json");
 const CASE_COUNT: usize = 43;
@@ -98,6 +107,7 @@ fn math_matches_the_dotnet_oracle() {
     let cases = oracle();
     assert_eq!(cases.len(), CASE_COUNT);
     let known: BTreeMap<&str, &str> = KNOWN_DIFFERENCES.iter().copied().collect();
+    let assets = asset_patches::patched_assets();
     let mut failures = Vec::new();
     let mut pages = 0;
     for case in &cases {
@@ -108,7 +118,9 @@ fn math_matches_the_dotnet_oracle() {
                 let expected = case["body"].as_str().unwrap();
                 let page_matches = case.get("page").is_none_or(|page| {
                     pages += 1;
-                    actual_page.as_deref() == page.as_str()
+                    let page = page.as_str().unwrap();
+                    let patched = asset_patches::patch_expected_page(name, page, &assets);
+                    actual_page.as_deref() == Some(patched.as_deref().unwrap_or(page))
                 });
                 outcome == "rendered" && actual_body.as_deref() == Some(expected) && page_matches
             }
