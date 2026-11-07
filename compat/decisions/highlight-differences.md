@@ -1,6 +1,6 @@
 # Highlighting parity (HL-1 to HL-4)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: `crates/marknexia-rendering/src/highlight/` (the `ColorCodeSyntaxHighlighter` port). Owner decision G1 (2026-11-06): highlighting must cover every language that ColorCode supports, with parity to the .NET output. This record replaces the C#-only part of REND-2 in `rendering-differences.md`.
 

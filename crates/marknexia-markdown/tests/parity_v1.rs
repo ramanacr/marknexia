@@ -15,7 +15,9 @@ const PROPOSED_STATUS: &str = "proposed — requires Task 8 approval";
 /// Status of a record the owner approved at gate G0 (2026-11-06).
 const APPROVED_STATUS: &str = "approved — owner decision 2026-11-06 (G0)";
 /// The only statuses under which a parity allowance is accepted.
-const ALLOWANCE_STATUSES: [&str; 2] = [APPROVED_STATUS, PROPOSED_STATUS];
+/// Records approved after G0 by the owner's 2026-11-07 decision.
+const APPROVED_LATER_STATUS: &str = "approved — owner decision 2026-11-07";
+const ALLOWANCE_STATUSES: [&str; 3] = [APPROVED_STATUS, APPROVED_LATER_STATUS, PROPOSED_STATUS];
 const ALLOWANCE_OPEN: &str = "<!-- parity-allowance";
 
 fn repository_root() -> PathBuf {

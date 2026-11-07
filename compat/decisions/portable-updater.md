@@ -1,6 +1,6 @@
 # Portable updater: signed manifest, side-by-side staging, health-checked activation
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: `crates/marknexia-update` (all of it), `crates/marknexia-webview` (`bootstrap.rs` `DownloadUrl::parse_with_hosts` and `is_expected_publisher`, `bootstrap_native.rs` `verify_publisher` and `WinHttpDownloader::with_agent`), and `crates/marknexia-win32` (`window/update_native.rs`, `window/chrome/updater.rs`, the `update:` hooks in `window.rs`, the Help menu in `window/toolbar.rs`, and the update dialogs in `window/dialogs.rs`). The contract is `docs/superpowers/specs/2026-09-12-rust-update-contract-decision.md` (`update-manifest-v1`). The .NET source is `src/Marknexia.Infrastructure/UpdateService.cs` and `MainWindow.CheckForUpdates_Click`. Owner gate G2 (2026-11-06): build the updater with throwaway TEST keys only; the owner creates the release key outside the repository.
 
