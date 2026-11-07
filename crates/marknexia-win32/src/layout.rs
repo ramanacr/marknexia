@@ -1,0 +1,233 @@
+//! Pure physical-pixel layout calculations for the native shell.
+
+const BASE_DPI: u32 = 96;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Dip(pub u32);
+
+impl Dip {
+    pub const INTERACTION_TARGET: Self = Self(44);
+    /// The .NET `OpenPaneLength` default.
+    pub const SIDEBAR_WIDTH: Self = Self(280);
+    /// The .NET `SidebarResizeHandle` width, inside the sidebar's right edge.
+    pub const SPLITTER_WIDTH: Self = Self(6);
+    /// The .NET `WideWindow` trigger (`AdaptiveTrigger MinWindowWidth`):
+    /// narrower windows use the compact layout.
+    pub const COMPACT_BREAKPOINT: Self = Self(720);
+    /// The .NET `CompactWindow` `OpenPaneLength`.
+    pub const COMPACT_SIDEBAR_WIDTH: Self = Self(240);
+    /// The status bar: one caption line (12 DIPs), not an interaction
+    /// target (.NET has no status bar; CHROME-16).
+    pub const STATUS_HEIGHT: Self = Self(24);
+    /// Document tab width bounds (.NET `TabWidthMode="SizeToContent"`
+    /// gives tabs of about this size): a tab is at most `TAB_MAX_WIDTH`
+    /// wide; with many tabs they shrink equally, below `TAB_MIN_WIDTH` too,
+    /// so every tab stays reachable without scrolling.
+    pub const TAB_MIN_WIDTH: Self = Self(120);
+    pub const TAB_MAX_WIDTH: Self = Self(240);
+
+    pub fn to_pixels(self, dpi: u32) -> u32 {
+        self.0.saturating_mul(dpi).saturating_add(BASE_DPI - 1) / BASE_DPI
+    }
+}
+
+/// The initial client area in DIPs (1100 × 760).
+pub const INITIAL_CLIENT: (u32, u32) = (1100, 760);
+
+/// `MulDiv(value, dpi, 96)`: DIPs to pixels, rounded to nearest.
+pub fn scale_to_dpi(value: u32, dpi: u32) -> u32 {
+    let scaled =
+        (u64::from(value) * u64::from(dpi) + u64::from(BASE_DPI / 2)) / u64::from(BASE_DPI);
+    u32::try_from(scaled).unwrap_or(u32::MAX)
+}
+
+/// The initial window size in pixels: the 1100 × 760-DIP client area at
+/// `dpi`, plus the `frame` (non-client width and height from
+/// `AdjustWindowRectExForDpi`), clamped to the monitor `work` area.
+pub fn initial_window_size(dpi: u32, frame: (u32, u32), work: (u32, u32)) -> (u32, u32) {
+    let width = scale_to_dpi(INITIAL_CLIENT.0, dpi).saturating_add(frame.0);
+    let height = scale_to_dpi(INITIAL_CLIENT.1, dpi).saturating_add(frame.1);
+    (width.min(work.0), height.min(work.1))
+}
+
+/// True when a client `width` in pixels at `dpi` is below the .NET
+/// 720-DIP breakpoint (the `CompactWindow` visual state).
+pub fn is_compact(width: u32, dpi: u32) -> bool {
+    u64::from(width) * u64::from(BASE_DPI)
+        < u64::from(Dip::COMPACT_BREAKPOINT.0) * u64::from(dpi.max(1))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelRect {
+    pub fn right(self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    pub fn bottom(self) -> u32 {
+        self.y.saturating_add(self.height)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellLayoutRequest {
+    pub client_width: u32,
+    pub client_height: u32,
+    pub dpi: u32,
+    pub sidebar_visible: bool,
+    pub find_bar_visible: bool,
+    /// Sidebar width in DIPs (the persisted `SidebarWidth`).
+    pub sidebar_width: Dip,
+    /// The diagnostics bar is open above the document.
+    pub diagnostics_visible: bool,
+}
+
+impl ShellLayoutRequest {
+    pub const fn new(client_width: u32, client_height: u32, dpi: u32) -> Self {
+        Self {
+            client_width,
+            client_height,
+            dpi,
+            sidebar_visible: false,
+            find_bar_visible: false,
+            sidebar_width: Dip::SIDEBAR_WIDTH,
+            diagnostics_visible: false,
+        }
+    }
+
+    pub const fn with_sidebar_visible(mut self, visible: bool) -> Self {
+        self.sidebar_visible = visible;
+        self
+    }
+
+    pub const fn with_find_bar_visible(mut self, visible: bool) -> Self {
+        self.find_bar_visible = visible;
+        self
+    }
+
+    pub const fn with_sidebar_width(mut self, width: Dip) -> Self {
+        self.sidebar_width = width;
+        self
+    }
+
+    pub const fn with_diagnostics_visible(mut self, visible: bool) -> Self {
+        self.diagnostics_visible = visible;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellLayout {
+    pub command_bar: PixelRect,
+    pub tab_strip: PixelRect,
+    pub sidebar: PixelRect,
+    pub webview: PixelRect,
+    pub find_bar: PixelRect,
+    pub status_bar: PixelRect,
+    /// The resize handle at the sidebar's right edge (inside `sidebar`).
+    pub splitter: PixelRect,
+    /// The diagnostics bar above the document; zero height when closed.
+    pub diagnostics: PixelRect,
+}
+
+impl ShellLayout {
+    pub fn compute(request: ShellLayoutRequest) -> Self {
+        let target = Dip::INTERACTION_TARGET.to_pixels(request.dpi);
+        let command_height = request.client_height.min(target);
+        let tab_height = request
+            .client_height
+            .saturating_sub(command_height)
+            .min(target);
+        let content_top = command_height.saturating_add(tab_height);
+
+        let available_below_top = request.client_height.saturating_sub(content_top);
+        let status_height = available_below_top.min(Dip::STATUS_HEIGHT.to_pixels(request.dpi));
+        let remaining_above_status = available_below_top.saturating_sub(status_height);
+        let content_bottom = request.client_height.saturating_sub(status_height);
+
+        let sidebar_width = if request.sidebar_visible {
+            request
+                .client_width
+                .min(request.sidebar_width.to_pixels(request.dpi))
+        } else {
+            0
+        };
+        let content_width = request.client_width.saturating_sub(sidebar_width);
+        let content_height = content_bottom.saturating_sub(content_top);
+        let splitter_width = sidebar_width.min(Dip::SPLITTER_WIDTH.to_pixels(request.dpi));
+        // The find bar is the first row of the document column (.NET
+        // `SearchBarGrid`, row 0 above the document), then the diagnostics
+        // bar (.NET `DiagnosticInfoBar`), then the document.
+        let find_height = if request.find_bar_visible {
+            remaining_above_status.min(target)
+        } else {
+            0
+        };
+        let diagnostics_top = content_top.saturating_add(find_height);
+        let diagnostics_height = if request.diagnostics_visible {
+            content_height.saturating_sub(find_height).min(target)
+        } else {
+            0
+        };
+        let document_top = diagnostics_top.saturating_add(diagnostics_height);
+        let document_height = content_height
+            .saturating_sub(find_height)
+            .saturating_sub(diagnostics_height);
+
+        Self {
+            command_bar: PixelRect {
+                width: request.client_width,
+                height: command_height,
+                ..PixelRect::default()
+            },
+            tab_strip: PixelRect {
+                y: command_height,
+                width: request.client_width,
+                height: tab_height,
+                ..PixelRect::default()
+            },
+            sidebar: PixelRect {
+                y: content_top,
+                width: sidebar_width,
+                height: content_height,
+                ..PixelRect::default()
+            },
+            webview: PixelRect {
+                x: sidebar_width,
+                y: document_top,
+                width: content_width,
+                height: document_height,
+            },
+            find_bar: PixelRect {
+                x: sidebar_width,
+                y: content_top,
+                width: content_width,
+                height: find_height,
+            },
+            status_bar: PixelRect {
+                y: request.client_height.saturating_sub(status_height),
+                width: request.client_width,
+                height: status_height,
+                ..PixelRect::default()
+            },
+            splitter: PixelRect {
+                x: sidebar_width.saturating_sub(splitter_width),
+                y: content_top,
+                width: splitter_width,
+                height: content_height,
+            },
+            diagnostics: PixelRect {
+                x: sidebar_width,
+                y: diagnostics_top,
+                width: content_width,
+                height: diagnostics_height,
+            },
+        }
+    }
+}

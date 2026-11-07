@@ -1,0 +1,15 @@
+Imports System
+' A comment
+REM another comment
+Public Module Program
+    Sub Main(args As String())
+        Dim x As Integer = 42
+        Dim s As String = "hello ""world"""
+        If x > 10 AndAlso Not s Is Nothing Then
+            Console.WriteLine(s & x.ToString())
+        End If
+        #Region "r"
+        #End Region
+    End Sub
+End Module
+<Obsolete()> Class C : End Class

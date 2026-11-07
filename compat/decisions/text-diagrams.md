@@ -1,0 +1,72 @@
+# Text diagrams: ASCII-art and box-drawing code blocks drawn as SVG (Rust edition only)
+
+Status: **approved — owner decision 2026-11-07**
+
+Scope: `crates/marknexia-rendering/src/textdiagram/` (all of it), the text-diagram hook in `crates/marknexia-rendering/src/passes.rs` (`highlight_code_blocks_cancellable`), `RenderContext::enable_text_diagrams`, `RenderedDocument::text_diagrams` and the conditional stylesheet in `crates/marknexia-rendering/src/template.rs`, the `RenderTextDiagrams` property in `crates/marknexia-core/src/settings.rs`, the View menu item and `RenderJob::render_text_diagrams` in `crates/marknexia-win32`, the tests `crates/marknexia-rendering/tests/text_diagrams.rs` (with the fixture `tests/text_diagrams/adr-reference-architecture.txt`) and the preview example `crates/marknexia-rendering/examples/text_diagram_preview.rs`. Owner request 2026-11-07: ASCII-art and box-drawing diagrams inside code blocks must render as real diagrams, not text. This is a new feature: the .NET edition shows every such block as a highlighted code block. No .NET source, bundled asset (`github-markdown.css`, `bridge.js`) or frozen fixture is changed.
+
+Evidence class: implemented, compiled and headless-tested. The rendering tests run the detection corpus, render through the whole pipeline (parser, passes, sanitizer, template) and check the sanitized body. The ADR example was rendered headless to an HTML page and looked at in headless Chrome, light and dark. **Not run:** the native shell (the View menu item, the reload after the toggle and the setting round trip through the real `settings.json`), WebView2, a screen reader, and Windows high-contrast mode.
+
+## Engine: svgbob fails the dependency policy (TDG-0)
+
+The request named the `svgbob` crate. The latest release, svgbob 0.7.6 (Apache-2.0), was added on a trial basis and checked with `cargo deny check` against `deny.toml` (MIT, Apache-2.0, MPL-2.0 and Unicode-3.0 only). It fails:
+
+| Check | Crate | Path | Result |
+| --- | --- | --- | --- |
+| licenses | `nalgebra` 0.32.6 | svgbob, parry2d | `BSD-3-Clause`: rejected |
+| licenses | `foldhash` 0.2.0 | hashbrown 0.16.1 ← spade 2.15.1 ← parry2d 0.13.8 ← svgbob | `Zlib`: rejected |
+| advisories | `paste` 1.0.15 | nalgebra/simba | RUSTSEC-2024-0436 (unmaintained): error |
+| advisories | `proc-macro-error` 1.0.4 | sauron-macro 0.61.9 | RUSTSEC-2024-0370 (unmaintained): error |
+
+It would also add about 70 crates to the shell (among them `sauron` 0.61 with `wasm-bindgen`, `js-sys`, `web-sys` and `futures`, `nalgebra`, `parry2d` and `spade`). Every svgbob release from 0.5 on depends on `nalgebra` and `parry2d`, so an older release does not help. `deny.toml` was not changed, and the trial dependency was removed.
+
+**Implemented alternative:** a Marknexia-owned grid renderer in `crates/marknexia-rendering/src/textdiagram/` (about 600 lines plus tests). It adds **no crate**: `Cargo.lock` is unchanged, so the SBOM, which the scripts derive from `cargo metadata`, is unchanged too. It follows the svgbob model (a character grid, each cell classified from its neighbours) for the common cases: lines, corners, junctions and arrowheads in ASCII and box-drawing characters. It does not draw svgbob's diagonals from `/` and `\`, curves from `(` and `)`, or its circle and shape detection.
+
+Owner options: (a) keep the in-house renderer (this record); (b) approve `BSD-3-Clause` and `Zlib` in `deny.toml` and ignore the two advisories, then replace `textdiagram::draw` with svgbob (the detection, the shell, the limits, the setting and the sanitizer boundary stay as they are; svgbob's `<style>`, `<text>`, `<line>`, `<circle>`, `<polygon>` and `<marker>` output would then need the conversion or allowlist work this design avoids).
+
+## Observable differences
+
+| ID | Condition | .NET oracle | Rust edition |
+| --- | --- | --- | --- |
+| TDG-1 | A code block that is a text diagram | A highlighted code block (`code-container` with a Copy button). | A diagram shell with the Mermaid toolbar: label `Diagram`, Copy (the original text), Source (toggles to the original text), zoom out, zoom reset, zoom in and full window. The shell carries the `marknexia-mermaid` class, so the bridge's existing controls work on it unchanged; it has no `.mermaid` element, so the Mermaid runtime never renders it, and it never loads the runtime. Ids are `marknexia-text-diagram-<n>`. Every other block renders exactly as before. Raw HTML `<pre><code>` and indented code blocks are covered too, as for highlighting, because the pass works on the rendered body. |
+| TDG-2 | Fence tags | — | Fences tagged `bob`, `svgbob`, `ascii` or `diagram` (ASCII case-insensitive) are always drawn, within the limits (TDG-5). Untagged and `text` fences are drawn only when the heuristic (TDG-3) accepts them. No other tag is drawn (`txt` and `plaintext` are not). |
+| TDG-3 | Heuristic for untagged and `text` blocks | — | Conservative: a block stays code unless all of these hold. (1) It does not look like code or output: not JSON (`{…}` or `[…]`); no shell, REPL or PowerShell prompt line (`$ `, `# `, `> `, `>>> `, `% `, `PS C:\…>`, `C:\…>`, `user@host:…$ `); no diff or compiler-diagnostic line (`@@ `, `diff --git `, `+++ `, `--- a/`, `Traceback (most recent call last)`, `--> file:line`, `error:`, `error[`, `warning:`, `note:`, `help:`); and fewer than two lines of each of: a leading language keyword (`fn`, `let`, `def`, `class`, `import`, `SELECT`, `#include` and others), a trailing `;`, a leading or trailing brace, a log prefix (date, time, `[digit`, `INFO`/`WARN`/`ERROR`/`DEBUG`/`TRACE`/`FATAL`), ` :: ` (type signatures), an `ls -l` permission field. (2) It has at least one drawn arrowhead or box-drawing character: grids of `|`, `-` and `+` alone are tables or version-control graphs. (3) It is not a `tree` listing: box-drawing characters only in front of each line's text, with no arrow. (4) It has at least two drawn vertical cells, unless it has box-drawing characters: ASCII arrows on lines with no vertical stroke are prose or code (`v1 -> v2`). (5) At least 3 rows, and at least 30% of the non-blank rows, carry a drawn cell or a Unicode arrow (`→ ← ↑ ↓ ⟶ ⟵ ▶ ◀ ▲ ▼ ► ◄`). (6) At least 30 drawn cells per 1,000 non-space cells. Results on the test corpus are below. |
+| TDG-4 | Drawing rules | — | Every cell is classified from its eight neighbours (linear work). Box-drawing characters U+2500 to U+257F are always drawn (light; heavy as a thicker stroke; double as two parallel strokes; dashed; rounded corners as curves; `╱ ╲ ╳` as diagonals). A run of `-` is a line when it is 3 or more long, or when it touches `+ > < \| . '`, a box-drawing character or a horizontal arrow at one end and no letter or digit at either end (`short-lived`, `--lines`, `x->y` and `ADR-011` stay text). `\|` is a line when the cell above or below is `\|`, `+`, a corner or a box-drawing character with a matching arm (`Pre\|PostCompact` stays text); a `\|` next to a drawn `-` gets a junction arm. `+` is a junction with an arm towards each drawn neighbour; with none it stays text (`C++`, `a + b`). `.` and `'` are rounded corners between a drawn `-` and a drawn `\|`. `v` and `^` are arrowheads under or over a vertical line when no letter or digit is beside them; `>` and `<` after or before a drawn line; Unicode arrows when they continue a line on their tail side, otherwise they stay text. |
+| TDG-5 | Limits and work | — | A block is converted only up to 64 KiB of source, 400 lines and 512 cells per line, and only the first 64 converted blocks per document; anything beyond stays a code block. A shell over 2 MiB, or more than 16 MiB of shells per document, also falls back. The work is linear in the cells, so it is bounded by these limits; it is not regex work and is not drawn from the highlighting step budget (HL-1). The cancellation callback is polled before each eligible block. Shell sizes are computed exactly from the template before the block is spliced, within the pass's byte budget, as for the other passes. |
+| TDG-6 | Text and widths | — | Characters that are not drawn stay as HTML text in a layer over the SVG, on the same grid (one cell is `1ch` by `2ch`), so they can be selected and found with Find. Tabs expand to stops of 4. Cell widths approximate UAX #11: combining marks and format characters take no cell, East Asian wide and fullwidth characters and the common emoji blocks take two. Fonts where a wide character is not exactly `2ch` misalign that line. Font ligatures are turned off in diagrams (`--` must not look like a line). Trailing blank lines are not part of the grid. |
+| TDG-7 | Page markup, sanitizer and CSS | — | The SVG holds only `<path class="tdg-…" d="…">` elements (stroked lines, corners and diagonals; filled arrowheads) inside `<svg class viewBox width height aria-hidden>`. The figure is `<div role="img" aria-label="…" style="width: Nch; height: Mch">`. Every element and attribute is already in the .NET-equivalent allowlist (SAN rules), so **the sanitizer is not changed**: no `<style>`, `<text>`, `<line>`, `<marker>` or `foreignObject`, no script, event handler or external reference is emitted or allowed. The shell passes through the sanitizer with the rest of the body; the source text is entity-encoded. The styles are fixed class rules appended to the bundled stylesheet in the template, only when a page has a text diagram, so every other page keeps the .NET bytes. Strokes and arrowheads use `currentColor` from `--color-fg-default`, so Light, Dark and System follow the theme, and `CanvasText` is used in forced-colours (high-contrast) mode. |
+| TDG-8 | Setting | — | `RenderTextDiagrams` (Boolean, default `true`) in `settings.json`, written after the .NET properties; schema version stays 2. The .NET edition ignores it like any unknown property. A value that is not `true` or `false` keeps the default instead of rejecting the document (rejecting it would replace settings that .NET keeps). View > **Render text diagrams** (checked when on) saves the setting, shows `Text diagrams are drawn for documents rendered from now on.` or `Text diagrams are shown as code for documents rendered from now on.`, and reloads the active tab, like the remote-images toggle (CHROME-13: other tabs change on their next render). Off, every block renders exactly as in .NET. |
+| TDG-9 | Accessibility | — | The figure is `role="img"` with the whole original text as its accessible name; the SVG and the text layer are `aria-hidden`. The Source button shows the original text as a code block. **Known gap:** the bridge (a frozen .NET asset) labels every diagram viewport "Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore." Changing it needs a bridge change outside the frozen asset. |
+| TDG-10 | Frozen v1 fixtures | — | No frozen fixture contains an untagged, `text` or tagged diagram fence (the fixture fences are `c#`, `csharp` and `mermaid`), so no expected result changes. `parity_v1` passes with no new allowance. |
+
+Later change (2026-11-07): `vector-diagram-zoom.md` (approved 2026-11-07) changes the bundled `bridge.js` and `github-markdown.css` so that diagrams zoom without blur. From that change on, no page keeps the exact .NET bytes; text-diagram pages still differ from other pages only by the conditional stylesheet (TDG-7).
+
+## Detection corpus (`crates/marknexia-rendering/tests/text_diagrams.rs`)
+
+Diagram rows / non-blank rows, drawn / non-space cells, arrowheads, box-drawing cells, vertical cells.
+
+| Positive block | Accepted | Rows | Drawn | Heads | Box | Vertical |
+| --- | --- | --- | --- | --- | --- | --- |
+| ADR reference architecture (`02_ARCHITECTURE_ADRS.md`) | yes | 20/25 | 64/1220 | 14 | 0 | 30 |
+| Box drawing with arrows | yes | 8/8 | 77/91 | 2 | 75 | 21 |
+| ASCII boxes with arrows | yes | 5/6 | 52/78 | 3 | 0 | 16 |
+| Unicode arrow flow | yes | 3/4 | 2/31 | 1 | 1 | 2 |
+| Sequence diagram | yes | 4/5 | 36/63 | 2 | 0 | 8 |
+| Rounded ASCII boxes | yes | 5/6 | 45/57 | 2 | 0 | 14 |
+| Box tree with arrows | yes | 3/4 | 18/65 | 3 | 15 | 3 |
+| Pipeline with branches | yes | 6/8 | 18/52 | 5 | 0 | 6 |
+
+All 28 negative blocks stay code, and render with the code container under both an untagged and a `text` fence: Rust, Haskell signatures, C pointers, Python type hints, JSON, YAML, a shell session, a PowerShell session, a log with arrows, a rustc diagnostic, psql output, a Markdown table, an ASCII table, a `git log --graph`, a `tree` listing, `cargo tree`, a unified diff, `ls -l` with symlinks, SQL, a Python traceback, prose, an arrow changelog, Elixir pipes, a Terraform plan, an HTTP request, progress output, CSV and a single arrow line. The closest calls: the rustc diagnostic (5/7 rows, an arrowhead and 4 vertical cells) is rejected only by the diagnostic-line rule; the psql output and the ASCII table only by rule (2).
+
+**Residual risk:** an untagged block of output that has arrows and vertical strokes and none of the recognized code or output lines is drawn. Its text is unchanged and the Source button shows the original; the setting turns the feature off.
+
+## Hostile inputs
+
+Covered in `tests/text_diagrams.rs`: blocks over each limit fall back and the exact edges convert; 70 blocks convert 64; markup in a diagram (`<script>`, `<svg onload>`, `foreignObject`, `javascript:` links, `</code></pre>`, `<style>`) is encoded text and every tag in the sanitized body is checked for script, style, `foreignObject`, `use` and `image` elements, event handlers and script URLs; 30,000 combining marks, bidirectional overrides, BOM and zero-width characters, control characters, U+FFFD floods, every box-drawing character and a 120-row dense connector grid at the column limit render within the time bound; a diagram inside 40 levels of block quotes and lists renders or stays code; cancellation before a conversion returns `Cancelled` with no output. The rendering crate's existing hostile, fuzz-invariant, chunking and cancellation suites pass unchanged.
+
+## Preview
+
+`cargo run -p marknexia-rendering --example text_diagram_preview -- <in.md> <out.html> [--no-text-diagrams]` writes the complete page (template, stylesheet, bridge, sanitized body) for a Markdown file.
+
+## Rollback
+
+Turn off View > Render text diagrams (or set `"RenderTextDiagrams": false`): every block renders as in .NET and pages carry no extra stylesheet. Removing the feature means reverting its commits; the `RenderTextDiagrams` property left in `settings.json` is then ignored by both editions.

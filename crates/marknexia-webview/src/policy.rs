@@ -1,0 +1,580 @@
+//! Immutable content and bounded decisions shared by WebView2 callbacks.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use marknexia_rendering::{PageIdentity, RenderLimits, RenderedDocument};
+use marknexia_security::{ContentPolicy, HtmlPolicy, SanitizedFragment};
+
+use crate::{
+    broker::{BrokerDecision, BrokerRequest, ResourceBroker, TabResourceBroker},
+    protocol::{MessageError, PageToHost, ProtocolContext, parse_page_message},
+};
+
+/// Limit for every hosted document: the rendering crate's page limit (the
+/// .NET `MaxRenderedHtmlBytes`, 128 MiB) plus an allowance for the
+/// host-inserted `<title>` and shell template text.
+pub const MAX_DOCUMENT_BYTES: usize =
+    RenderLimits::DEFAULT_MAX_RENDERED_HTML_BYTES + MAX_TITLE_MARKUP_BYTES;
+/// Equals [`MAX_DOCUMENT_BYTES`]; kept for callers of the rendered API.
+pub const MAX_RENDERED_DOCUMENT_BYTES: usize = MAX_DOCUMENT_BYTES;
+const MAX_TITLE_MARKUP_BYTES: usize = 64 * 1024;
+/// Response-header policy for every broker response except a rendered page,
+/// whose header repeats the page's own meta policy plus the header-only
+/// `frame-ancestors 'none'` (see [`HostDocument::from_rendered`]).
+pub const DEFAULT_RESPONSE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+pub const MAX_ASSET_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_ASSETS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssetType {
+    Css,
+    JavaScript,
+    Png,
+    Jpeg,
+    Gif,
+    Svg,
+}
+
+impl AssetType {
+    pub const fn content_type(self) -> &'static str {
+        match self {
+            Self::Css => "text/css; charset=utf-8",
+            Self::JavaScript => "text/javascript; charset=utf-8",
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Svg => "image/svg+xml",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Asset {
+    kind: AssetType,
+    bytes: AssetBytes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AssetBytes {
+    TrustedBundled(&'static [u8]),
+    Generated(Vec<u8>),
+}
+
+impl Asset {
+    fn as_bytes(&self) -> &[u8] {
+        match &self.bytes {
+            AssetBytes::TrustedBundled(bytes) => bytes,
+            AssetBytes::Generated(bytes) => bytes,
+        }
+    }
+}
+
+/// An inert generated raster. Generated SVG, JavaScript and CSS have no public
+/// construction path: `SanitizedSvg` is inline-only HTML-serialized markup,
+/// not a standalone `image/svg+xml` document, so it is embedded through
+/// `SanitizedSvg::into_fragment` rather than served as an asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedAsset(Asset);
+
+impl GeneratedAsset {
+    pub fn raster(kind: AssetType, bytes: Vec<u8>) -> Result<Self, DocumentError> {
+        if !matches!(kind, AssetType::Png | AssetType::Jpeg | AssetType::Gif) {
+            return Err(DocumentError::UntrustedActiveAsset);
+        }
+        if bytes.len() > MAX_ASSET_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Ok(Self(Asset {
+            kind,
+            bytes: AssetBytes::Generated(bytes),
+        }))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedBundledAsset(Asset);
+
+impl TrustedBundledAsset {
+    pub(crate) const fn new(kind: AssetType, bytes: &'static [u8]) -> Self {
+        Self(Asset {
+            kind,
+            bytes: AssetBytes::TrustedBundled(bytes),
+        })
+    }
+}
+
+/// An immutable document for one tab. Fields stay private: every constructor
+/// builds the page from trusted text plus sealed parts, and nothing reopens
+/// the bytes for mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostDocument {
+    tab_id: u64,
+    document_epoch: u64,
+    /// Virtual origin that serves this document: the per-tab origin, or the
+    /// rendered page's own identity origin.
+    origin: String,
+    /// Shared and never copied per clone or per request: the broker streams
+    /// the document response straight from this buffer.
+    html: Arc<Vec<u8>>,
+    /// `Content-Security-Policy` response header for the document itself.
+    document_csp: String,
+    assets: BTreeMap<String, Asset>,
+    /// The page loads the pinned Mermaid runtime, so the broker serves it.
+    mermaid_runtime: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentError {
+    EmptyHtml,
+    TooLarge,
+    TooManyAssets,
+    InvalidAssetPath,
+    WrongAssetType,
+    UntrustedActiveAsset,
+    /// The rendered page was not produced for the supplied page identity, or
+    /// its trusted template prefix is not the one this host understands.
+    IdentityMismatch,
+}
+
+impl HostDocument {
+    /// Hosts a page produced by `marknexia-rendering`: the .NET template with
+    /// its inline bundled CSS and nonce'd bridge script around the sanitized
+    /// body. `RenderedDocument` can only be built by the renderer, so the
+    /// bytes are trusted template text plus a `SanitizedFragment`; the only
+    /// host change is an entity-encoded `<title>` inserted into the template
+    /// head. The document is served from `identity`'s origin so the page's
+    /// `<base href>`, `base-uri` and `img-src` name the serving origin, and
+    /// the document response carries the page's own policy as its header
+    /// (plus the header-only `frame-ancestors 'none'`). `identity` must be
+    /// the one the page was rendered with; a mismatch is rejected.
+    ///
+    /// The rendered document is consumed so its body is released as soon as
+    /// the page exists; the title is inserted in place and the page buffer
+    /// moves into the shared `Arc` without another copy. Build this off the
+    /// UI thread: `HostDocument` is `Send`.
+    pub fn from_rendered(
+        tab_id: u64,
+        document_epoch: u64,
+        title: &str,
+        rendered: RenderedDocument,
+        identity: &PageIdentity,
+        remote_images: bool,
+    ) -> Result<Self, DocumentError> {
+        const PREFIX: &str = "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"";
+        const HEAD: &str = "\">\n<head>\n  <meta charset=\"utf-8\" />\n";
+        const HEAD_END: &str = "\n  </style>\n</head>\n<body>\n";
+        if rendered.page_bytes() > MAX_DOCUMENT_BYTES - MAX_TITLE_MARKUP_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let mermaid_runtime = rendered.has_mermaid();
+        let mut page = rendered.page_html();
+        drop(rendered);
+        let origin = identity.origin();
+        // The theme value is one of three fixed template words, so the head
+        // opening is at a bounded offset in trusted template text.
+        let theme_end = page
+            .strip_prefix(PREFIX)
+            .and_then(|rest| rest.get(..16))
+            .and_then(|window| window.find('"'))
+            .map(|offset| PREFIX.len() + offset)
+            .ok_or(DocumentError::IdentityMismatch)?;
+        if !page[theme_end..].starts_with(HEAD) {
+            return Err(DocumentError::IdentityMismatch);
+        }
+        let insert_at = theme_end + HEAD.len();
+        // The first `</style></head><body>` ends the template head: the
+        // bundled stylesheet precedes it and contains no such text.
+        let head_end = page.find(HEAD_END).ok_or(DocumentError::IdentityMismatch)?;
+        let head = &page[..head_end];
+        // The page must carry exactly the template policy for the caller's
+        // remote-image setting (`RenderContext::allow_remote_assets`, the
+        // .NET `AllowRemoteAssets`), bound to the identity.
+        let page_csp = rendered_page_csp(identity, remote_images, true);
+        let expected_meta = format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
+            html_encode(&page_csp)
+        );
+        let expected_base = format!("<base href=\"{}/", html_encode(&origin));
+        if !head.contains(&expected_meta) || !head.contains(&expected_base) {
+            return Err(DocumentError::IdentityMismatch);
+        }
+        // The runtime is served only to a page whose template loads it with
+        // this identity's nonce (.NET maps `marknexia.assets` only then).
+        // The tag follows the body, which is sanitized and cannot hold one.
+        if mermaid_runtime != page[head_end..].contains(&mermaid_script_tag(identity)) {
+            return Err(DocumentError::IdentityMismatch);
+        }
+        // The frozen .NET template allows `http:` and `https:` images. The
+        // response header allows `https:` only; browsers enforce both
+        // policies, so plain-HTTP images stay blocked.
+        let csp = rendered_page_csp(identity, remote_images, false);
+        let title = HtmlPolicy::new(ContentPolicy::default())
+            .encode_text(title)
+            .map_err(|_| DocumentError::TooLarge)?;
+        let title_markup = format!("  <title>{}</title>\n", title.as_str());
+        if title_markup.len() > MAX_TITLE_MARKUP_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let required = page
+            .len()
+            .checked_add(title_markup.len())
+            .ok_or(DocumentError::TooLarge)?;
+        if required > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        page.reserve_exact(title_markup.len());
+        page.insert_str(insert_at, &title_markup);
+        let document = Self {
+            tab_id,
+            document_epoch,
+            origin,
+            html: Arc::new(page.into_bytes()),
+            document_csp: format!("{csp}; frame-ancestors 'none'"),
+            assets: BTreeMap::new(),
+            mermaid_runtime,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    pub fn new(
+        tab_id: u64,
+        document_epoch: u64,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        Self::from_shell(tab_id, document_epoch, None, fragment, assets)
+    }
+
+    /// Like [`HostDocument::new`], plus a document `<title>` that names the
+    /// WebView document for assistive technology. `title` is plain text and
+    /// is entity-encoded here, so callers cannot inject head markup.
+    pub fn new_titled(
+        tab_id: u64,
+        document_epoch: u64,
+        title: &str,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        let title = HtmlPolicy::new(ContentPolicy::default())
+            .encode_text(title)
+            .map_err(|_| DocumentError::TooLarge)?;
+        Self::from_shell(tab_id, document_epoch, Some(title), fragment, assets)
+    }
+
+    fn from_shell(
+        tab_id: u64,
+        document_epoch: u64,
+        title: Option<SanitizedFragment>,
+        fragment: SanitizedFragment,
+        assets: BTreeMap<String, GeneratedAsset>,
+    ) -> Result<Self, DocumentError> {
+        const HEAD: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">";
+        const BODY: &str = "</head><body>";
+        const SUFFIX: &str = "</body></html>";
+        let title = title.as_ref().map_or("", SanitizedFragment::as_str);
+        let title_markup = if title.is_empty() {
+            0
+        } else {
+            "<title></title>".len()
+        };
+        let required = [
+            HEAD.len(),
+            title_markup,
+            title.len(),
+            BODY.len(),
+            fragment.as_str().len(),
+            SUFFIX.len(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or(DocumentError::TooLarge)?;
+        if required > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let mut html = Vec::with_capacity(required);
+        html.extend_from_slice(HEAD.as_bytes());
+        if !title.is_empty() {
+            html.extend_from_slice(b"<title>");
+            html.extend_from_slice(title.as_bytes());
+            html.extend_from_slice(b"</title>");
+        }
+        html.extend_from_slice(BODY.as_bytes());
+        html.extend_from_slice(fragment.as_str().as_bytes());
+        html.extend_from_slice(SUFFIX.as_bytes());
+        Self::from_parts(
+            tab_id,
+            document_epoch,
+            html,
+            assets
+                .into_iter()
+                .map(|(path, asset)| (path, asset.0))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn from_trusted_bundle(
+        tab_id: u64,
+        document_epoch: u64,
+        html: Vec<u8>,
+        assets: BTreeMap<String, TrustedBundledAsset>,
+    ) -> Result<Self, DocumentError> {
+        Self::from_parts(
+            tab_id,
+            document_epoch,
+            html,
+            assets
+                .into_iter()
+                .map(|(path, asset)| (path, asset.0))
+                .collect(),
+        )
+    }
+
+    fn from_parts(
+        tab_id: u64,
+        document_epoch: u64,
+        html: Vec<u8>,
+        assets: BTreeMap<String, Asset>,
+    ) -> Result<Self, DocumentError> {
+        let document = Self {
+            tab_id,
+            document_epoch,
+            origin: TabResourceBroker::for_tab(tab_id).origin().to_owned(),
+            html: Arc::new(html),
+            document_csp: DEFAULT_RESPONSE_CSP.to_owned(),
+            assets,
+            mermaid_runtime: false,
+        };
+        document.validate()?;
+        Ok(document)
+    }
+
+    fn broker(&self) -> TabResourceBroker {
+        TabResourceBroker::with_origin(self.tab_id, self.origin.clone())
+            .with_mermaid_runtime(self.mermaid_runtime)
+    }
+
+    /// The page loads the pinned Mermaid runtime, which the broker then
+    /// serves to it at [`crate::runtime::MERMAID_RUNTIME_URI`].
+    #[must_use]
+    pub const fn loads_mermaid_runtime(&self) -> bool {
+        self.mermaid_runtime
+    }
+
+    #[must_use]
+    pub const fn tab_id(&self) -> u64 {
+        self.tab_id
+    }
+
+    #[must_use]
+    pub const fn document_epoch(&self) -> u64 {
+        self.document_epoch
+    }
+
+    #[must_use]
+    pub fn html(&self) -> &[u8] {
+        &self.html
+    }
+
+    pub fn validate(&self) -> Result<(), DocumentError> {
+        if self.html.is_empty() {
+            return Err(DocumentError::EmptyHtml);
+        }
+        if self.html.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        if self.assets.len() > MAX_ASSETS {
+            return Err(DocumentError::TooManyAssets);
+        }
+        let broker = self.broker();
+        for (path, asset) in &self.assets {
+            if asset.as_bytes().len() > MAX_ASSET_BYTES {
+                return Err(DocumentError::TooLarge);
+            }
+            let kind = match asset.kind {
+                AssetType::Css => crate::broker::ResourceKind::Stylesheet,
+                AssetType::JavaScript => crate::broker::ResourceKind::Script,
+                AssetType::Png | AssetType::Jpeg | AssetType::Gif | AssetType::Svg => {
+                    crate::broker::ResourceKind::Image
+                }
+            };
+            let uri = format!("{}/assets/{path}", broker.origin());
+            if !matches!(
+                broker.resolve(&BrokerRequest {
+                    method: "GET",
+                    uri: &uri,
+                    controller_tab_id: self.tab_id,
+                    kind,
+                }),
+                BrokerDecision::LocalAsset { relative_path } if relative_path == *path
+            ) {
+                return Err(DocumentError::InvalidAssetPath);
+            }
+            let extension_matches = match asset.kind {
+                AssetType::Css => path.ends_with(".css"),
+                AssetType::JavaScript => path.ends_with(".js"),
+                AssetType::Png => path.ends_with(".png"),
+                AssetType::Jpeg => path.ends_with(".jpg") || path.ends_with(".jpeg"),
+                AssetType::Gif => path.ends_with(".gif"),
+                AssetType::Svg => path.ends_with(".svg"),
+            };
+            if !extension_matches {
+                return Err(DocumentError::WrongAssetType);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn document_uri(&self) -> String {
+        self.broker().document_uri()
+    }
+
+    /// The `Content-Security-Policy` header sent with the document response.
+    #[must_use]
+    pub fn document_csp(&self) -> &str {
+        &self.document_csp
+    }
+
+    pub fn resolve(&self, request: &BrokerRequest<'_>) -> ResponseSpec<'_> {
+        match self.broker().resolve(request) {
+            BrokerDecision::Document => ResponseSpec {
+                content_security_policy: &self.document_csp,
+                shared_body: Some(&self.html),
+                ..ResponseSpec::ok("text/html; charset=utf-8", &self.html)
+            },
+            BrokerDecision::LocalAsset { relative_path } => self
+                .assets
+                .get(&relative_path)
+                .map(|asset| ResponseSpec::ok(asset.kind.content_type(), asset.as_bytes()))
+                .unwrap_or_else(ResponseSpec::forbidden),
+            BrokerDecision::BundledRuntime(runtime) => ResponseSpec {
+                static_body: Some(runtime.bytes()),
+                ..ResponseSpec::ok(runtime.content_type(), runtime.bytes())
+            },
+            BrokerDecision::Deny { status: 405 } => ResponseSpec::method_not_allowed(),
+            BrokerDecision::Deny { .. } => ResponseSpec::forbidden(),
+        }
+    }
+
+    pub fn permits_navigation(&self, uri: &str) -> bool {
+        uri == self.document_uri()
+    }
+
+    pub fn parse_message(
+        &self,
+        raw_json: &[u8],
+        source_uri: &str,
+    ) -> Result<PageToHost, MessageError> {
+        let broker = self.broker();
+        let source = broker.document_uri();
+        parse_page_message(
+            raw_json,
+            source_uri,
+            &ProtocolContext {
+                expected_source_uri: &source,
+                expected_origin: broker.origin(),
+                protocol: 1,
+                tab_id: self.tab_id,
+                document_epoch: self.document_epoch,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseSpec<'a> {
+    pub status: i32,
+    pub reason: &'static str,
+    pub content_type: &'static str,
+    pub content_security_policy: &'a str,
+    pub body: &'a [u8],
+    /// The same bytes as `body` when they live in a shared document buffer:
+    /// the native adapter then streams the response from the buffer instead
+    /// of copying it into a per-request stream.
+    pub shared_body: Option<&'a Arc<Vec<u8>>>,
+    /// The same bytes as `body` when they are embedded in the binary (a
+    /// pinned runtime): the native adapter streams them in place, no copy.
+    pub static_body: Option<&'static [u8]>,
+}
+
+impl<'a> ResponseSpec<'a> {
+    pub const fn ok(content_type: &'static str, body: &'a [u8]) -> Self {
+        Self {
+            status: 200,
+            reason: "OK",
+            content_type,
+            content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
+            static_body: None,
+            body,
+        }
+    }
+
+    pub const fn forbidden() -> Self {
+        Self {
+            status: 403,
+            reason: "Forbidden",
+            content_type: "text/plain; charset=utf-8",
+            content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
+            static_body: None,
+            body: b"Forbidden",
+        }
+    }
+
+    pub const fn method_not_allowed() -> Self {
+        Self {
+            status: 405,
+            reason: "Method Not Allowed",
+            content_type: "text/plain; charset=utf-8",
+            content_security_policy: DEFAULT_RESPONSE_CSP,
+            shared_body: None,
+            static_body: None,
+            body: b"Method Not Allowed",
+        }
+    }
+}
+
+/// The policy `marknexia-rendering` writes into the page's meta tag for
+/// `identity` with remote assets off (.NET `TemplateEngine`). It names the
+/// identity origin and nonce; `from_rendered` checks the page against it, so
+/// any template change fails closed instead of drifting.
+/// The rendered page policy. `template_http` adds `http:` to remote image
+/// sources, as the .NET template does; the response header omits it.
+fn rendered_page_csp(identity: &PageIdentity, remote_images: bool, template_http: bool) -> String {
+    let origin = identity.origin();
+    let nonce = identity.nonce();
+    let remote = match (remote_images, template_http) {
+        (false, _) => "",
+        (true, true) => " http: https:",
+        (true, false) => " https:",
+    };
+    format!(
+        "default-src 'none'; base-uri {origin}; script-src 'nonce-{nonce}' https://marknexia.assets; style-src 'unsafe-inline'; img-src {origin} data:{remote}; font-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'"
+    )
+}
+
+/// The template's runtime tag for `identity` (.NET `TemplateEngine`).
+fn mermaid_script_tag(identity: &PageIdentity) -> String {
+    format!(
+        "<script src=\"{}\" nonce=\"{}\"></script>",
+        crate::runtime::MERMAID_RUNTIME_URI,
+        identity.nonce()
+    )
+}
+
+/// .NET `WebUtility.HtmlEncode` for the five characters the template encodes.
+fn html_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    for character in text.chars() {
+        match character {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}

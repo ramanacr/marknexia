@@ -1,0 +1,6 @@
+def f():
+    """one"""
+x = """two"""
+y = b'''three'''
+z =    rb"""four"""
+d = {'a': """five"""}

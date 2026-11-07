@@ -1,0 +1,32 @@
+{
+  "area": "update-archives",
+  "expected": {
+    "exception": "InvalidDataException",
+    "message": "The update archive is larger than the supported limit.",
+    "outcome": "rejected",
+    "pendingStageDirectories": 0,
+    "preExistingStageStillExists": false
+  },
+  "input": {
+    "archiveBytesBase64": "UEsDBBQAAAAAAAAAAAAAAAAAAAAAAAAAAAANAAAAb3ZlcnNpemVkLmJpblBLAQIUABQAAAAAAAAAAAAAAAAAAAAAAAHKmjsNAAAAAAAAAAAAAAAAAAAAAABvdmVyc2l6ZWQuYmluUEsFBgAAAAABAAEAOwAAACsAAAAAAA==",
+    "checksumMatches": true,
+    "checksumText": "79cf6a499d0cb9980b84d9e6e72535918ba37299d64291b9300e1b256663a3f6  package.zip\n",
+    "maximumExpandedBytes": 1000000000,
+    "packageBytes": 124,
+    "packageEntries": [
+      {
+        "contentBase64": null,
+        "declaredUncompressedBytes": 1000000001,
+        "path": "oversized.bin"
+      }
+    ],
+    "preExistingStage": null
+  },
+  "name": "expansion-limits",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": {
+    "files": [],
+    "root": "updates"
+  }
+}

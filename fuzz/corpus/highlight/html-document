@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>T &amp; &#169; &copy;</title>
+  <!-- a comment -->
+  <style>body { color: red; }</style>
+</head>
+<body class='x' data-y=z hidden>
+  <a href="https://example.com" target=_blank>link</a>
+  <ns:tag ns:attr="1">x</ns:tag>
+</body>
+</html>

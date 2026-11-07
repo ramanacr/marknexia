@@ -1,0 +1,7 @@
+# Frozen .NET oracle fixtures are byte-exact LF (see compat/README.md);
+# checkout must not convert them, or digest verification fails.
+compat/fixtures/** text eol=lf
+# Fuzz seeds are raw bytes (a selector byte, then code that may hold CRLF).
+fuzz/corpus/highlight/** -text
+# Fuzz crash inputs kept as regression corpus are raw bytes too.
+fuzz/corpus/markdown_and_html/** -text

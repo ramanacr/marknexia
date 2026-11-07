@@ -20,5 +20,6 @@
     <Project Path="tests/Marknexia.Security.Tests/Marknexia.Security.Tests.csproj" />
     <Project Path="tests/Marknexia.Rendering.Tests/Marknexia.Rendering.Tests.csproj" />
     <Project Path="tests/Marknexia.Infrastructure.Tests/Marknexia.Infrastructure.Tests.csproj" />
+    <Project Path="tests/Marknexia.Parity.Tests/Marknexia.Parity.Tests.csproj" />
   </Folder>
 </Solution>

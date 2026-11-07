@@ -1,0 +1,6 @@
+#if DEBUG
+  #define TRACE
+#endif
+#pragma warning disable 1591
+  #warning text
+int x = 1;

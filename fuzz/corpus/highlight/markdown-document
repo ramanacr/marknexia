@@ -1,0 +1,28 @@
+# Heading 1
+## Heading 2 ##
+Setext
+======
+Sub
+---
+
+* item one
++ item two
+- item three
+1. numbered
+
+**bold** and __bold__ and *em* and _em_ and `code` and ``co`de``
+[link](http://x.com) ![img](a.png) [ref][1] [![badge](b.svg)](http://y)
+
+[1]: http://example.com "Title"
+
+    indented code
+    more
+
+```csharp
+var x = 1;
+```
+
+> quote
+
+***
+\* escaped \_ <b>html</b> &amp; "quoted" 'q'

@@ -1,0 +1,13 @@
+[package]
+name = "marknexia-markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+serde = { workspace = true }
+pulldown-cmark = { version = "=0.13.6", default-features = false, features = ["html"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

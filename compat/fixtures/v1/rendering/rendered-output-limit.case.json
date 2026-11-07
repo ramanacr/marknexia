@@ -1,0 +1,24 @@
+{
+  "area": "rendering",
+  "expected": {
+    "exception": "DocumentTooLargeException",
+    "maximumBytes": 1,
+    "outcome": "rejected"
+  },
+  "input": {
+    "allowRemoteAssets": false,
+    "enableDiagrams": true,
+    "enableMath": true,
+    "markdown": "# bounded output",
+    "maxDiagramCount": 8,
+    "maxDiagramSourceBytes": 1000,
+    "maxRenderedHtmlBytes": 1,
+    "repositoryRoot": ".",
+    "sourcePath": "compat/virtual.md",
+    "theme": "System"
+  },
+  "name": "rendered-output-limit",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": null
+}

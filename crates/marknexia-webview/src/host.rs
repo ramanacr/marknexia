@@ -1,0 +1,814 @@
+//! One native controller and its CoreWebView2 interface on the owning STA.
+
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    rc::{Rc, Weak},
+};
+
+use webview2_com::{
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+    Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_COLOR, COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+        COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, ICoreWebView2,
+        ICoreWebView2Controller, ICoreWebView2Controller2,
+    },
+    ProcessFailedEventHandler,
+};
+use windows::{
+    Win32::{
+        Foundation::RECT,
+        UI::Input::KeyboardAndMouse::{
+            GetKeyState, VK_CONTROL, VK_F, VK_F3, VK_F6, VK_MENU, VK_SHIFT, VK_TAB, VK_W,
+        },
+    },
+    core::{BOOL, Interface, PCWSTR},
+};
+
+/// The host-injected find adapter (see `find_adapter.js`): a function
+/// expression that takes the document's origin.
+pub const FIND_ADAPTER_JS: &str = include_str!("find_adapter.js");
+
+/// The origin (`scheme://host[:port]`) of an absolute document URI.
+#[must_use]
+pub fn document_origin(document_uri: &str) -> Option<&str> {
+    let after_scheme = document_uri.find("://")? + 3;
+    let end = document_uri[after_scheme..]
+        .find('/')
+        .map_or(document_uri.len(), |index| after_scheme + index);
+    (end > after_scheme).then(|| &document_uri[..end])
+}
+
+/// The adapter invoked with `origin` as JSON data: it stays inert in any
+/// other origin or frame.
+///
+/// # Errors
+///
+/// Only when the origin cannot be serialized (never for a `&str`).
+pub fn find_adapter_script(origin: &str) -> Result<String, HostError> {
+    let origin = serde_json::to_string(origin).map_err(|_| HostError::InvalidDocument)?;
+    Ok(format!("({})({origin});", FIND_ADAPTER_JS.trim_end()))
+}
+
+/// The host-injected link adapter (see `link_adapter.js`): a function
+/// expression that takes the document's origin, tab id and epoch.
+pub const LINK_ADAPTER_JS: &str = include_str!("link_adapter.js");
+
+/// The link adapter invoked with the document identity as JSON data: it
+/// posts typed `openLink`, `linkHover`, `scrollChanged` and `historyStep`
+/// messages for exactly this document, and stays inert in any other origin
+/// or frame.
+///
+/// # Errors
+///
+/// Only when the origin cannot be serialized (never for a `&str`).
+pub fn link_adapter_script(
+    origin: &str,
+    tab_id: u64,
+    document_epoch: u64,
+) -> Result<String, HostError> {
+    let origin = serde_json::to_string(origin).map_err(|_| HostError::InvalidDocument)?;
+    Ok(format!(
+        "({})({origin}, {tab_id}, {document_epoch});",
+        LINK_ADAPTER_JS.trim_end()
+    ))
+}
+
+/// Script ids returned by `AddScriptToExecuteOnDocumentCreated`, so the
+/// adapters of a replaced document can be removed.
+type ScriptIds = Rc<RefCell<Vec<String>>>;
+
+/// Registers the find and link adapters, bound to `document`'s origin and
+/// identity, for the next document this controller loads. WebView2 orders
+/// the registration before a later `Navigate` on the same controller; the
+/// ids arrive in the completion and are kept for removal.
+fn add_document_scripts(
+    core: &ICoreWebView2,
+    document: &HostDocument,
+    ids: &ScriptIds,
+) -> Result<(), HostError> {
+    let uri = document.document_uri();
+    let origin = document_origin(&uri).ok_or(HostError::InvalidDocument)?;
+    for script in [
+        find_adapter_script(origin)?,
+        link_adapter_script(origin, document.tab_id(), document.document_epoch())?,
+    ] {
+        let script: Vec<u16> = script.encode_utf16().chain(std::iter::once(0)).collect();
+        let ids = Rc::downgrade(ids);
+        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+            move |result, id| {
+                if result.is_ok()
+                    && let Some(ids) = ids.upgrade()
+                    && let Ok(mut ids) = ids.try_borrow_mut()
+                {
+                    ids.push(id);
+                }
+                Ok(())
+            },
+        ));
+        // SAFETY: the script buffer outlives this synchronous call; WebView2
+        // copies it. The handler is a refcounted COM object owned by WebView2.
+        unsafe {
+            core.AddScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(script.as_ptr()), &handler)
+        }
+        .map_err(HostError::from_com)?;
+    }
+    Ok(())
+}
+
+/// The script that restores a vertical scroll offset (back and forward).
+#[must_use]
+pub fn scroll_offset_script(top: u32) -> String {
+    format!("window.scrollTo({{ left: 0, top: {top}, behavior: 'instant' }})")
+}
+
+use crate::{
+    callbacks::CallbackTokens,
+    environment::WebViewEnvironment,
+    panic_flag::PanicFlag,
+    policy::HostDocument,
+    protocol::{HostToPage, PageToHost, serialize_host_message},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostError {
+    ControllerStartupFailed(i32),
+    MissingController,
+    MissingWebView(i32),
+    CallFailed(i32),
+    InvalidDocument,
+    InvalidMessage,
+    AlreadyBound,
+    Closed,
+    /// The controller-created callback panicked; the panic was recorded.
+    CallbackPanicked,
+}
+
+impl HostError {
+    pub(crate) fn from_com(error: windows::core::Error) -> Self {
+        Self::CallFailed(error.code().0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessFailure {
+    BrowserExited,
+    RendererExited,
+    RendererUnresponsive,
+    Other(i32),
+}
+
+impl From<COREWEBVIEW2_PROCESS_FAILED_KIND> for ProcessFailure {
+    fn from(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> Self {
+        match kind {
+            COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => Self::BrowserExited,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => Self::RendererExited,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {
+                Self::RendererUnresponsive
+            }
+            other => Self::Other(other.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportBounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostColor {
+    pub alpha: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl From<ViewportBounds> for RECT {
+    fn from(value: ViewportBounds) -> Self {
+        Self {
+            left: value.left,
+            top: value.top,
+            right: value.right,
+            bottom: value.bottom,
+        }
+    }
+}
+
+impl From<RECT> for ViewportBounds {
+    fn from(value: RECT) -> Self {
+        Self {
+            left: value.left,
+            top: value.top,
+            right: value.right,
+            bottom: value.bottom,
+        }
+    }
+}
+
+/// The parent HWND is owned by the Win32 shell. Call `close` before destroying
+/// it; Drop also closes defensively. This type is !Send via its environment.
+pub struct WebViewHost {
+    core: Option<ICoreWebView2>,
+    controller: Option<ICoreWebView2Controller>,
+    process_failure_tokens: Vec<i64>,
+    callbacks: Option<CallbackTokens>,
+    security_abort: Option<Rc<dyn Fn() -> windows::core::Result<()>>>,
+    document: Option<Rc<HostDocument>>,
+    /// What the callbacks serve; swapped by `rebind_document`.
+    document_slot: Rc<RefCell<Weak<HostDocument>>>,
+    /// The adapters registered for the current document.
+    script_ids: ScriptIds,
+    page_messages: Rc<RefCell<VecDeque<PageToHost>>>,
+    accelerator_token: Option<i64>,
+    accelerators: Rc<RefCell<VecDeque<ShellAccelerator>>>,
+    /// Where panics caught in this controller's callbacks are recorded (the
+    /// owning session's flag once `share_callback_panics` ran).
+    callback_panics: PanicFlag,
+    _environment: WebViewEnvironment,
+}
+
+/// A shell-owned key chord pressed while the WebView had keyboard focus.
+/// WebView2 swallows these for the shell; the application drains them after
+/// dispatch, outside COM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellAccelerator {
+    pub virtual_key: u16,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl ShellAccelerator {
+    /// Only chords the native shell owns leave the page: Ctrl+Tab,
+    /// Ctrl+Shift+Tab, Ctrl+W, F6/Shift+F6, the shell's find chords Ctrl+F,
+    /// F3 and Shift+F3 (so WebView2's own find bar never opens), and the .NET
+    /// command accelerators (see [`Self::is_command_chord`]). Everything
+    /// else, including copy and Escape inside the document, stays with
+    /// WebView2.
+    #[must_use]
+    pub fn from_key(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> Option<Self> {
+        let owned = !alt
+            && match virtual_key {
+                key if key == VK_TAB.0 => ctrl,
+                key if key == VK_W.0 => ctrl && !shift,
+                key if key == VK_F6.0 => !ctrl,
+                key if key == VK_F.0 => ctrl && !shift,
+                key if key == VK_F3.0 => !ctrl,
+                _ => false,
+            };
+        (owned || Self::is_command_chord(virtual_key, ctrl, shift, alt)).then_some(Self {
+            virtual_key,
+            ctrl,
+            shift,
+            alt,
+        })
+    }
+
+    /// The .NET `MainWindow` accelerators that must reach the shell from the
+    /// document: Ctrl+O, Ctrl+Shift+O and Ctrl+T (open), F5 and Ctrl+R
+    /// (reload, instead of a browser reload of the pinned page), and
+    /// Alt+Left and Alt+Right (history, instead of browser navigation).
+    #[must_use]
+    pub fn is_command_chord(virtual_key: u16, ctrl: bool, shift: bool, alt: bool) -> bool {
+        const VK_LEFT: u16 = 0x25;
+        const VK_RIGHT: u16 = 0x27;
+        const VK_O: u16 = 0x4F;
+        const VK_R: u16 = 0x52;
+        const VK_T: u16 = 0x54;
+        const VK_F5: u16 = 0x74;
+        matches!(
+            (virtual_key, ctrl, shift, alt),
+            (VK_O, true, _, false)
+                | (VK_T | VK_R, true, false, false)
+                | (VK_F5, false, false, false)
+                | (VK_LEFT | VK_RIGHT, false, false, true)
+        )
+    }
+}
+
+/// The script that asks the page bridge to scroll (.NET
+/// `ApplyPendingLocationAsync`): `scrollToAnchor` with the JSON-encoded
+/// anchor, or `scrollToTop` without one. JSON encoding keeps document text
+/// out of the script syntax.
+#[must_use]
+pub fn scroll_script(anchor: Option<&str>) -> String {
+    match anchor.filter(|anchor| !anchor.is_empty()) {
+        Some(anchor) => {
+            let argument = serde_json::to_string(anchor).unwrap_or_else(|_| "\"\"".to_owned());
+            format!("window.marknexiaBridge?.scrollToAnchor({argument})")
+        }
+        None => "window.marknexiaBridge?.scrollToTop()".to_owned(),
+    }
+}
+
+impl WebViewHost {
+    pub(crate) fn from_controller(
+        controller: ICoreWebView2Controller,
+        environment: WebViewEnvironment,
+    ) -> Result<Self, HostError> {
+        // SAFETY: the controller callback executes on the creating STA. The
+        // environment clone retains that apartment, and the returned COM
+        // interface is owned by this host until close/drop, not by a callback.
+        let core = unsafe { controller.CoreWebView2() }
+            .map_err(|error| HostError::MissingWebView(error.code().0))?;
+        Ok(Self {
+            core: Some(core),
+            controller: Some(controller),
+            process_failure_tokens: Vec::new(),
+            callbacks: None,
+            security_abort: None,
+            document: None,
+            document_slot: Rc::new(RefCell::new(Weak::new())),
+            script_ids: Rc::new(RefCell::new(Vec::new())),
+            page_messages: Rc::new(RefCell::new(VecDeque::new())),
+            accelerator_token: None,
+            accelerators: Rc::new(RefCell::new(VecDeque::new())),
+            callback_panics: PanicFlag::default(),
+            _environment: environment,
+        })
+    }
+
+    /// Route shell accelerators pressed inside the page back to the shell.
+    /// The callback only records the chord; the shell acts on it after
+    /// dispatch through `drain_accelerators`.
+    pub fn intercept_shell_accelerators(&mut self) -> Result<(), HostError> {
+        if self.accelerator_token.is_some() {
+            return Ok(());
+        }
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let queue = Rc::downgrade(&self.accelerators);
+        let panics = self.callback_panics.clone();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+            // The whole body runs under the guard; a panic is recorded and
+            // the key is left to WebView2.
+            panics
+                .call(|| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+                    let mut key = 0_u32;
+                    // SAFETY: event args are valid for this STA callback; outputs are
+                    // live stack values that COM does not retain.
+                    unsafe {
+                        args.KeyEventKind(&mut kind)?;
+                        args.VirtualKey(&mut key)?;
+                    }
+                    if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                        && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+                    {
+                        return Ok(());
+                    }
+                    // SAFETY: GetKeyState reads this thread's keyboard state, which
+                    // WebView2 synchronizes before raising the event on the UI thread.
+                    let down = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
+                    let Ok(key) = u16::try_from(key) else {
+                        return Ok(());
+                    };
+                    if let Some(chord) = ShellAccelerator::from_key(
+                        key,
+                        down(VK_CONTROL.0),
+                        down(VK_SHIFT.0),
+                        down(VK_MENU.0),
+                    ) && let Some(queue) = queue.upgrade()
+                    {
+                        unsafe { args.SetHandled(true)? };
+                        queue.borrow_mut().push_back(chord);
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
+        }));
+        let mut token = 0;
+        // SAFETY: registered on the creating STA; the token is removed before
+        // the controller is closed (see `close`).
+        unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
+            .map_err(HostError::from_com)?;
+        self.accelerator_token = Some(token);
+        Ok(())
+    }
+
+    /// Drain shell accelerators recorded by the page callback.
+    pub fn drain_accelerators(&self) -> Vec<ShellAccelerator> {
+        self.accelerators.borrow_mut().drain(..).collect()
+    }
+
+    /// Give keyboard focus to the document (logical Document focus).
+    pub fn move_focus(&self) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        // SAFETY: synchronous call on the owning STA with no retained state.
+        unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) }
+            .map_err(HostError::from_com)
+    }
+
+    pub fn set_bounds(&self, bounds: ViewportBounds) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        // SAFETY: the controller and caller are on the environment's STA. RECT
+        // is copied by the COM call; no Rust mutable borrow crosses dispatch.
+        unsafe { controller.SetBounds(bounds.into()) }
+            .map_err(|error| HostError::CallFailed(error.code().0))
+    }
+
+    pub fn bounds(&self) -> Result<ViewportBounds, HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let mut bounds = RECT::default();
+        // SAFETY: COM writes only into this live local RECT on the owning STA.
+        // There is no callback retaining the pointer after the call returns.
+        unsafe { controller.Bounds(&mut bounds) }
+            .map_err(|error| HostError::CallFailed(error.code().0))?;
+        Ok(bounds.into())
+    }
+
+    pub fn set_visible(&self, visible: bool) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        // SAFETY: visibility is copied into the COM controller on its owning
+        // STA. The host retains no borrowed Rust state through this call.
+        unsafe { controller.SetIsVisible(visible) }
+            .map_err(|error| HostError::CallFailed(error.code().0))
+    }
+
+    pub fn set_default_background(&self, color: HostColor) -> Result<(), HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let controller = controller
+            .cast::<ICoreWebView2Controller2>()
+            .map_err(HostError::from_com)?;
+        let native = COREWEBVIEW2_COLOR {
+            A: color.alpha,
+            R: color.red,
+            G: color.green,
+            B: color.blue,
+        };
+        unsafe { controller.SetDefaultBackgroundColor(native) }.map_err(HostError::from_com)
+    }
+
+    pub fn is_visible(&self) -> Result<bool, HostError> {
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?;
+        let mut visible = BOOL::default();
+        // SAFETY: COM writes a BOOL into this live local on its owning STA;
+        // no callback retains the pointer after return.
+        unsafe { controller.IsVisible(&mut visible) }
+            .map_err(|error| HostError::CallFailed(error.code().0))?;
+        Ok(visible.as_bool())
+    }
+
+    /// Register a process-failure listener without creating a COM-to-app
+    /// reference cycle. The application retains the strong observer reference.
+    pub fn observe_process_failures(
+        &mut self,
+        observer: Weak<dyn Fn(ProcessFailure)>,
+    ) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let panics = self.callback_panics.clone();
+        let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+            panics
+                .call(|| {
+                    if let (Some(args), Some(observer)) = (args, observer.upgrade()) {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                        // SAFETY: the event args are owned for this STA callback. The
+                        // output is a live stack value and is not retained by COM.
+                        unsafe { args.ProcessFailedKind(&mut kind) }?;
+                        observer(ProcessFailure::from(kind));
+                    }
+                    Ok(())
+                })
+                .unwrap_or(Ok(()))
+        }));
+        let mut token = 0;
+        // SAFETY: the core and callback are used on their creating STA. COM
+        // retains the handler after registration; the token is kept until
+        // explicit removal before this controller is closed.
+        unsafe { core.add_ProcessFailed(&handler, &mut token) }
+            .map_err(|error| HostError::CallFailed(error.code().0))?;
+        self.process_failure_tokens.push(token);
+        Ok(())
+    }
+
+    /// The immutable document is retained for the full controller lifetime.
+    /// Every event sink receives a weak reference and has no path to raw COM
+    /// from the application observer. A failed binding closes this controller.
+    pub fn bind_document(&mut self, document: HostDocument) -> Result<(), HostError> {
+        if self.callbacks.is_some() {
+            return Err(HostError::AlreadyBound);
+        }
+        document
+            .validate()
+            .map_err(|_| HostError::InvalidDocument)?;
+        let core = self.core.as_ref().ok_or(HostError::Closed)?.clone();
+        let controller = self.controller.as_ref().ok_or(HostError::Closed)?.clone();
+        let security_abort: Rc<dyn Fn() -> windows::core::Result<()>> =
+            Rc::new(move || unsafe { controller.Close() });
+        let document = Rc::new(document);
+        self.callbacks = Some(CallbackTokens::new(&core));
+        self.security_abort = Some(Rc::clone(&security_abort));
+        self.document = Some(Rc::clone(&document));
+        *self.document_slot.borrow_mut() = Rc::downgrade(&document);
+        if let Err(error) = self.callbacks.as_mut().expect("just installed").register(
+            Rc::downgrade(&security_abort),
+            self._environment.native_environment(),
+            &self.document_slot,
+            Rc::downgrade(&self.page_messages),
+            &self.callback_panics,
+        ) {
+            // Retain failed removal tokens in the host if cleanup itself
+            // fails. The session can retry `close` before releasing COM.
+            let _ = self.close();
+            return Err(error);
+        }
+        // The adapters are registered before the pinned document's
+        // navigation starts. A failure closes this controller, like any other
+        // binding failure.
+        if let Err(error) = add_document_scripts(&core, &document, &self.script_ids) {
+            let _ = self.close();
+            return Err(error);
+        }
+        let uri = document.document_uri();
+        let uri: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: the URI remains live for this synchronous COM call. The
+        // registered resource handler supplies exactly the immutable document.
+        if let Err(error) = unsafe { core.Navigate(windows::core::PCWSTR::from_raw(uri.as_ptr())) }
+        {
+            let _ = self.close();
+            return Err(HostError::from_com(error));
+        }
+        Ok(())
+    }
+
+    /// Replaces the pinned document in place (.NET navigates the tab's own
+    /// WebView2): the controller, its renderer and its callbacks stay, so a
+    /// followed link costs one navigation, not a new controller. The old
+    /// page stays painted until the new one commits. The old adapters are
+    /// removed, the new document's adapters registered, queued page messages
+    /// of the old document dropped, and the load state reset; then the
+    /// controller navigates to the new document. Only a document for the
+    /// same tab is accepted. A failure leaves the controller to be closed by
+    /// the caller.
+    pub fn rebind_document(&mut self, document: HostDocument) -> Result<(), HostError> {
+        let current = self.document.as_ref().ok_or(HostError::Closed)?;
+        if document.tab_id() != current.tab_id() {
+            return Err(HostError::InvalidDocument);
+        }
+        document
+            .validate()
+            .map_err(|_| HostError::InvalidDocument)?;
+        let core = self.core.as_ref().ok_or(HostError::Closed)?.clone();
+        let callbacks = self.callbacks.as_ref().ok_or(HostError::Closed)?;
+        let document = Rc::new(document);
+        // Serve the new document before anything can navigate to it.
+        *self
+            .document_slot
+            .try_borrow_mut()
+            .map_err(|_| HostError::InvalidDocument)? = Rc::downgrade(&document);
+        self.document = Some(Rc::clone(&document));
+        callbacks.reset_for_new_document();
+        self.page_messages.borrow_mut().clear();
+        let old_ids: Vec<String> = self.script_ids.borrow_mut().drain(..).collect();
+        for id in old_ids {
+            let id: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            // SAFETY: synchronous call on the owning STA; WebView2 copies
+            // the id. A failure leaves an adapter that its origin and epoch
+            // checks keep inert or rejected.
+            let _ = unsafe {
+                core.RemoveScriptToExecuteOnDocumentCreated(PCWSTR::from_raw(id.as_ptr()))
+            };
+        }
+        add_document_scripts(&core, &document, &self.script_ids)?;
+        let uri: Vec<u16> = document
+            .document_uri()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the URI remains live for this synchronous COM call. The
+        // resource handler now serves exactly the new document.
+        unsafe { core.Navigate(PCWSTR::from_raw(uri.as_ptr())) }.map_err(HostError::from_com)
+    }
+
+    /// User-initiated navigations away from the document that WebView2
+    /// started without the link adapter (and that were cancelled), as
+    /// absolute URIs, in order.
+    pub fn drain_navigation_requests(&self) -> Vec<String> {
+        self.callbacks
+            .as_ref()
+            .map(CallbackTokens::drain_navigation_requests)
+            .unwrap_or_default()
+    }
+
+    /// Restores a vertical scroll offset in the loaded document (back and
+    /// forward). Fire and forget, like [`Self::scroll_to_anchor`].
+    pub fn scroll_to_offset(&self, top: u32) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        if self.document.is_none() || !self.document_loaded() {
+            return Err(HostError::InvalidDocument);
+        }
+        let script: Vec<u16> = scroll_offset_script(top)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: as in `scroll_to_anchor`.
+        unsafe {
+            core.ExecuteScript(
+                PCWSTR::from_raw(script.as_ptr()),
+                None::<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ExecuteScriptCompletedHandler>,
+            )
+        }
+        .map_err(HostError::from_com)
+    }
+
+    pub fn document_identity(&self) -> Result<(u64, u64), HostError> {
+        let document = self.document.as_ref().ok_or(HostError::Closed)?;
+        Ok((document.tab_id(), document.document_epoch()))
+    }
+
+    /// Scrolls the loaded document through the page bridge (see
+    /// [`scroll_script`]). Fire and forget: no completion handler is kept.
+    pub fn scroll_to_anchor(&self, anchor: Option<&str>) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        // Only the pinned document, after its navigation succeeded, may be
+        // scripted: never a page still loading or a failed navigation.
+        if self.document.is_none() || !self.document_loaded() {
+            return Err(HostError::InvalidDocument);
+        }
+        let script: Vec<u16> = scroll_script(anchor)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: called on the owning STA; the script buffer outlives the
+        // call (WebView2 copies it) and no handler is registered.
+        unsafe {
+            core.ExecuteScript(
+                windows::core::PCWSTR::from_raw(script.as_ptr()),
+                None::<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ExecuteScriptCompletedHandler>,
+            )
+        }
+        .map_err(HostError::from_com)
+    }
+
+    /// Only a typed, identity-bound message can cross into the page. The
+    /// immutable document epoch makes a stale renderer response rejectable.
+    pub fn post_message(&self, message: &HostToPage) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let document = self.document.as_ref().ok_or(HostError::InvalidDocument)?;
+        if message.identity() != (1, document.tab_id(), document.document_epoch()) {
+            return Err(HostError::InvalidMessage);
+        }
+        let json = serialize_host_message(message).map_err(|_| HostError::InvalidMessage)?;
+        let json: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { core.PostWebMessageAsJson(windows::core::PCWSTR::from_raw(json.as_ptr())) }
+            .map_err(HostError::from_com)
+    }
+
+    pub(crate) fn resource_boundary_failed(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::resource_failed)
+    }
+
+    /// True when the pinned document's navigation completed without success
+    /// before it ever loaded.
+    pub fn navigation_failed(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::navigation_failed)
+    }
+
+    /// True once the pinned document completed a successful navigation.
+    pub fn document_loaded(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(CallbackTokens::document_loaded)
+    }
+
+    /// Routes panics caught in this controller's callbacks to lag (the
+    /// owning session's), so they are reported even after this controller
+    /// is closed, orphaned or replaced. Call before registering callbacks.
+    pub(crate) fn share_callback_panics(&mut self, flag: &PanicFlag) {
+        self.callback_panics = flag.clone();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_flag_for_test(&self) -> &PanicFlag {
+        &self.callback_panics
+    }
+
+    /// Native tests only: evaluates `script` in the loaded page and stores
+    /// its JSON result in `result` when the completion arrives.
+    #[cfg(test)]
+    pub(crate) fn evaluate_for_test(
+        &self,
+        script: &str,
+        result: std::rc::Rc<RefCell<Option<String>>>,
+    ) -> Result<(), HostError> {
+        let core = self.core.as_ref().ok_or(HostError::Closed)?;
+        let script: Vec<u16> = script.encode_utf16().chain(std::iter::once(0)).collect();
+        let handler =
+            webview2_com::ExecuteScriptCompletedHandler::create(Box::new(move |status, json| {
+                *result.borrow_mut() = Some(status.map_or_else(|_| "error".to_owned(), |()| json));
+                Ok(())
+            }));
+        // SAFETY: called on the owning STA; WebView2 copies the script.
+        unsafe { core.ExecuteScript(windows::core::PCWSTR::from_raw(script.as_ptr()), &handler) }
+            .map_err(HostError::from_com)
+    }
+
+    /// Drain validated page messages after Windows dispatch, outside COM.
+    pub fn drain_page_messages(&self) -> Vec<PageToHost> {
+        self.page_messages.borrow_mut().drain(..).collect()
+    }
+
+    pub fn close(&mut self) -> Result<(), HostError> {
+        let mut first_error = None;
+        if let Some(callbacks) = self.callbacks.as_mut() {
+            callbacks.close()?;
+        }
+        if let Some(core) = self.core.as_ref() {
+            let mut failed_tokens = Vec::new();
+            for token in self.process_failure_tokens.drain(..) {
+                // SAFETY: remove every retained event registration on the
+                // creating STA before releasing CoreWebView2 or controller.
+                if let Err(error) = unsafe { core.remove_ProcessFailed(token) } {
+                    first_error.get_or_insert(HostError::CallFailed(error.code().0));
+                    failed_tokens.push(token);
+                }
+            }
+            self.process_failure_tokens = failed_tokens;
+        }
+        if let (Some(controller), Some(token)) = (self.controller.as_ref(), self.accelerator_token)
+        {
+            // SAFETY: removal on the creating STA before Close; a failed
+            // removal keeps the token so close can be retried.
+            match unsafe { controller.remove_AcceleratorKeyPressed(token) } {
+                Ok(()) => self.accelerator_token = None,
+                Err(error) => {
+                    first_error.get_or_insert(HostError::from_com(error));
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if let Some(controller) = self.controller.as_ref() {
+            // An uncompleted resource deferral, if any, remains held inside
+            // callbacks until Close succeeds. This prevents a request with no
+            // explicit response from being released to network fallback.
+            unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        }
+        self.controller.take();
+        self.core.take();
+        self.callbacks.take();
+        self.security_abort.take();
+        self.document.take();
+        if let Ok(mut slot) = self.document_slot.try_borrow_mut() {
+            *slot = Weak::new();
+        }
+        self.script_ids.borrow_mut().clear();
+        self.page_messages.borrow_mut().clear();
+        self.accelerators.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// A resource-boundary failure must close the controller even if event
+    /// token removal fails. Once Close succeeds, WebView2 can no longer issue
+    /// callbacks and failed removal tokens no longer need retry ownership.
+    pub(crate) fn abort_security_boundary(&mut self) -> Result<(), HostError> {
+        if let Some(callbacks) = self.callbacks.as_mut() {
+            let _ = callbacks.close();
+        }
+        if let Some(core) = self.core.as_ref() {
+            for token in self.process_failure_tokens.drain(..) {
+                let _ = unsafe { core.remove_ProcessFailed(token) };
+            }
+        }
+        if let (Some(controller), Some(token)) =
+            (self.controller.as_ref(), self.accelerator_token.take())
+        {
+            let _ = unsafe { controller.remove_AcceleratorKeyPressed(token) };
+        }
+        if let Some(controller) = self.controller.as_ref() {
+            unsafe { controller.Close() }.map_err(HostError::from_com)?;
+        }
+        self.controller.take();
+        self.core.take();
+        self.callbacks.take();
+        self.security_abort.take();
+        self.document.take();
+        if let Ok(mut slot) = self.document_slot.try_borrow_mut() {
+            *slot = Weak::new();
+        }
+        self.script_ids.borrow_mut().clear();
+        self.page_messages.borrow_mut().clear();
+        self.accelerators.borrow_mut().clear();
+        Ok(())
+    }
+}
+
+impl Drop for WebViewHost {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}

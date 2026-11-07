@@ -1,0 +1,10 @@
+import { A } from './a';
+// comment
+interface Point { x: number; y?: string; }
+export class C<T> implements I {
+  private readonly v: T;
+  constructor(public n: number = 0) { }
+  async get(): Promise<void> { let s = "str"; const t = 'c'; return; }
+}
+type U = A | B; enum E { One = 1 }
+declare module "m" { export function f(a: any): never; }

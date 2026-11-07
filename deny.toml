@@ -1,0 +1,24 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# MPL-2.0 (file-level copyleft) approved by the project owner on 2026-09-26
+# for cssparser/dtoa-short, required by the ammonia sanitizer base.
+allow = ["Apache-2.0", "MIT", "MPL-2.0", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

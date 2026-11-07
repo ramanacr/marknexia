@@ -1,0 +1,311 @@
+{
+  "schemaVersion": "marknexia-math-oracle-v1",
+  "generator": "crates/marknexia-rendering/tests/oracle/MathOracle",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "srcTree": "c91f107edd5baa3bcba27723f19330cb35837273",
+  "context": "MarkdownRenderer defaults; RenderContext(compat/virtual.md, repository root, System theme, remote assets off); page newline-normalized; document host and nonce replaced by {volatile}",
+  "cases": [
+    {
+      "name": "inline-basic",
+      "markdown": "Inline $x^2 + y_1$ and $a_{ij}$.\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p>Inline <span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2 + y_1\">x<sup>2</sup> + y<sub>1</sub></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"a_{ij}\">a<sub>j</sub></span>.</p>\n",
+      "page": "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"system\">\n<head>\n  <meta charset=\"utf-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <base href=\"https://document-{volatile}.marknexia.viewer/compat/\" />\n  <meta http-equiv=\"Content-Security-Policy\" content=\"default-src &#39;none&#39;; base-uri https://document-{volatile}.marknexia.viewer; script-src &#39;nonce-{volatile}&#39; https://marknexia.assets; style-src &#39;unsafe-inline&#39;; img-src https://document-{volatile}.marknexia.viewer data:; font-src &#39;none&#39;; object-src &#39;none&#39;; frame-src &#39;none&#39;; connect-src &#39;none&#39;; form-action &#39;none&#39;\" />\n  <style>\n:root {\n  --color-canvas-default: #ffffff;\n  --color-canvas-subtle: #f1f5f9;\n  --color-border-default: #cbd5e1;\n  --color-border-muted: #e2e8f0;\n  --color-fg-default: #0f172a;\n  --color-fg-muted: #64748b;\n  --color-fg-subtle: #94a3b8;\n  --color-accent-fg: #2563eb;\n  --color-accent-emphasis: #1e40af;\n  --color-danger-fg: #cf222e;\n  --color-success-fg: #1a7f37;\n  --color-attention-fg: #9a6700;\n  --color-severe-fg: #bc4c00;\n  --color-scale-gray-1: #eaeef2;\n  --marknexia-control-hover: #eaeef2;\n  --marknexia-focus: #06b6d4;\n  --marknexia-on-primary: #ffffff;\n  --marknexia-important: #8250df;\n  --marknexia-search-current-background: #60a5fa;\n  --marknexia-search-current-foreground: #0f172a;\n  --font-body: \"Segoe UI Variable\", \"Segoe UI\", sans-serif;\n  --font-mono: \"Cascadia Code\", Consolas, monospace;\n}\n\n@media (prefers-color-scheme: dark) {\n  [data-theme=\"system\"] {\n    --color-canvas-default: #171a1c;\n    --color-canvas-subtle: #24292c;\n    --color-border-default: #485054;\n    --color-border-muted: #353b3e;\n    --color-fg-default: #f1f4ef;\n    --color-fg-muted: #aab2b0;\n    --color-fg-subtle: #707876;\n    --color-accent-fg: #b7ff3c;\n    --color-accent-emphasis: #8fd622;\n    --color-danger-fg: #ff6577;\n    --color-success-fg: #68e875;\n    --color-attention-fg: #ffc857;\n    --color-severe-fg: #ffc857;\n    --color-scale-gray-1: #303639;\n    --marknexia-control-hover: #383f42;\n    --marknexia-focus: #b7ff3c;\n    --marknexia-on-primary: #172000;\n    --marknexia-important: #62c3ff;\n    --marknexia-search-current-background: #b7ff3c;\n    --marknexia-search-current-foreground: #172000;\n  }\n}\n\n[data-theme=\"dark\"] {\n  --color-canvas-default: #171a1c;\n  --color-canvas-subtle: #24292c;\n  --color-border-default: #485054;\n  --color-border-muted: #353b3e;\n  --color-fg-default: #f1f4ef;\n  --color-fg-muted: #aab2b0;\n  --color-fg-subtle: #707876;\n  --color-accent-fg: #b7ff3c;\n  --color-accent-emphasis: #8fd622;\n  --color-danger-fg: #ff6577;\n  --color-success-fg: #68e875;\n  --color-attention-fg: #ffc857;\n  --color-severe-fg: #ffc857;\n  --color-scale-gray-1: #303639;\n  --marknexia-control-hover: #383f42;\n  --marknexia-focus: #b7ff3c;\n  --marknexia-on-primary: #172000;\n  --marknexia-important: #62c3ff;\n  --marknexia-search-current-background: #b7ff3c;\n  --marknexia-search-current-foreground: #172000;\n}\n\nbody {\n  font-family: var(--font-body);\n  font-size: 16px;\n  line-height: 1.5;\n  word-wrap: break-word;\n  background-color: var(--color-canvas-default);\n  color: var(--color-fg-default);\n  margin: 0;\n  padding: 40px 48px 64px;\n}\n\n::selection {\n  color: var(--marknexia-on-primary);\n  background: var(--color-accent-fg);\n}\n\n.markdown-body {\n  box-sizing: border-box;\n  min-width: 200px;\n  max-width: 980px;\n  margin: 0 auto;\n}\n\nh1, h2, h3, h4, h5, h6 {\n  margin-top: 24px;\n  margin-bottom: 16px;\n  font-weight: 600;\n  line-height: 1.25;\n  position: relative;\n}\n\nh1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--color-border-muted); }\nh2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--color-border-muted); }\nh3 { font-size: 1.25em; }\nh4 { font-size: 1em; }\nh5 { font-size: .875em; }\nh6 { font-size: .85em; color: var(--color-fg-muted); }\n\n.heading-anchor {\n  opacity: 0;\n  margin-left: -24px;\n  padding-right: 8px;\n  text-decoration: none;\n  color: var(--color-fg-muted);\n  cursor: pointer;\n  transition: opacity 0.2s;\n}\n\nh1:hover .heading-anchor, h2:hover .heading-anchor, h3:hover .heading-anchor,\nh4:hover .heading-anchor, h5:hover .heading-anchor, h6:hover .heading-anchor {\n  opacity: 1;\n}\n\na {\n  color: var(--color-accent-fg);\n  text-decoration: none;\n}\na:hover {\n  text-decoration: underline;\n}\n\np, blockquote, ul, ol, dl, table, pre, details {\n  margin-top: 0;\n  margin-bottom: 16px;\n}\n\nhr {\n  height: .25em;\n  padding: 0;\n  margin: 24px 0;\n  background-color: var(--color-border-default);\n  border: 0;\n}\n\nblockquote {\n  padding: 0 1em;\n  color: var(--color-fg-muted);\n  border-left: .25em solid var(--color-border-default);\n}\n\nul, ol {\n  padding-left: 2em;\n}\n\ntable {\n  border-spacing: 0;\n  border-collapse: collapse;\n  display: block;\n  width: max-content;\n  max-width: 100%;\n  overflow: auto;\n}\n\ntable th, table td {\n  padding: 6px 13px;\n  border: 1px solid var(--color-border-default);\n}\n\ntable th {\n  font-weight: 600;\n  background-color: var(--color-canvas-subtle);\n}\n\ntable tr:nth-child(2n) {\n  background-color: var(--color-canvas-subtle);\n}\n\ncode, tt {\n  padding: .2em .4em;\n  margin: 0;\n  font-size: 85%;\n  white-space: break-spaces;\n  background-color: var(--color-canvas-subtle);\n  border-radius: 6px;\n  font-family: var(--font-mono);\n}\n\npre {\n  padding: 16px;\n  overflow: auto;\n  font-size: 85%;\n  line-height: 1.45;\n  color: var(--color-fg-default);\n  background-color: var(--color-canvas-subtle);\n  border-radius: 6px;\n  font-family: var(--font-mono);\n  position: relative;\n}\n\npre code {\n  padding: 0;\n  background-color: transparent;\n  border-radius: 0;\n}\n\n.code-container {\n  position: relative;\n  margin-bottom: 16px;\n}\n\n.copy-btn {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  opacity: 0;\n  padding: 4px 8px;\n  font-size: 12px;\n  border: 1px solid var(--color-border-default);\n  border-radius: 6px;\n  background: var(--color-canvas-default);\n  color: var(--color-fg-muted);\n  cursor: pointer;\n  transition: opacity 0.2s, background-color 0.2s;\n}\n\n.copy-btn:focus-visible,\n.marknexia-btn:focus-visible,\na:focus-visible {\n  outline: 2px solid var(--marknexia-focus);\n  outline-offset: 2px;\n}\n\n.code-container:hover .copy-btn {\n  opacity: 1;\n}\n\n.copy-btn:hover {\n  background: var(--marknexia-control-hover);\n  color: var(--color-fg-default);\n}\n\n/* GFM Alerts */\n.markdown-alert {\n  padding: 8px 16px;\n  margin-bottom: 16px;\n  color: inherit;\n  border-left: .25em solid var(--color-border-default);\n  border-radius: 0 6px 6px 0;\n}\n\n.markdown-alert-title {\n  display: flex;\n  font-weight: 500;\n  align-items: center;\n  line-height: 1;\n  margin-bottom: 8px;\n}\n\n.markdown-alert-title svg {\n  margin-right: 8px;\n  fill: currentColor;\n}\n\n.markdown-alert.markdown-alert-note {\n  border-left-color: var(--color-accent-fg);\n}\n.markdown-alert.markdown-alert-note .markdown-alert-title {\n  color: var(--color-accent-fg);\n}\n\n.markdown-alert.markdown-alert-tip {\n  border-left-color: var(--color-success-fg);\n}\n.markdown-alert.markdown-alert-tip .markdown-alert-title {\n  color: var(--color-success-fg);\n}\n\n.markdown-alert.markdown-alert-important {\n  border-left-color: var(--marknexia-important);\n}\n.markdown-alert.markdown-alert-important .markdown-alert-title {\n  color: var(--marknexia-important);\n}\n\n.markdown-alert.markdown-alert-warning {\n  border-left-color: var(--color-attention-fg);\n}\n.markdown-alert.markdown-alert-warning .markdown-alert-title {\n  color: var(--color-attention-fg);\n}\n\n.markdown-alert.markdown-alert-caution {\n  border-left-color: var(--color-danger-fg);\n}\n.markdown-alert.markdown-alert-caution .markdown-alert-title {\n  color: var(--color-danger-fg);\n}\n\n/* Diagrams */\n.marknexia-diagram {\n  border: 1px solid var(--color-border-default);\n  border-radius: 6px;\n  margin-bottom: 16px;\n  background-color: var(--color-canvas-subtle);\n  overflow: hidden;\n}\n\nhtml.marknexia-diagram-expanded,\nhtml.marknexia-diagram-expanded body {\n  overflow: hidden;\n}\n\n.marknexia-diagram.is-expanded {\n  position: fixed;\n  inset: 0;\n  z-index: 1000;\n  display: flex;\n  flex-direction: column;\n  box-sizing: border-box;\n  width: 100vw;\n  height: 100vh;\n  max-width: none;\n  margin: 0;\n  padding: 16px;\n  border-radius: 0;\n}\n\n.marknexia-diagram-toolbar {\n  display: flex;\n  justify-content: space-between;\n  align-items: center;\n  padding: 6px 12px;\n  border-bottom: 1px solid var(--color-border-muted);\n  font-size: 12px;\n  color: var(--color-fg-muted);\n}\n\n.marknexia-diagram-viewport {\n  position: relative;\n  min-height: 96px;\n  max-height: min(72vh, 720px);\n  padding: 16px;\n  overflow: auto;\n  background-color: var(--color-canvas-default);\n  cursor: grab;\n}\n\n.marknexia-diagram.is-expanded .marknexia-diagram-viewport {\n  flex: 1 1 auto;\n  min-height: 0;\n  max-height: none;\n}\n\n.marknexia-diagram-viewport.is-panning {\n  cursor: grabbing;\n  user-select: none;\n}\n\n.marknexia-diagram-canvas {\n  width: max-content;\n  min-width: 100%;\n  transform-origin: 0 0;\n  will-change: transform;\n}\n\n.marknexia-diagram-canvas .mermaid {\n  margin: 0;\n  overflow: visible;\n  background: transparent;\n}\n\n.marknexia-btn {\n  padding: 3px 8px;\n  font-size: 12px;\n  border: 1px solid var(--color-border-default);\n  border-radius: 4px;\n  background-color: var(--color-canvas-subtle);\n  color: var(--color-fg-default);\n  cursor: pointer;\n}\n\n.marknexia-btn:hover {\n  background-color: var(--marknexia-control-hover);\n}\n\n.marknexia-diagram-zoom-status {\n  position: absolute;\n  right: 12px;\n  bottom: 8px;\n  padding: 2px 6px;\n  border: 1px solid var(--color-border-muted);\n  border-radius: 4px;\n  color: var(--color-fg-muted);\n  background-color: var(--color-canvas-subtle);\n  font-size: 11px;\n  pointer-events: none;\n}\n\n.marknexia-diagram-error {\n  padding: 16px;\n  background-color: rgba(207, 34, 46, 0.08);\n  border-top: 1px solid var(--color-danger-fg);\n}\n\n.marknexia-diagram-error-title {\n  color: var(--color-danger-fg);\n  font-weight: 600;\n  margin-bottom: 8px;\n}\n\n.marknexia-diagram-error-msg {\n  font-family: var(--font-mono);\n  font-size: 12px;\n  margin-bottom: 12px;\n  color: var(--color-danger-fg);\n}\n\n.marknexia-diagram-fallback {\n  margin-bottom: 16px;\n  padding: 12px 16px;\n  border: 1px solid var(--color-border-default);\n  border-left: 3px solid var(--color-accent-emphasis);\n  border-radius: 6px;\n  color: var(--color-fg-default);\n  background-color: var(--color-canvas-subtle);\n}\n\n.marknexia-diagram-fallback p {\n  margin: 6px 0 10px;\n  color: var(--color-fg-muted);\n}\n\n.marknexia-diagram-fallback details {\n  margin-top: 8px;\n}\n\n.marknexia-diagram-fallback summary {\n  cursor: pointer;\n  color: var(--color-accent-fg);\n}\n\n.marknexia-diagram-fallback pre {\n  max-height: 280px;\n  overflow: auto;\n}\n::highlight(marknexia-search-current) {\n  background-color: var(--marknexia-search-current-background);\n  color: var(--marknexia-search-current-foreground);\n}\n\n/* ColorCode emits token spans inside code blocks. Keep Radium contrast scoped\n   to dark render paths so the established light palette remains untouched. */\n[data-theme=\"dark\"] pre .kwrd, [data-theme=\"dark\"] pre .keyword, [data-theme=\"dark\"] pre .preproc { color: var(--color-accent-fg); }\n[data-theme=\"dark\"] pre .str, [data-theme=\"dark\"] pre .string, [data-theme=\"dark\"] pre .char { color: var(--color-success-fg); }\n[data-theme=\"dark\"] pre .num, [data-theme=\"dark\"] pre .number, [data-theme=\"dark\"] pre .lit { color: #62c3ff; }\n[data-theme=\"dark\"] pre .type, [data-theme=\"dark\"] pre .attr { color: var(--color-attention-fg); }\n[data-theme=\"dark\"] pre .rem, [data-theme=\"dark\"] pre .comment { color: var(--color-fg-muted); }\n\n@media (prefers-color-scheme: dark) {\n  [data-theme=\"system\"] pre .kwrd, [data-theme=\"system\"] pre .keyword, [data-theme=\"system\"] pre .preproc { color: var(--color-accent-fg); }\n  [data-theme=\"system\"] pre .str, [data-theme=\"system\"] pre .string, [data-theme=\"system\"] pre .char { color: var(--color-success-fg); }\n  [data-theme=\"system\"] pre .num, [data-theme=\"system\"] pre .number, [data-theme=\"system\"] pre .lit { color: #62c3ff; }\n  [data-theme=\"system\"] pre .type, [data-theme=\"system\"] pre .attr { color: var(--color-attention-fg); }\n  [data-theme=\"system\"] pre .rem, [data-theme=\"system\"] pre .comment { color: var(--color-fg-muted); }\n}\n\n.markdown-body .marknexia-image-fallback {\n  display: inline-flex;\n  align-items: center;\n  max-width: 100%;\n  box-sizing: border-box;\n  padding: 0.35rem 0.55rem;\n  border: 1px solid var(--color-border-default);\n  border-radius: 6px;\n  color: var(--color-fg-muted);\n  background-color: var(--color-canvas-subtle);\n  font-size: 0.875em;\n  line-height: 1.4;\n}\n\n/* Offline, screen-reader-friendly math. The renderer emits semantic HTML and\n   intentionally does not depend on a remote TeX engine or web font. */\n.markdown-body .marknexia-math {\n  white-space: nowrap;\n  font-family: \"Cambria Math\", \"STIX Two Math\", \"Segoe UI Symbol\", serif;\n}\n\n.markdown-body .marknexia-math-display {\n  display: block;\n  margin: 20px 0;\n  overflow-x: auto;\n  padding: 8px 12px;\n  text-align: center;\n  font-size: 1.1em;\n  font-family: \"Cambria Math\", \"STIX Two Math\", \"Segoe UI Symbol\", serif;\n}\n\n.markdown-body .marknexia-math sup,\n.markdown-body .marknexia-math sub,\n.markdown-body .marknexia-math-display sup,\n.markdown-body .marknexia-math-display sub {\n  line-height: 0;\n  font-size: 0.75em;\n}\n\n.markdown-body .marknexia-fraction {\n  display: inline-flex;\n  flex-direction: column;\n  vertical-align: middle;\n  text-align: center;\n  line-height: 1.1;\n  margin: 0 0.15em;\n}\n\n.markdown-body .marknexia-numerator {\n  border-bottom: 1px solid currentColor;\n  padding: 0 0.2em 0.08em;\n}\n\n.markdown-body .marknexia-denominator {\n  padding: 0.08em 0.2em 0;\n}\n\n.markdown-body .marknexia-sqrt {\n  display: inline-flex;\n  align-items: flex-start;\n}\n\n.markdown-body .marknexia-sqrt > span:first-child {\n  font-size: 1.25em;\n  line-height: 0.9;\n  margin-right: 0.08em;\n}\n\n.markdown-body .marknexia-radicand {\n  border-top: 1px solid currentColor;\n  padding: 0 0.15em;\n}\n\n.markdown-body .marknexia-math-fallback {\n  font-family: var(--font-mono);\n  white-space: pre-wrap;\n}\n\n  </style>\n</head>\n<body>\n  <div class=\"markdown-body\">\n<p>Inline <span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2 + y_1\">x<sup>2</sup> + y<sub>1</sub></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"a_{ij}\">a<sub>j</sub></span>.</p>\n\n  </div>\n  <script nonce=\"{volatile}\">\nwindow.marknexiaBridge = {\n  openLink: function(href) {\n    if (window.chrome && window.chrome.webview) {\n      window.chrome.webview.postMessage({ type: 'openLink', href: href });\n    }\n  },\n  copyText: async function(text) {\n    if (window.chrome && window.chrome.webview) {\n      window.chrome.webview.postMessage({ type: 'copyText', text: text });\n    } else if (navigator.clipboard) {\n      await navigator.clipboard.writeText(text);\n    }\n  },\n  toggleSource: function(diagramId) {\n    const srcEl = document.getElementById(diagramId + '-source');\n    const viewEl = document.getElementById(diagramId + '-viewport');\n    if (srcEl && viewEl) {\n      if (srcEl.style.display === 'none') {\n        srcEl.style.display = 'block';\n        viewEl.style.display = 'none';\n      } else {\n        srcEl.style.display = 'none';\n        viewEl.style.display = 'block';\n      }\n    }\n  },\n  scrollToAnchor: function(anchorId) {\n    const safeAnchor = String(anchorId || '');\n    const target = document.getElementById(safeAnchor) || document.querySelector('[name=\"' + CSS.escape(safeAnchor) + '\"]');\n    if (target) {\n      target.scrollIntoView({ behavior: 'smooth', block: 'start' });\n    }\n  },\n  scrollToTop: function() {\n    window.scrollTo({ left: 0, top: 0, behavior: 'instant' });\n  }\n};\n\n// Search the displayed document, not Markdown syntax or hidden diagram source.\n// Ranges preserve markup and allow matches across inline formatting boundaries.\n(() => {\n  let root = null;\n  let observer = null;\n  let cached = null;\n\n  function clearSelection() {\n    window.getSelection()?.removeAllRanges();\n    if (window.CSS?.highlights) CSS.highlights.delete('marknexia-search-current');\n  }\n\n  window.marknexiaBridge.clearSearch = () => {\n    cached = null;\n    clearSelection();\n  };\n\n  function revealRange(range) {\n    const delta = (start, end, visibleStart, visibleEnd) => start < visibleStart\n      ? start - visibleStart : end > visibleEnd ? Math.min(end - visibleEnd, start - visibleStart) : 0;\n    // Scrolling the window does not reveal text clipped by a pre/table/diagram.\n    // Reveal the first match rectangle from the innermost scroller outward.\n    for (let ancestor = range.startContainer.parentElement; ancestor; ancestor = ancestor.parentElement) {\n      if (ancestor === document.scrollingElement) continue;\n      const style = getComputedStyle(ancestor);\n      const bounds = ancestor.getBoundingClientRect();\n      const rect = range.getClientRects()[0] || range.getBoundingClientRect();\n      if (['auto', 'scroll', 'hidden'].includes(style.overflowX) && ancestor.scrollWidth > ancestor.clientWidth) {\n        const left = bounds.left + ancestor.clientLeft;\n        ancestor.scrollLeft += delta(rect.left, rect.right, left, left + ancestor.clientWidth);\n      }\n      if (['auto', 'scroll', 'hidden'].includes(style.overflowY) && ancestor.scrollHeight > ancestor.clientHeight) {\n        const top = bounds.top + ancestor.clientTop;\n        ancestor.scrollTop += delta(rect.top, rect.bottom, top, top + ancestor.clientHeight);\n      }\n    }\n    const rect = range.getClientRects()[0] || range.getBoundingClientRect();\n    window.scrollBy({ left: delta(rect.left, rect.right, 0, window.innerWidth),\n      top: rect.top - window.innerHeight / 2, behavior: 'instant' });\n  }\n\n  function collectText() {\n    const segments = [];\n    let text = '';\n    let boundary = false;\n    let previousBlock;\n    const styles = new WeakMap();\n    const styleFor = element => {\n      if (!styles.has(element)) styles.set(element, getComputedStyle(element));\n      return styles.get(element);\n    };\n    const isBlock = element => {\n      const display = styleFor(element).display;\n      return display !== 'none' && display !== 'contents' && !display.startsWith('inline');\n    };\n    const containingBlock = element => {\n      for (let ancestor = element; ancestor && ancestor !== root; ancestor = ancestor.parentElement)\n        if (isBlock(ancestor)) return ancestor;\n      return root;\n    };\n    const trimTrailingSpace = () => {\n      const last = segments.at(-1);\n      if (!last?.collapse || !text.endsWith(' ')) return;\n      text = text.slice(0, -1);\n      if (--last.end === last.start) segments.pop();\n    };\n    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);\n    for (let node = walker.nextNode(); node; node = walker.nextNode()) {\n      if (node.nodeType === Node.ELEMENT_NODE) {\n        if ((node.tagName === 'BR' || isBlock(node)) && node.getClientRects().length) boundary = true;\n        continue;\n      }\n      const parent = node.parentElement;\n      if (!parent || parent.closest('script,style,button,input,textarea,select,[hidden]')) continue;\n      // Closed details can still report text rectangles. Only their first\n      // summary is displayed; check every ancestor, including nested details.\n      let collapsed = false;\n      for (let ancestor = parent; ancestor && ancestor !== root; ancestor = ancestor.parentElement) {\n        if (ancestor.tagName !== 'DETAILS' || ancestor.open) continue;\n        const summary = [...ancestor.children].find(child => child.tagName === 'SUMMARY');\n        if (!summary?.contains(parent)) { collapsed = true; break; }\n      }\n      if (collapsed) continue;\n      if (styleFor(parent).visibility !== 'visible') continue;\n      const visibleRange = document.createRange();\n      visibleRange.selectNodeContents(node);\n      if (![...visibleRange.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) continue;\n      const block = containingBlock(parent);\n      if (previousBlock !== undefined && previousBlock !== block) boundary = true;\n      if (boundary) {\n        trimTrailingSpace();\n        if (text.length) text += '\\n';\n      }\n      boundary = false;\n      previousBlock = block;\n\n      const whiteSpace = styleFor(parent).whiteSpace;\n      const collapse = !['pre', 'pre-wrap', 'break-spaces'].includes(whiteSpace);\n      const preserveLines = whiteSpace === 'pre-line';\n      const raw = node.data;\n      let displayed = raw;\n      let starts = null;\n      let ends = null;\n      if (collapse && /[\\t\\n\\r\\f ]/.test(raw)) {\n        displayed = '';\n        starts = new Uint32Array(raw.length);\n        ends = new Uint32Array(raw.length);\n        const append = (character, from, to) => {\n          starts[displayed.length] = from;\n          ends[displayed.length] = to;\n          displayed += character;\n        };\n        for (let index = 0; index < raw.length;) {\n          const from = index;\n          if (preserveLines && raw[index] === '\\n') {\n            if (displayed.endsWith(' ')) displayed = displayed.slice(0, -1);\n            else if (!displayed) trimTrailingSpace();\n            append('\\n', index, ++index);\n          } else if (/[\\t\\n\\r\\f ]/.test(raw[index])) {\n            do { index++; }\n            while (index < raw.length && /[\\t\\n\\r\\f ]/.test(raw[index])\n              && !(preserveLines && raw[index] === '\\n'));\n            const previous = displayed.at(-1) ?? text.at(-1);\n            const previousSpaceIsPreserved = !displayed && segments.at(-1)?.collapse === false;\n            if (previous && previous !== '\\n' && (previous !== ' ' || previousSpaceIsPreserved))\n              append(' ', from, index);\n          } else {\n            append(raw[index], index, ++index);\n          }\n        }\n        // Most text nodes need no mapping; retain offset arrays only where CSS\n        // whitespace processing actually changed their rendered character stream.\n        if (displayed === raw) { starts = null; ends = null; }\n      }\n      if (!displayed) continue;\n      const start = text.length;\n      text += displayed;\n      segments.push({ node, start, end: text.length, starts, ends, collapse });\n    }\n    trimTrailingSpace();\n    return { text, segments };\n  }\n\n  window.marknexiaBridge.findText = (value, backwards = false) => {\n    const query = String(value ?? '');\n    const currentRoot = document.querySelector('.markdown-body');\n    if (root !== currentRoot) {\n      observer?.disconnect();\n      root = currentRoot;\n      cached = null;\n      if (root) {\n        observer = new MutationObserver(() => { cached = null; });\n        observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true,\n          attributeFilter: ['style', 'class', 'hidden', 'open'] });\n      }\n    }\n    if (!root || !query) {\n      window.marknexiaBridge.clearSearch();\n      return { query, matchCount: 0, currentMatch: 0 };\n    }\n    if (!cached || cached.query !== query) {\n      const { text, segments } = collectText();\n      const escaped = query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      const matches = Array.from(text.matchAll(new RegExp(escaped, 'giu')), match => ({start: match.index, end: match.index + match[0].length}));\n      cached = { query, segments, matches, position: backwards ? 0 : -1 };\n    }\n    clearSelection();\n    const count = cached.matches.length;\n    if (!count) return { query, matchCount: 0, currentMatch: 0 };\n    cached.position = (cached.position + (backwards ? -1 : 1) + count) % count;\n    const match = cached.matches[cached.position];\n    const start = cached.segments.find(segment => segment.end > match.start);\n    const end = cached.segments.find(segment => segment.end >= match.end);\n    const range = document.createRange();\n    const startOffset = match.start - start.start;\n    const endOffset = match.end - end.start;\n    range.setStart(start.node, start.starts ? start.starts[startOffset] : startOffset);\n    range.setEnd(end.node, end.ends ? end.ends[endOffset - 1] : endOffset);\n    window.getSelection()?.addRange(range);\n    if (window.CSS?.highlights && window.Highlight) CSS.highlights.set('marknexia-search-current', new Highlight(range));\n    revealRange(range);\n    return { query, matchCount: count, currentMatch: cached.position + 1 };\n  };\n})();\n\ndocument.addEventListener('DOMContentLoaded', () => {\n  installImageFallbacks();\n\n  // Intercept all <a> clicks\n  document.body.addEventListener('click', (e) => {\n    const button = e.target.closest('button[data-marknexia-action]');\n    if (button) {\n      e.preventDefault();\n      const action = button.getAttribute('data-marknexia-action');\n      if (action === 'copy') {\n        try {\n          const text = decodeURIComponent(button.getAttribute('data-copy-text') || '');\n          window.marknexiaBridge.copyText(text).catch(err => console.error('Copy failed', err));\n        } catch (err) {\n          console.error('Invalid copy payload', err);\n        }\n      } else if (action === 'toggle-source') {\n        const diagram = button.closest('.marknexia-mermaid');\n        if (diagram) window.marknexiaBridge.toggleSource(diagram.id);\n      } else if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {\n        const diagram = button.closest('.marknexia-mermaid');\n        if (diagram) {\n          if (action === 'zoom-reset') resetDiagramZoom(diagram);\n          else adjustDiagramZoom(diagram, action === 'zoom-in' ? 1 : -1);\n        }\n      } else if (action === 'expand') {\n        const diagram = button.closest('.marknexia-mermaid');\n        if (diagram) toggleDiagramExpanded(diagram);\n      }\n      return;\n    }\n    const link = e.target.closest('a');\n    if (link) {\n      const href = link.getAttribute('href');\n      if (href) {\n        e.preventDefault();\n        window.marknexiaBridge.openLink(href);\n      }\n    }\n  });\n\n  // Render Mermaid diagrams offline safely\n  document.querySelectorAll('.marknexia-mermaid').forEach(installDiagramInteractions);\n  if (typeof mermaid !== 'undefined') {\n    try {\n      const requestedTheme = document.documentElement.getAttribute('data-theme');\n      const systemColorScheme = window.matchMedia('(prefers-color-scheme: dark)');\n      let renderSequence = 0;\n      const renderMermaidDiagrams = () => {\n        const isDark = requestedTheme === 'dark'\n          || (requestedTheme === 'system' && systemColorScheme.matches);\n        mermaid.initialize({\n          startOnLoad: false,\n          theme: isDark ? 'base' : 'default',\n          themeVariables: isDark ? {\n            background: '#171A1C',\n            primaryColor: '#303639',\n            primaryTextColor: '#F1F4EF',\n            primaryBorderColor: '#485054',\n            lineColor: '#AAB2B0',\n            secondaryColor: '#24292C',\n            tertiaryColor: '#171A1C',\n            mainBkg: '#303639',\n            nodeBorder: '#485054',\n            clusterBkg: '#24292C',\n            clusterBorder: '#485054',\n            titleColor: '#F1F4EF',\n            edgeLabelBackground: '#24292C',\n            textColor: '#F1F4EF'\n          } : undefined,\n          securityLevel: 'strict'\n        });\n\n        document.querySelectorAll('.marknexia-mermaid').forEach(container => {\n          const id = container.id;\n          const preEl = container.querySelector('.mermaid');\n          if (!id || !preEl) return;\n          const code = container.dataset.marknexiaMermaidSource ?? preEl.textContent;\n          container.dataset.marknexiaMermaidSource = code;\n          const renderId = `${id}-svg-${++renderSequence}`;\n          container.dataset.marknexiaMermaidRenderId = renderId;\n          try {\n            mermaid.render(renderId, code).then(res => {\n              if (container.dataset.marknexiaMermaidRenderId === renderId) preEl.innerHTML = res.svg;\n            }).catch(err => {\n              if (container.dataset.marknexiaMermaidRenderId === renderId) showDiagramError(id, err);\n            });\n          } catch (err) {\n            if (container.dataset.marknexiaMermaidRenderId === renderId) showDiagramError(id, err);\n          }\n        });\n      };\n\n      renderMermaidDiagrams();\n      if (requestedTheme === 'system') systemColorScheme.addEventListener('change', renderMermaidDiagrams);\n    } catch (e) {\n      console.error('Mermaid initialization failed', e);\n    }\n  }\n});\n\nconst MIN_DIAGRAM_ZOOM = 0.25;\nconst MAX_DIAGRAM_ZOOM = 4;\nconst DIAGRAM_ZOOM_STEP = 0.25;\n\nfunction diagramState(diagram) {\n  if (!diagram._marknexiaZoomState) {\n    diagram._marknexiaZoomState = { zoom: 1, panX: 0, panY: 0, pointerId: null, lastX: 0, lastY: 0 };\n  }\n  return diagram._marknexiaZoomState;\n}\n\nfunction clampDiagramZoom(value) {\n  return Math.min(MAX_DIAGRAM_ZOOM, Math.max(MIN_DIAGRAM_ZOOM, value));\n}\n\nfunction updateDiagramZoomUi(diagram) {\n  const state = diagramState(diagram);\n  const canvas = diagram.querySelector('.marknexia-diagram-canvas');\n  const viewport = diagram.querySelector('.marknexia-diagram-viewport');\n  const status = diagram.querySelector('[data-marknexia-zoom-status]');\n  if (canvas) canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;\n  const percent = `${Math.round(state.zoom * 100)}%`;\n  if (status) status.textContent = percent;\n  const reset = diagram.querySelector('[data-marknexia-action=\"zoom-reset\"]');\n  if (reset) reset.textContent = percent;\n  if (viewport) viewport.classList.toggle('is-zoomed', state.zoom !== 1 || state.panX !== 0 || state.panY !== 0);\n}\n\nfunction adjustDiagramZoom(diagram, direction) {\n  const state = diagramState(diagram);\n  const next = clampDiagramZoom(state.zoom + direction * DIAGRAM_ZOOM_STEP);\n  if (next === state.zoom) return;\n  state.zoom = next;\n  if (state.zoom === 1) { state.panX = 0; state.panY = 0; }\n  updateDiagramZoomUi(diagram);\n}\n\nfunction resetDiagramZoom(diagram) {\n  const state = diagramState(diagram);\n  state.zoom = 1;\n  state.panX = 0;\n  state.panY = 0;\n  updateDiagramZoomUi(diagram);\n}\n\nfunction toggleDiagramExpanded(diagram) {\n  const expanded = !diagram.classList.contains('is-expanded');\n  const viewport = diagram.querySelector('.marknexia-diagram-viewport');\n  const button = diagram.querySelector('[data-marknexia-action=\"expand\"]');\n  const state = diagramState(diagram);\n  if (!viewport || !button) return;\n\n  if (expanded) {\n    document.querySelectorAll('.marknexia-mermaid.is-expanded').forEach(other => {\n      if (other !== diagram) toggleDiagramExpanded(other);\n    });\n    state.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;\n  }\n\n  diagram.classList.toggle('is-expanded', expanded);\n  document.documentElement.classList.toggle('marknexia-diagram-expanded', expanded);\n  if (expanded) {\n    viewport.setAttribute('aria-modal', 'true');\n    viewport.setAttribute('aria-label', 'Expanded Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');\n    button.textContent = '×';\n    button.setAttribute('aria-label', 'Close diagram full window');\n    button.title = 'Close full-window diagram';\n    viewport.focus();\n  } else {\n    viewport.removeAttribute('aria-modal');\n    viewport.setAttribute('aria-label', 'Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');\n    button.textContent = '⛶';\n    button.setAttribute('aria-label', 'Open diagram full window');\n    button.title = 'Open full-window diagram';\n    if (state.previousFocus instanceof HTMLElement) state.previousFocus.focus();\n    state.previousFocus = null;\n  }\n}\n\nfunction installDiagramInteractions(diagram) {\n  if (diagram.dataset.marknexiaZoomReady === 'true') return;\n  diagram.dataset.marknexiaZoomReady = 'true';\n  const viewport = diagram.querySelector('.marknexia-diagram-viewport');\n  if (!viewport) return;\n  viewport.tabIndex = 0;\n  viewport.setAttribute('role', 'application');\n  viewport.setAttribute('aria-label', 'Mermaid diagram. Use zoom controls, mouse wheel, or drag to explore.');\n  updateDiagramZoomUi(diagram);\n\n  viewport.addEventListener('wheel', event => {\n    event.preventDefault();\n    const state = diagramState(diagram);\n    const oldZoom = state.zoom;\n    const nextZoom = clampDiagramZoom(oldZoom + (event.deltaY < 0 ? DIAGRAM_ZOOM_STEP : -DIAGRAM_ZOOM_STEP));\n    if (nextZoom === oldZoom) return;\n    const bounds = viewport.getBoundingClientRect();\n    const anchorX = event.clientX - bounds.left - state.panX;\n    const anchorY = event.clientY - bounds.top - state.panY;\n    const ratio = nextZoom / oldZoom;\n    state.panX -= anchorX * (ratio - 1);\n    state.panY -= anchorY * (ratio - 1);\n    state.zoom = nextZoom;\n    updateDiagramZoomUi(diagram);\n  }, { passive: false });\n\n  viewport.addEventListener('pointerdown', event => {\n    const state = diagramState(diagram);\n    if (state.zoom === 1 || (event.button !== 0 && event.button !== 1)) return;\n    state.pointerId = event.pointerId;\n    state.lastX = event.clientX;\n    state.lastY = event.clientY;\n    viewport.setPointerCapture(event.pointerId);\n    viewport.classList.add('is-panning');\n  });\n  viewport.addEventListener('pointermove', event => {\n    const state = diagramState(diagram);\n    if (state.pointerId !== event.pointerId) return;\n    state.panX += event.clientX - state.lastX;\n    state.panY += event.clientY - state.lastY;\n    state.lastX = event.clientX;\n    state.lastY = event.clientY;\n    updateDiagramZoomUi(diagram);\n  });\n  const stopPanning = event => {\n    const state = diagramState(diagram);\n    if (state.pointerId !== event.pointerId) return;\n    state.pointerId = null;\n    viewport.classList.remove('is-panning');\n    if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);\n  };\n  viewport.addEventListener('pointerup', stopPanning);\n  viewport.addEventListener('pointercancel', stopPanning);\n  viewport.addEventListener('keydown', event => {\n    if (event.key === '+' || event.key === '=') { event.preventDefault(); adjustDiagramZoom(diagram, 1); }\n    else if (event.key === '-' || event.key === '_') { event.preventDefault(); adjustDiagramZoom(diagram, -1); }\n    else if (event.key === '0') { event.preventDefault(); resetDiagramZoom(diagram); }\n  });\n  diagram.addEventListener('keydown', event => {\n    if (event.key === 'Escape' && diagram.classList.contains('is-expanded')) {\n      event.preventDefault();\n      toggleDiagramExpanded(diagram);\n    }\n  });\n}\n\nfunction showDiagramError(id, err) {\n  const errorEl = document.getElementById(id + '-error');\n  const msgEl = document.getElementById(id + '-error-msg');\n  const viewportEl = document.getElementById(id + '-viewport');\n  if (errorEl && msgEl) {\n    msgEl.textContent = err.message || err.str || String(err);\n    errorEl.style.display = 'block';\n    if (viewportEl) viewportEl.style.display = 'none';\n  }\n}\n\nfunction markImageUnavailable(image) {\n  if (!(image instanceof HTMLImageElement) || image.dataset.marknexiaFallback === 'true') return;\n  image.dataset.marknexiaFallback = 'true';\n  const alt = (image.getAttribute('alt') || '').trim();\n  const label = alt ? `Image unavailable: ${alt}` : 'Image unavailable (missing, blocked, or unsupported)';\n  const fallback = document.createElement('span');\n  fallback.className = 'marknexia-image-fallback';\n  fallback.setAttribute('role', 'img');\n  fallback.setAttribute('aria-label', label);\n  fallback.textContent = label;\n  image.replaceWith(fallback);\n}\n\nfunction installImageFallbacks() {\n  window.addEventListener('error', event => {\n    if (event.target instanceof HTMLImageElement) markImageUnavailable(event.target);\n  }, true);\n\n  const scan = () => document.querySelectorAll('img').forEach(image => {\n    if (image.complete && image.naturalWidth === 0) markImageUnavailable(image);\n  });\n  scan();\n  const observer = new MutationObserver(scan);\n  observer.observe(document.body, { childList: true, subtree: true });\n}\n\n  </script>\n</body>\n</html>\n"
+    },
+    {
+      "name": "display-block",
+      "markdown": "$$\nE = mc^2\n$$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"\\[\nE = mc^2\n\\]\">[\nE = mc<sup>2</sup>\n]</div>\n"
+    },
+    {
+      "name": "display-inline",
+      "markdown": "Text $$a+b$$ text\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p>Text <span class=\"marknexia-math\" role=\"math\" aria-label=\"a+b\">a+b</span> text</p>\n"
+    },
+    {
+      "name": "greek-lower",
+      "markdown": "$\\alpha \\beta \\gamma \\delta \\epsilon \\varepsilon \\zeta \\eta \\theta \\vartheta \\iota \\kappa \\lambda \\mu \\nu \\xi \\pi \\varpi \\rho \\sigma \\tau \\upsilon \\phi \\varphi \\chi \\psi \\omega$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\alpha \\beta \\gamma \\delta \\epsilon \\varepsilon \\zeta \\eta \\theta \\vartheta \\iota \\kappa \\lambda \\mu \\nu \\xi \\pi \\varpi \\rho \\sigma \\tau \\upsilon \\phi \\varphi \\chi \\psi \\omega\">α β γ δ ϵ ε ζ η θ ϑ ι κ λ μ ν ξ π ϖ ρ σ τ υ ϕ φ χ ψ ω</span></p>\n"
+    },
+    {
+      "name": "greek-upper",
+      "markdown": "$\\Gamma \\Delta \\Theta \\Lambda \\Xi \\Pi \\Sigma \\Phi \\Psi \\Omega$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\Gamma \\Delta \\Theta \\Lambda \\Xi \\Pi \\Sigma \\Phi \\Psi \\Omega\">Γ Δ Θ Λ Ξ Π Σ Φ Ψ Ω</span></p>\n"
+    },
+    {
+      "name": "operators",
+      "markdown": "$\\infty \\pm \\mp \\times \\cdot \\div \\le \\leq \\ge \\geq \\neq \\ne \\approx \\equiv$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\infty \\pm \\mp \\times \\cdot \\div \\le \\leq \\ge \\geq \\neq \\ne \\approx \\equiv\">∞ ± ∓ × ⋅ ÷ ≤ ≤ ≥ ≥ ≠ ≠ ≈ ≡</span></p>\n"
+    },
+    {
+      "name": "arrows-and-sets",
+      "markdown": "$\\to \\rightarrow \\leftarrow \\leftrightarrow \\in \\notin \\subset \\subseteq \\cup \\cap$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\to \\rightarrow \\leftarrow \\leftrightarrow \\in \\notin \\subset \\subseteq \\cup \\cap\">→ → ← ↔ ∈ ∉ ⊂ ⊆ ∪ ∩</span></p>\n"
+    },
+    {
+      "name": "big-operators-and-logic",
+      "markdown": "$\\sum \\prod \\int \\partial \\nabla \\forall \\exists \\land \\lor \\neg \\ldots \\dots \\ell$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sum \\prod \\int \\partial \\nabla \\forall \\exists \\land \\lor \\neg \\ldots \\dots \\ell\">∑ ∏ ∫ ∂ ∇ ∀ ∃ ∧ ∨ ¬ … … …</span></p>\n"
+    },
+    {
+      "name": "fractions",
+      "markdown": "$\\frac{a}{b} + \\dfrac{1}{2} - \\tfrac{x}{y}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{a}{b} + \\dfrac{1}{2} - \\tfrac{x}{y}\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">a</span><span class=\"marknexia-denominator\">b</span></span> + <span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">1</span><span class=\"marknexia-denominator\">2</span></span> - <span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">x</span><span class=\"marknexia-denominator\">y</span></span></span></p>\n"
+    },
+    {
+      "name": "fraction-atoms",
+      "markdown": "$\\frac12 \\frac a b$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac12 \\frac a b\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">2</span><span class=\"marknexia-denominator\">f</span></span>rac a b</span></p>\n"
+    },
+    {
+      "name": "square-roots",
+      "markdown": "$\\sqrt{x} + \\sqrt[3]{y} + \\sqrt 2$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sqrt{x} + \\sqrt[3]{y} + \\sqrt 2\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">x</span></span> + <span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">y</span></span> + <span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"></span></span></span></p>\n"
+    },
+    {
+      "name": "nested",
+      "markdown": "$\\frac{\\sqrt{a^2+b^2}}{c_{n}}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{\\sqrt{a^2+b^2}}{c_{n}}\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">a<sup>2</sup>+b<sup>2</sup></span></span></span><span class=\"marknexia-denominator\">c<sub></sub></span></span></span></p>\n"
+    },
+    {
+      "name": "text-and-operatorname",
+      "markdown": "$\\text{if } x \\operatorname{sin} y$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\text{if } x \\operatorname{sin} y\">if  x sin y</span></p>\n"
+    },
+    {
+      "name": "left-right",
+      "markdown": "$\\left( x \\right) \\left. y \\right| \\left[ z \\right]$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\left( x \\right) \\left. y \\right| \\left[ z \\right]\">( x )  y | [ z ]</span></p>\n"
+    },
+    {
+      "name": "left-at-end",
+      "markdown": "$a \\left$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"a \\left\">a </span></p>\n"
+    },
+    {
+      "name": "single-character-commands",
+      "markdown": "$\\{ a \\} \\, b \\; c \\! d \\_ f \\% g$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\{ a \\} \\, b \\; c \\! d \\_ f \\% g\">{ a } , b ; c ! d _ f % g</span></p>\n"
+    },
+    {
+      "name": "unknown-commands",
+      "markdown": "$\\foo + \\Alpha + \\mathbb{R}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\foo + \\Alpha + \\mathbb{R}\">\\foo + \\Alpha + \\mathbbR</span></p>\n"
+    },
+    {
+      "name": "braced-superscript-quirk",
+      "markdown": "$x^{2} y_{ab}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^{2} y_{ab}\">x<sup></sup> y<sub>b</sub></span></p>\n"
+    },
+    {
+      "name": "command-scripts",
+      "markdown": "$x^\\alpha y_\\beta z^\\frac{1}{2}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^\\alpha y_\\beta z^\\frac{1}{2}\">x<sup>α</sup> y<sub>β</sub> z<sup><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"></span><span class=\"marknexia-denominator\"></span></span></sup>12</span></p>\n"
+    },
+    {
+      "name": "white-space-arguments",
+      "markdown": "$x^ 2 y_  3$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^ 2 y_  3\">x<sup>2</sup> y<sub>3</sub></span></p>\n"
+    },
+    {
+      "name": "script-at-end",
+      "markdown": "$x^$ and $y_$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^\">x<sup></sup></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"y_\">y<sub></sub></span></p>\n"
+    },
+    {
+      "name": "html-special-characters",
+      "markdown": "$a<b$ and $c>d$ and $a&b$ and $\"q\"$ and $'s'$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"a&amp;lt;b\">a&amp;lt;b</span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"c&amp;gt;d\">c&amp;gt;d</span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"a&amp;amp;b\">a&amp;amp;b</span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"&amp;quot;q&amp;quot;\">&amp;quot;q&amp;quot;</span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"'s'\">'s'</span></p>\n"
+    },
+    {
+      "name": "latin-1",
+      "markdown": "$é^ü \\pm ×$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"é^ü \\pm ×\">é<sup>ü</sup> ± ×</span></p>\n"
+    },
+    {
+      "name": "astral",
+      "markdown": "$\uD835\uDC65^2 + \\\uD835\uDC65$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\uD835\uDC65^2 + \\\uD835\uDC65\">��<sup>2</sup> + ��</span></p>\n"
+    },
+    {
+      "name": "unbalanced",
+      "markdown": "$\\frac{a$ and $\\sqrt[3$ and ${{{x$ and $}}}y$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{a\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">a</span><span class=\"marknexia-denominator\"></span></span></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sqrt[3\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"></span></span></span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"{{{x\">x</span> and <span class=\"marknexia-math\" role=\"math\" aria-label=\"}}}y\">y</span></p>\n"
+    },
+    {
+      "name": "empty-groups",
+      "markdown": "$\\frac{}{} x^{} \\sqrt{}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{}{} x^{} \\sqrt{}\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"></span><span class=\"marknexia-denominator\"></span></span> x<sup><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"></span></span></sup></span></p>\n"
+    },
+    {
+      "name": "leading-space",
+      "markdown": "$ x^2 $ and $x^2 $\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2\">x<sup>2</sup></span> and $x^2 $</p>\n"
+    },
+    {
+      "name": "math-disabled",
+      "markdown": "Inline $x^2$ and\n\n$$\ny < z\n$$\n",
+      "enableMath": false,
+      "outcome": "rendered",
+      "body": "<p>Inline <span class=\"marknexia-math-fallback\" role=\"math\">\\(x^2\\)</span> and</p>\n<div class=\"marknexia-math-fallback\" role=\"math\">\n\\[\ny &amp;lt; z\n\\]</div>\n"
+    },
+    {
+      "name": "code-is-not-math",
+      "markdown": "`$x^2$` and\n\n```\n$y^2$\n```\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><code>$x^2$</code> and</p>\n\n<div class=\"code-container\">\n  <button type=\"button\" class=\"copy-btn\" data-marknexia-action=\"copy\" data-copy-text=\"%24y%5E2%24%0A\" title=\"Copy code\">Copy</button>\n  <pre><code>$y^2$\n</code></pre>\n</div>\n"
+    },
+    {
+      "name": "escaped-dollars",
+      "markdown": "Price \\$5 and \\$6\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p>Price $5 and $6</p>\n"
+    },
+    {
+      "name": "raw-html-math",
+      "markdown": "<span class=\"math\">\\(x^2\\)</span>\n\n<div class=\"math\">$$<img src=x onerror=alert(1)>$$</div>\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"math\">(x^2)</span></p>\n<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"&lt;img src=x onerror=alert(1)&gt;\">&lt;img src=x onerror=alert(1)&gt;</div>\n"
+    },
+    {
+      "name": "raw-html-math-escaped-in-paragraph",
+      "markdown": "<span class=\"math\">\\[a_1\\]</span>\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"math\">[a_1]</span></p>\n"
+    },
+    {
+      "name": "raw-html-math-block-inline",
+      "markdown": "<div class=\"math\">\\(x^2 < y\\)</div>\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2 &lt; y\">x<sup>2</sup> &lt; y</span>\n"
+    },
+    {
+      "name": "raw-html-math-upper-case",
+      "markdown": "<DIV CLASS=\"math\">\\[a_1\\]</DIV>\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"a_1\">a<sub>1</sub></div>\n"
+    },
+    {
+      "name": "raw-html-math-unterminated",
+      "markdown": "<span class=\"math\">\\(x^2</span> <span class=\"math\">$$y</span>\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"math\">(x^2</span> <span class=\"math\">$$y</span></p>\n"
+    },
+    {
+      "name": "moderate-nesting",
+      "markdown": "$\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{x}{y}}{y}}{y}}{y}}{y}}{y}}{y}}{y}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{\\frac{x}{y}}{y}}{y}}{y}}{y}}{y}}{y}}{y}\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\"><span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">x</span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span><span class=\"marknexia-denominator\">y</span></span></span></p>\n"
+    },
+    {
+      "name": "deep-nesting",
+      "markdown": "$\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{x}}}}}}}}}}}}}}}}}}}}$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<p><span class=\"marknexia-math\" role=\"math\" aria-label=\"\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{\\sqrt{x}}}}}}}}}}}}}}}}}}}}\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\"><span class=\"marknexia-sqrt\"><span aria-hidden=\"true\">√</span><span class=\"marknexia-radicand\">x</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p>\n"
+    },
+    {
+      "name": "caret-backslash-at-end",
+      "markdown": "<div class=\"math\">\\(x^\\\\)</div>\n",
+      "enableMath": true,
+      "outcome": "exception",
+      "exception": "ArgumentOutOfRangeException"
+    },
+    {
+      "name": "underscore-backslash-at-end",
+      "markdown": "<div class=\"math\">$$y_\\$$</div>\n",
+      "enableMath": true,
+      "outcome": "exception",
+      "exception": "ArgumentOutOfRangeException"
+    },
+    {
+      "name": "multi-line-display",
+      "markdown": "$$\n\\frac{a}{b}\n\\\\\nc\n$$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<div class=\"marknexia-math-display\" role=\"math\" aria-label=\"\\[\n\\frac{a}{b}\n\\\\\nc\n\\]\">[\n<span class=\"marknexia-fraction\"><span class=\"marknexia-numerator\">a</span><span class=\"marknexia-denominator\">b</span></span>\n\\\nc\n]</div>\n"
+    },
+    {
+      "name": "list-items",
+      "markdown": "- item $x$\n- $$y$$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<ul>\n<li>item <span class=\"marknexia-math\" role=\"math\" aria-label=\"x\">x</span></li>\n<li><span class=\"marknexia-math\" role=\"math\" aria-label=\"y\">y</span></li>\n</ul>\n"
+    },
+    {
+      "name": "heading",
+      "markdown": "# Title $x^2$\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<h1 id=\"title\">Title <span class=\"marknexia-math\" role=\"math\" aria-label=\"x^2\">x<sup>2</sup></span></h1>\n"
+    },
+    {
+      "name": "table",
+      "markdown": "| a | b |\n|---|---|\n| $x$ | $y_1$ |\n",
+      "enableMath": true,
+      "outcome": "rendered",
+      "body": "<table>\n<thead>\n<tr>\n<th>a</th>\n<th>b</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><span class=\"marknexia-math\" role=\"math\" aria-label=\"x\">x</span></td>\n<td><span class=\"marknexia-math\" role=\"math\" aria-label=\"y_1\">y<sub>1</sub></span></td>\n</tr>\n</tbody>\n</table>\n"
+    }
+  ]
+}

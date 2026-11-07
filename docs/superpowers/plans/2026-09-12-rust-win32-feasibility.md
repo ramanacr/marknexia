@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the current .NET edition as the behavioral oracle and releasable product. Add language-neutral compatibility fixtures, the approved root-level Rust workspace, a secure native WebView2 vertical slice, a raw Win32 shell/UI Automation proof, and reproducible size/performance measurements. Work proceeds in three lanes after the shared baseline: portable parity, native shell/WebView2, and release measurement.
 
-**Tech Stack:** .NET 10/C# baseline exporter, stable Rust 2024 with MSVC targets, `windows-rs`, native WebView2 COM, `serde`, `serde_json`, candidate `comrak`/`pulldown-cmark`, candidate `ammonia`, Cargo test/property/fuzz tooling, PowerShell, GitHub Actions.
+**Tech Stack:** .NET 10/C# baseline exporter, stable Rust 2024 with MSVC targets, `windows-rs`, native WebView2 COM, `serde`, `serde_json`, candidate `comrak`/`pulldown-cmark` (Owner decision (2026-09-28): pulldown-cmark is the Markdown parser; comrak and its `candidate-comrak` feature were removed), candidate `ammonia`, Cargo test/property/fuzz tooling, PowerShell, GitHub Actions.
 
 **Spec:** `docs/superpowers/specs/2026-09-12-rust-win32-rewrite-design.md`
 
@@ -485,6 +485,20 @@ rtk git add scripts/Measure-RustArtifacts.ps1 scripts/Measure-RustDesktopPerf.ps
 rtk git commit -m "test: measure Rust release feasibility"
 ```
 
+#### Task 7 evidence ledger — 2026-09-24 source-only fix round
+
+**Implemented in source:** `stage_webview2_loader.tests.ps1` now inspects loader source contracts and creates no package, ZIP, or PE fixture. `no_synthetic_pe_disk.tests.ps1` checks performance test sources for PE-byte writes and on-disk archive creation. `Stage-WebView2Loader.ps1` canonicalizes `OutputPath`, `PackagePath`, and `LockPath`, then rejects output collisions case-insensitively before opening inputs or creating output. Desktop sample import now requires and cross-checks provenance for commit, fixture digest, scenario ID and SHA-256, architecture, native artifact identity, hardware, and OS; the output retains that provenance and labels samples `imported-external` with `runtimeCollectorStatus: unavailable-deferred`.
+
+**Evidence available:** source inspection only. Static regression coverage was added but not executed in this fix round.
+
+**Unavailable / deferred:** no runtime desktop metrics were collected. The repository currently has no runtime collector that launches the shell, observes WebView2 readiness/rendering, and separately samples host and WebView2 memory; `Measure-RustDesktopPerf.ps1` only imports externally collected samples. The 30 cold/30 warm performance gate, native x64/ARM64 measurements, schema/runtime validation, and executable loader behavior remain unverified and deferred. Static PE-header evidence does not establish native execution.
+
+#### Task 7 provenance correction — 2026-09-24 source-only fix round 3
+
+Imported sample provenance now also requires `nativeArtifactSha256`. The importer resolves the native executable's unique record in `artifact.artifacts.files` by the artifact's recorded relative path and compares the supplied sample hash to that record's SHA-256. The output schema requires a lowercase 64-character digest, and regression source covers retention and mismatch rejection. This closes same-path/same-metadata artifact substitution in sample provenance.
+
+**Evidence available:** source inspection and diff checks only. Tests, builds, schema validators, parsers, and runtime collectors were not run in this round. Runtime measurements remain unavailable/deferred as recorded above.
+
 ### Task 8: Produce the Reviewed Go/No-Go Evidence Package
 
 **Files:**
@@ -529,6 +543,9 @@ rtk git add docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md
 rtk git commit -m "docs: record Rust Win32 feasibility decision"
 ```
 
+#### Task 8 result — 2026-11-06
+
+Decision: **CONDITIONAL-GO**. The report is `docs/superpowers/reports/2026-09-12-rust-win32-feasibility-report.md`; the evidence index is `artifacts/rust-feasibility/manifest.json` (commit, CI run, per-architecture native gates, measurements, fixture digests, decision statuses). Native x64 and ARM64 gates, the .NET release preservation job, policy checks, reproducible builds and 300 s fuzzing pass in one CI run. Conditions C1–C6 in the report (owner approval of proposed compatibility decisions, highlighting language set, interactive evidence hosts, runtime contrast/multi-monitor DPI checks, update-key custody, production-scope features) carry into the production plan; none is a stop condition.
 ## Feasibility Exit Criteria
 
 - Frozen versioned fixtures reproduce current Markdown, headings, navigation, sanitization, rendering, settings, and update/archive behavior.

@@ -1,0 +1,6 @@
+{
+  "id": "empty-shell",
+  "description": "Start with no document and wait for shell and WebView2 readiness probes.",
+  "fixture": null,
+  "requiredSignals": ["shellVisibleMs", "webViewReadyMs", "firstRenderMs", "hostPrivateBytes", "webView2WorkingSetBytes"]
+}

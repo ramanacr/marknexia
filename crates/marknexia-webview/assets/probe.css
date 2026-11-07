@@ -1,0 +1,6 @@
+body { margin: 0; padding: 24px; background: #171a1c; color: #f1f4ef; font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 640px; }
+a { color: #b7ff3c; }
+button { min-height: 44px; padding: 0 16px; background: #b7ff3c; color: #172000; border: 0; }
+button:focus-visible, a:focus-visible { outline: 3px solid #ffc857; outline-offset: 3px; }
+img { display: block; margin-block: 16px; }

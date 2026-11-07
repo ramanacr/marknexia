@@ -1,0 +1,34 @@
+{
+  "area": "navigation",
+  "expected": {
+    "diagnostic": "Access blocked: Network file paths and invalid local paths are not supported.",
+    "externalUri": null,
+    "fragment": null,
+    "isSafe": false,
+    "kind": "BlockedOrInvalid",
+    "targetDocument": null
+  },
+  "input": {
+    "currentFile": "README.md",
+    "destination": "file://server.test/share/document.md",
+    "policy": {
+      "allowExternalLinks": true,
+      "allowRemoteAssets": false,
+      "enforceRepositorySandbox": true
+    },
+    "repositoryRoot": "navigation"
+  },
+  "name": "file-uri-rejected",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": {
+    "files": [
+      "README.md",
+      "docs/api.md",
+      "docs/encoded name.md",
+      "docs/literal%20.md",
+      "docs/nested/details.md"
+    ],
+    "root": "navigation"
+  }
+}

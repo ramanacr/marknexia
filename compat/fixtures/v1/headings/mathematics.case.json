@@ -1,0 +1,18 @@
+{
+  "area": "headings",
+  "expected": {
+    "customAnchors": [],
+    "diagrams": [],
+    "headings": [],
+    "images": [],
+    "links": [],
+    "renderedBodyHtml": "\u003Cp\u003EInline \u003Cspan class=\u0022math\u0022\u003E\\(x^2\\)\u003C/span\u003E and \u003Cspan class=\u0022math\u0022\u003E\\(y\\)\u003C/span\u003E\u003C/p\u003E\n"
+  },
+  "input": {
+    "markdown": "Inline $x^2$ and $$y$$\n"
+  },
+  "name": "mathematics",
+  "schemaVersion": "marknexia-parity-v1",
+  "sourceRevision": "38b39f668ce52026261ac4802602c0cf7e0711a3",
+  "virtualFileSystem": null
+}

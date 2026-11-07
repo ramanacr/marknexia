@@ -1,0 +1,47 @@
+[package]
+name = "marknexia-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+marknexia-files = { path = "../crates/marknexia-files" }
+marknexia-navigation = { path = "../crates/marknexia-navigation" }
+marknexia-core = { path = "../crates/marknexia-core" }
+marknexia-markdown = { path = "../crates/marknexia-markdown" }
+marknexia-rendering = { path = "../crates/marknexia-rendering" }
+marknexia-security = { path = "../crates/marknexia-security" }
+
+[[bin]]
+name = "path_and_uri"
+path = "fuzz_targets/path_and_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown_and_html"
+path = "fuzz_targets/markdown_and_html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "highlight"
+path = "fuzz_targets/highlight.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settings_parse"
+path = "fuzz_targets/settings_parse.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

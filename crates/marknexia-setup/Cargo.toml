@@ -1,0 +1,34 @@
+[package]
+name = "marknexia-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "marknexia_setup"
+path = "src/lib.rs"
+doctest = false
+
+# The installer executable. It is never built with its unit-test harness
+# (`test = false`) and the crate has no integration tests, so `cargo test`
+# never links the installer: the headless logic is tested in the library.
+# CI embeds the payload with MARKNEXIA_SETUP_PAYLOAD_DIR (see build.rs).
+[[bin]]
+name = "marknexia-rust-preview-setup"
+path = "src/main.rs"
+test = false
+doctest = false
+
+[dependencies]
+marknexia-core = { path = "../marknexia-core", version = "=0.1.0" }
+marknexia-update = { path = "../marknexia-update", version = "=0.1.0" }
+serde_json.workspace = true
+# SHA-256 of the embedded payload (MIT OR Apache-2.0).
+sha2 = { version = "=0.11.1", default-features = false }
+windows-core = "=0.62.2"
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+# build.rs writes the payload container with the same code (src/container.rs).
+sha2 = { version = "=0.11.1", default-features = false }

@@ -1,0 +1,90 @@
+name: Rust preview release
+
+# Publishes the unsigned Rust-edition preview packages that a green
+# rust-feasibility run built, as a GitHub *pre-release*. Manual only.
+# - The packages are taken from the given run's artifacts; nothing is rebuilt.
+# - A pre-release is never returned by /releases/latest, which the .NET
+#   edition's updater reads, so .NET users are not offered it.
+# - Tags must not start with "v": release.yml publishes the .NET edition
+#   for "v*" tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Green rust-feasibility run whose artifacts are published"
+        required: true
+      tag:
+        description: "Release tag (for example rust-preview-0.1.0; never v*)"
+        required: true
+      title:
+        description: "Release title"
+        required: true
+        default: "Marknexia Rust edition — unsigned preview"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check inputs and the source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "run_id must be numeric"; exit 1; }
+          [[ "$TAG" =~ ^rust-preview-[0-9A-Za-z.\-]+$ ]] || { echo "tag must match rust-preview-*"; exit 1; }
+          run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")
+          name=$(jq -r .name <<<"$run"); conclusion=$(jq -r .conclusion <<<"$run")
+          echo "source run: $name, conclusion $conclusion, sha $(jq -r .head_sha <<<"$run")"
+          [[ "$conclusion" == "success" ]] || { echo "source run is not green"; exit 1; }
+          jq -r .head_sha <<<"$run" > "$RUNNER_TEMP/source-sha"
+
+      - name: Download the preview packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: marknexia-rust-UNSIGNED-PREVIEW-*
+          path: ${{ runner.temp }}/packages
+
+      - name: Collect files and checksums
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release"; mkdir -p "$out"
+          for dir in "$RUNNER_TEMP"/packages/*/; do
+            artifact=$(basename "$dir")
+            while IFS= read -r -d '' file; do
+              name=$(basename "$file")
+              [[ -e "$out/$name" ]] && name="${artifact}-${name}"
+              cp "$file" "$out/$name"
+            done < <(find "$dir" -type f -print0)
+          done
+          (cd "$out" && sha256sum -- * > SHA256SUMS.txt)
+          ls -la "$out"
+
+      - name: Create the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          set -euo pipefail
+          sha=$(cat "$RUNNER_TEMP/source-sha")
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Unsigned preview of the Marknexia Rust edition (raw Win32 + WebView2, no .NET runtime).
+          It installs and runs side by side with the .NET edition, with its own identity.
+
+          - Built from commit ${sha} by rust-feasibility run ${{ inputs.run_id }}; checksums in SHA256SUMS.txt.
+          - The files are **not code-signed**. Windows SmartScreen may warn before the setup or the portable app runs.
+          - The MSIX is unsigned and installs only where unsigned packages are allowed (for example with Developer Mode).
+          - The portable ZIP needs the WebView2 Runtime, which Windows 11 includes.
+          - This is a pre-release: the .NET edition's updater does not offer it.
+          EOF
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$sha" --prerelease \
+            --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md" "$RUNNER_TEMP"/release/*
