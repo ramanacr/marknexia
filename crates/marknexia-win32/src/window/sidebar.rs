@@ -98,8 +98,14 @@ const TVS_FULLROWSELECT: u32 = 0x1000;
 const TVS_TRACKSELECT: u32 = 0x200;
 const TVM_SETINDENT: u32 = 0x1107;
 const TVM_SETEXTENDEDSTYLE: u32 = 0x112C;
-/// `TVS_EX_DOUBLEBUFFER | TVS_EX_FADEINOUTEXPANDOS`.
-const TREE_EXTENDED: isize = 0x4 | 0x40;
+const TVS_EX_DOUBLEBUFFER: isize = 0x4;
+/// Hides the expand chevrons while the pointer is outside the tree. Not
+/// used: the WinUI `TreeView` of .NET always shows them, and with it the
+/// chevrons vanished as soon as the pointer moved to the document (for
+/// example to follow a link), which looked like a lost tree.
+#[cfg(test)]
+const TVS_EX_FADEINOUTEXPANDOS: isize = 0x40;
+const TREE_EXTENDED: isize = TVS_EX_DOUBLEBUFFER;
 const BS_OWNERDRAW: u32 = 0x0B;
 
 /// The view selector (.NET `SidebarModeSelector`, a two-tab `TabView`; the
@@ -1051,5 +1057,13 @@ mod tests {
                 assert!(width - 3 * item <= dip(SELECTOR_SLACK, dpi) + 3);
             }
         }
+    }
+
+    /// The chevrons stay visible when the pointer leaves the tree, as in
+    /// the .NET `TreeView`.
+    #[test]
+    fn tree_chevrons_never_fade_out() {
+        assert_eq!(TREE_EXTENDED & TVS_EX_FADEINOUTEXPANDOS, 0);
+        assert_ne!(TREE_EXTENDED & TVS_EX_DOUBLEBUFFER, 0);
     }
 }
