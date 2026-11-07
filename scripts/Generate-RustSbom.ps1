@@ -31,6 +31,9 @@ param(
     [Parameter(Mandatory)][string]$OutputPath,
     [string]$HostMetadataPath,
     [string]$DistributionFileName,
+    # Wording only: the portable ZIP keeps the defaults; the setup and MSIX name themselves.
+    [string]$DistributionDescription = 'portable preview ZIP',
+    [string]$DistributionKind = 'ZIP',
     [string]$CargoLockPath = (Join-Path $PSScriptRoot '..\Cargo.lock'),
     [string]$LoaderLockPath = (Join-Path $PSScriptRoot '..\packaging\webview\loader.lock.json'),
     [string]$MermaidLockPath = (Join-Path $PSScriptRoot '..\packaging\webview\mermaid.lock.json'),
@@ -357,7 +360,7 @@ $spdxPackages.Insert(0, [ordered]@{
     licenseInfoFromFiles = @('NOASSERTION')
     licenseDeclared = 'NOASSERTION'
     copyrightText = 'NOASSERTION'
-    comment = "Unsigned, unpublished portable preview ZIP for $Architecture (CI evidence only, never released)."
+    comment = "Unsigned, unpublished $DistributionDescription for $Architecture (CI evidence only, never released)."
 })
 Add-Relationship $rootSpdxId 'DEPENDS_ON' $webViewId
 foreach ($edge in $crateEdges) {
@@ -375,7 +378,7 @@ $sbom = [ordered]@{
         created = $created.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         creators = @('Tool: Marknexia-Rust-SBOM-1.0')
     }
-    comment = "Unsigned, unpublished preview package for $Architecture. Crates: cargo metadata resolve graphs (target for runtime, host for build-time) from $RootPackage over normal and build edges, dev-dependencies excluded; the scope is in each package comment. Files: every file in the ZIP with SHA1 and SHA256. Licenses are declared by each component and not concluded."
+    comment = "Unsigned, unpublished preview package for $Architecture. Crates: cargo metadata resolve graphs (target for runtime, host for build-time) from $RootPackage over normal and build edges, dev-dependencies excluded; the scope is in each package comment. Files: every file in the $DistributionKind with SHA1 and SHA256. Licenses are declared by each component and not concluded."
     packages = $spdxPackages.ToArray()
     files = $files
     relationships = @((Select-Ordinal @($edgeMap.Keys)) | ForEach-Object { $edgeMap[$_] })

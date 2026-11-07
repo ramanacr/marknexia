@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Marknexia (Rust preview): MSIX manifest template for CI evidence packages only.
+  scripts/New-RustInstallerPackages.ps1 replaces @VERSION@ (four numeric parts) and
+  @ARCHITECTURE@ (x64 or arm64). The package is UNSIGNED: the Publisher carries the
+  unsigned-package OID, so it can be added only with Add-AppxPackage -AllowUnsigned.
+  The identity differs from the .NET edition (RRCLabs.Marknexia), so both install
+  side by side. The file type association only adds an "Open with" entry; Windows
+  never makes a newly installed package the default app.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="Marknexia.RustPreview"
+    ProcessorArchitecture="@ARCHITECTURE@"
+    Publisher="CN=Marknexia Rust Preview UNSIGNED, OID.2.25.311729368913984317654407730594956997722=1"
+    Version="@VERSION@" />
+
+  <Properties>
+    <DisplayName>Marknexia (Rust preview)</DisplayName>
+    <PublisherDisplayName>Marknexia (unsigned preview)</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Unsigned preview of the Rust edition of the Marknexia Markdown viewer. Not a release.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="MarknexiaRustPreview"
+      Executable="marknexia-win32.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Marknexia (Rust preview)"
+        Description="Marknexia Markdown viewer (Rust preview, unsigned)"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="markdown-rust-preview">
+            <uap:DisplayName>Markdown document (Marknexia Rust preview)</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.md</uap:FileType>
+              <uap:FileType>.markdown</uap:FileType>
+              <uap:FileType>.mdown</uap:FileType>
+              <uap:FileType>.mkdn</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

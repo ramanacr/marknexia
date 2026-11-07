@@ -67,6 +67,7 @@ jobs:
           pwsh -NoProfile -NonInteractive -File tests/perf/compare_rust_builds.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1 -PySpdxTools $env:PYSPDXTOOLS
+          pwsh -NoProfile -NonInteractive -File tests/perf/rust_setup_payload.tests.ps1
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
@@ -177,6 +178,60 @@ jobs:
         with:
           name: marknexia-rust-UNSIGNED-PREVIEW-${{ matrix.target }}
           path: ${{ runner.temp }}/rust-unsigned-preview/out/
+          if-no-files-found: error
+          retention-days: 14
+      # Evidence only, as for the ZIP (compat/decisions/rust-installers.md): the setup
+      # executable and the MSIX are unsigned, never attached to a release and never
+      # published. They are built, unpacked and run only here, on hosted runners, never on
+      # a developer machine. Pull requests from forks skip them.
+      - name: Unsigned preview setup and MSIX
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-unsigned-installers'
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustInstallerPackages.ps1 `
+            -Target $target `
+            -FirstSource (Join-Path $env:GITHUB_WORKSPACE 'source-a') `
+            -SecondSource (Join-Path $env:GITHUB_WORKSPACE 'source-b') `
+            -PortableOutputRoot (Join-Path $env:RUNNER_TEMP 'rust-unsigned-preview') `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json") `
+            -HostMetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json") `
+            -OutputRoot $installers `
+            -SourceCommit $env:GITHUB_SHA
+          # The pinned SPDX reference validator from the previous step.
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.setupSbom
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.msixSbom
+      # windows-latest is x64 and cannot run the ARM64 setup. The hosted runner is
+      # ephemeral: the per-user install, its HKCU keys and the uninstall vanish with it.
+      - name: Silent install, upgrade and uninstall round trip (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-unsigned-installers'
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          $version = (Get-Content (Join-Path $installers 'setup/installer-verification.json') -Raw | ConvertFrom-Json).version
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-RustSetupInstall.ps1 `
+            -SetupPath $paths.setupPath -PayloadDir $paths.payloadDir -ExpectedVersion $version `
+            -OutputPath (Join-Path $installers 'setup/install-round-trip.json')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-setup-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-installers/setup/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-PREVIEW-msix-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-installers/msix/
           if-no-files-found: error
           retention-days: 14
 

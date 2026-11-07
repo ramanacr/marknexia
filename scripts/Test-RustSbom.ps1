@@ -31,7 +31,9 @@ param(
     [string]$MermaidLockPath = (Join-Path $PSScriptRoot '..\packaging\webview\mermaid.lock.json'),
     [string]$RootPackage = 'marknexia-win32',
     [string]$ShellFileName = 'marknexia-win32.exe',
-    [string]$LoaderFileName = 'WebView2Loader.dll'
+    [string]$LoaderFileName = 'WebView2Loader.dll',
+    # The portable ZIP by default; the setup and MSIX SBOMs name their own artifact.
+    [string]$DistributionFileNamePattern = '^marknexia-win32-.+-unsigned-preview\.zip$'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,7 +120,7 @@ if ($distribution.Count -eq 1) {
     $zip = $distribution[0]
     Assert-That (@($relationships | Where-Object { $_.spdxElementId -ceq 'SPDXRef-DOCUMENT' -and $_.relationshipType -ceq 'DESCRIBES' -and $_.relatedSpdxElement -ceq $zip.SPDXID }).Count -eq 1) 'The document must DESCRIBE the distribution package.'
     Assert-That ($zip.filesAnalyzed -eq $true) 'The distribution package must have filesAnalyzed=true.'
-    Assert-That ([string]$zip.packageFileName -cmatch '^marknexia-win32-.+-unsigned-preview\.zip$') 'The distribution package must name the unsigned preview ZIP.'
+    Assert-That ([string]$zip.packageFileName -cmatch $DistributionFileNamePattern) "The distribution package must name the unsigned preview artifact ($DistributionFileNamePattern)."
     $contained = @($relationships | Where-Object { $_.spdxElementId -ceq $zip.SPDXID -and $_.relationshipType -ceq 'CONTAINS' } | ForEach-Object relatedSpdxElement)
     Assert-That ((@($contained | Sort-Object) -join '|') -ceq (@($fileIds | Sort-Object) -join '|')) 'The distribution package must CONTAIN exactly the listed files.'
     $sha1Values = [string[]]@($files | ForEach-Object { Get-Checksum $_ 'SHA1' })
