@@ -1,6 +1,6 @@
 # Vector diagram zoom: zoom diagrams by re-layout, not by a bitmap scale (Rust edition)
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: the bundled page assets `crates/marknexia-rendering/assets/bridge.js` and `crates/marknexia-rendering/assets/github-markdown.css`, and the page-parity tests `crates/marknexia-rendering/tests/parity_v1.rs` and `math_oracle.rs` with the shared `tests/support/asset_patches.rs` (new `parity-asset-patch` blocks). Owner report 2026-11-07: zooming a Mermaid diagram or a text diagram makes it blurry; diagrams must stay vector-sharp at every zoom level. No .NET source and no frozen fixture is changed.
 

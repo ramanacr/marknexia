@@ -1,6 +1,6 @@
 # Link navigation between documents
 
-Status: **proposed — requires Task 8 approval**
+Status: **approved — owner decision 2026-11-07**
 
 Scope: `crates/marknexia-webview` (`link_adapter.js`, `protocol.rs` link messages, `host.rs` `rebind_document`, `callbacks.rs` document slot and navigation ids, `session.rs` `replace_document`), `crates/marknexia-navigation` (`FileProbe`, `AssumeExists`) and `crates/marknexia-win32` (`window/chrome/links.rs`, `chrome_model.rs` link model and `TabLocation`, `documents.rs` `probe_document_file`, `window/shell_ops.rs` `open_external`). The .NET sources are `src/Marknexia.App/MainWindow.xaml.cs` (`CoreWebView2_WebMessageReceived`, `HandleLinkClick`, `OpenDocumentInTabAsync`, `OpenDocumentInTabCoreAsync`, `ReplaceActiveDocumentAsync`, `ApplyPendingLocationAsync`, `Back_Click`, `Forward_Click`) and `src/Marknexia.Navigation/NavigationResolver.cs`, `NavigationHistoryManager.cs`.
 
