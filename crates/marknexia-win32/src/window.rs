@@ -166,6 +166,9 @@ struct AppState {
     /// Transient message (a failed selection or dialog); cleared when the
     /// active tab changes.
     notice: Option<String>,
+    /// The hovered or focused link's resolved target (`chrome::links`),
+    /// shown before anything else, as a browser shows the link URL.
+    link_hover: Option<String>,
     /// Per-document open/render failures, by tab.
     tab_errors: BTreeMap<u64, String>,
     dpi: u32,
@@ -222,6 +225,7 @@ impl AppState {
             brushes: None,
             shell_error: None,
             notice: None,
+            link_hover: None,
             tab_errors: BTreeMap::new(),
             dpi: 96,
             theme: EffectiveTheme::Light,
@@ -991,15 +995,14 @@ fn apply_render_outcome(state: &Rc<RefCell<AppState>>, outcome: RenderOutcome) {
     });
     let mut displayed = true;
     input::document_replaced(state, tab_id);
+    chrome::link_timing_step(tab_id, "replaced");
     let added = match take_session(state) {
         Some(mut session) => {
-            // chrome: a reload replaces the tab's earlier document.
-            if session.has_document(tab_id) {
-                let _ = session.remove_document(tab_id);
-            }
+            // chrome: a reload, a followed link, back or forward replaces
+            // the tab's earlier document; its controller navigates in place.
             let added = document.and_then(|document| {
                 session
-                    .add_document(document)
+                    .replace_document(document)
                     .map_err(|error| format!("WebView2 document: {error:?}"))
             });
             restore_session(state, session);
@@ -1185,7 +1188,9 @@ fn refresh_status(state: &Rc<RefCell<AppState>>) {
         });
         let tab_error = active.and_then(|tab| state.tab_errors.get(&tab.get()));
         let pending = active.is_some_and(|tab| state.renders.is_pending(tab.get()));
-        let text = if let Some(error) = tab_error {
+        let text = if let Some(link) = state.link_hover.as_deref() {
+            link.to_owned()
+        } else if let Some(error) = tab_error {
             error.clone()
         } else if let (true, Some(title)) = (pending, title) {
             format!("Rendering {title}\u{2026}")
@@ -1832,7 +1837,10 @@ fn refresh_tabs(state: &Rc<RefCell<AppState>>, newly_selected: Option<TabId>) {
     }
     if newly_selected.is_some() {
         // A notice concerned the previous view.
-        let _ = crate::reentry::write(state, |state| state.notice = None);
+        let _ = crate::reentry::write(state, |state| {
+            state.notice = None;
+            state.link_hover = None;
+        });
         // .NET `DocumentTabs_SelectionChanged` → `RefreshSearchForActiveTab`.
         input::refresh_find(state);
     }

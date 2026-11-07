@@ -61,6 +61,11 @@ impl AppState {
         self.tabs.open(title)
     }
 
+    /// See [`TabStore::rename`].
+    pub fn rename_tab(&mut self, tab_id: TabId, title: impl Into<String>) -> bool {
+        self.tabs.rename(tab_id, title)
+    }
+
     #[must_use]
     pub fn active_tab(&self) -> Option<TabId> {
         self.tabs.active_id()

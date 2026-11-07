@@ -22,7 +22,8 @@ use crate::{
 
 enum SessionEvent {
     EnvironmentCreated(u64, Result<WebViewEnvironment, EnvironmentError>),
-    HostCreated(u64, u64, u64, Result<WebViewHost, HostError>),
+    /// Boxed: a host is much larger than the other events.
+    HostCreated(u64, u64, u64, Box<Result<WebViewHost, HostError>>),
     ProcessFailure(u64, u64, u64, ProcessFailure),
     PageMessage(u64, u64, u64, PageToHost),
     BrowserExited(u64, BrowserExit),
@@ -310,6 +311,65 @@ impl WebViewSession {
         Ok(())
     }
 
+    /// Shows `document` in its tab instead of the tab's current document
+    /// (a followed link, back or forward, a reload). A live controller is
+    /// reused: it navigates to the new document in place, so the old page
+    /// stays painted until the new one commits and no controller is
+    /// created. Page messages of the old document still queued here are
+    /// dropped. Without a usable controller (none yet, failed, recovering)
+    /// the document is replaced as `remove_document` plus `add_document`.
+    pub fn replace_document(&mut self, document: HostDocument) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::Closed);
+        }
+        if self.security_failed {
+            return Err(SessionError::ResourceBoundaryFailed);
+        }
+        document.validate().map_err(SessionError::Document)?;
+        let tab_id = document.tab_id();
+        if !self.documents.contains_key(&tab_id) {
+            return self.add_document(document);
+        }
+        let reusable = !self.browser_recovering
+            && !self.failed_tabs.contains(&tab_id)
+            && !self.recreating_tabs.contains(&tab_id);
+        if reusable
+            && let Some(host) = self.hosts.get_mut(&tab_id)
+            && host.rebind_document(document.clone()).is_ok()
+        {
+            self.documents.insert(tab_id, document);
+            self.events.borrow_mut().retain(
+                |event| !matches!(event, SessionEvent::PageMessage(_, _, tab, _) if *tab == tab_id),
+            );
+            return Ok(());
+        }
+        // No controller, or one that may be half-switched: close it and
+        // start over.
+        let _ = self.remove_document(tab_id);
+        self.add_document(document)
+    }
+
+    /// User-initiated navigations that a tab's page started without the
+    /// link adapter (and that were cancelled), as (tab, epoch, document
+    /// URI, requested URI).
+    pub fn drain_navigation_requests(&self) -> Vec<(u64, u64, String, String)> {
+        let mut requests = Vec::new();
+        for (tab_id, host) in &self.hosts {
+            let Some(document) = self.documents.get(tab_id) else {
+                continue;
+            };
+            for uri in host.drain_navigation_requests() {
+                requests.push((
+                    *tab_id,
+                    document.document_epoch(),
+                    document.document_uri(),
+                    uri,
+                ));
+            }
+        }
+        requests
+    }
+
     pub fn start(&mut self) -> Result<(), SessionError> {
         if self.closed {
             return Err(SessionError::Closed);
@@ -375,7 +435,7 @@ impl WebViewSession {
                     generation,
                     controller_generation,
                     tab_id,
-                    result,
+                    Box::new(result),
                 ));
             }),
             // The completion panicked: still queue a failure, so the tab
@@ -411,7 +471,7 @@ impl WebViewSession {
                     generation,
                     controller_generation,
                     tab_id,
-                    Err(HostError::CallbackPanicked),
+                    Box::new(Err(HostError::CallbackPanicked)),
                 ));
         }
         loop {
@@ -513,6 +573,7 @@ impl WebViewSession {
                 self.finish_environment_restore()?;
             }
             SessionEvent::HostCreated(generation, controller_generation, tab_id, result) => {
+                let result = *result;
                 if generation != self.generation
                     || self.controller_generations.get(&tab_id) != Some(&controller_generation)
                     || (self.browser_recovering && self.recovery_generation != Some(generation))
@@ -1149,6 +1210,154 @@ mod native_tests {
         assert!(messages.borrow().is_empty());
         session.close().unwrap();
         assert!(session.host(7).is_none() && session.host(8).is_none());
+        unsafe { DestroyWindow(parent) }.unwrap();
+    }
+
+    /// A followed link replaces the tab's document in place: the same
+    /// controller navigates to the new document, the old document's
+    /// messages are dropped, the new one's arrive, and the load state
+    /// resets and completes. Prints the navigation timing breakdown.
+    #[test]
+    #[ignore = "requires an interactive x64/ARM64 Windows host with Evergreen"]
+    fn native_replace_document_reuses_the_controller() {
+        let (parent, mut session, messages, _observer) = open_probe();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session
+                .host(7)
+                .is_some_and(super::WebViewHost::document_loaded)
+        });
+        let controller = session.controller_generations[&7];
+        // Epochs 2 to 4: the probe page; 5 to 7: a rendered wiki page.
+        let rendered = |epoch: u64| {
+            use marknexia_core::contracts::AppTheme;
+            use marknexia_rendering::{DocumentRenderer, PageIdentity, RenderContext, Renderer};
+            let seed = u8::try_from(epoch).unwrap();
+            let identity = PageIdentity::new([seed; 16], [seed ^ 0x5A; 16]).unwrap();
+            let filler: String = (1..=80)
+                .map(|line| format!("Filler paragraph {line} with [a link](x{line}.md).\n\n"))
+                .collect();
+            let source = format!("# Page {epoch}\n\n{filler}## Details\n\n{filler}");
+            let page = Renderer::new()
+                .render(&source, &RenderContext::new(AppTheme::Light, identity))
+                .unwrap();
+            crate::policy::HostDocument::from_rendered(7, epoch, "page.md", page, &identity, false)
+                .unwrap()
+        };
+        for epoch in 2..=7 {
+            messages.borrow_mut().clear();
+            let document = if epoch <= 4 {
+                probe::document(7, epoch)
+            } else {
+                rendered(epoch)
+            };
+            let started = Instant::now();
+            session.replace_document(document).unwrap();
+            assert_eq!(session.controller_generations[&7], controller);
+            assert!(!session.host(7).unwrap().document_loaded());
+            pump_until(&mut session, Duration::from_secs(30), |session| {
+                session
+                    .host(7)
+                    .is_some_and(super::WebViewHost::document_loaded)
+            });
+            let loaded = started.elapsed();
+            assert_eq!(
+                session.host(7).unwrap().document_identity().unwrap(),
+                (7, epoch)
+            );
+            let result = Rc::new(RefCell::new(None));
+            session
+                .host(7)
+                .unwrap()
+                .evaluate_for_test(
+                    "(() => { const n = performance.getEntriesByType('navigation')[0]; \
+                     return n ? [n.requestStart, n.responseStart, n.responseEnd, n.domInteractive, \
+                     n.domContentLoadedEventStart, n.domContentLoadedEventEnd, n.loadEventEnd] \
+                     .map(Math.round).join(' ') : 'none'; })()",
+                    Rc::clone(&result),
+                )
+                .unwrap();
+            pump_until(&mut session, Duration::from_secs(10), |_| {
+                result.borrow().is_some()
+            });
+            eprintln!(
+                "replace epoch {epoch}: loaded after {} ms; navigation timing (request, response start, response end, interactive, DOMContentLoaded start, end, load) {}",
+                loaded.as_millis(),
+                result.borrow().as_deref().unwrap_or_default()
+            );
+            if epoch > 4 {
+                continue;
+            }
+            pump_until(&mut session, Duration::from_secs(10), |_| {
+                messages.borrow().iter().any(|message| {
+                    matches!(message, PageToHost::Ready { tab_id: 7, document_epoch, .. } if *document_epoch == epoch)
+                })
+            });
+            assert!(messages.borrow().iter().all(|message| !matches!(
+                message,
+                PageToHost::Ready { tab_id: 7, document_epoch, .. } if *document_epoch != epoch
+            )));
+        }
+        // Two replacements before the first adapter registration completes
+        // (same origin: probe pages use the tab origin). The superseded
+        // adapter may still run, but only the newest epoch acts on a click.
+        session.replace_document(probe::document(7, 9)).unwrap();
+        session.replace_document(probe::document(7, 10)).unwrap();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session
+                .host(7)
+                .is_some_and(super::WebViewHost::document_loaded)
+        });
+        messages.borrow_mut().clear();
+        let clicked = Rc::new(RefCell::new(None));
+        session
+            .host(7)
+            .unwrap()
+            .evaluate_for_test(
+                "(() => { const a = document.createElement('a'); a.href = 'next.md'; \
+                 a.textContent = 'next'; document.body.appendChild(a); a.click(); \
+                 return window.__mnLinkEpoch; })()",
+                Rc::clone(&clicked),
+            )
+            .unwrap();
+        pump_until(&mut session, Duration::from_secs(10), |_| {
+            clicked.borrow().is_some()
+                && messages
+                    .borrow()
+                    .iter()
+                    .any(|message| matches!(message, PageToHost::OpenLink { .. }))
+        });
+        assert_eq!(clicked.borrow().as_deref(), Some("10"));
+        let links: Vec<(u64, String)> = messages
+            .borrow()
+            .iter()
+            .filter_map(|message| match message {
+                PageToHost::OpenLink {
+                    document_epoch,
+                    href,
+                    ..
+                } => Some((*document_epoch, href.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, vec![(10, "next.md".to_owned())]);
+
+        // The earlier path, for comparison: close the controller and create
+        // a new one for the next document.
+        let started = Instant::now();
+        session.remove_document(7).unwrap();
+        session.add_document(rendered(8)).unwrap();
+        session.select_tab(7).unwrap();
+        pump_until(&mut session, Duration::from_secs(30), |session| {
+            session
+                .host(7)
+                .is_some_and(super::WebViewHost::document_loaded)
+        });
+        eprintln!(
+            "new controller per document (before): loaded after {} ms",
+            started.elapsed().as_millis()
+        );
+        assert_ne!(session.controller_generations[&7], controller);
+        session.close().unwrap();
         unsafe { DestroyWindow(parent) }.unwrap();
     }
 
