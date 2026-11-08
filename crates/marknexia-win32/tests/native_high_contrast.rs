@@ -342,7 +342,9 @@ impl Launched {
                 .expect("SelectionItem pattern")
                 .cast()
                 .expect("SelectionItem interface");
-        unsafe { pattern.Select() }.expect("Select");
+        // A shell still starting up can refuse a selection for a moment
+        // (CI run 42446447292: 0x80040201); retry until it is accepted.
+        wait_for("UIA Select on the tab", || unsafe { pattern.Select() }.ok());
         let title = name(&tabs[index]);
         wait_for(&format!("the document of tab {title:?}"), || {
             self.visible_document()
@@ -597,12 +599,17 @@ fn colorref(spec: ColorSpec) -> Option<u32> {
     }
 }
 
-/// (inactive tab fill, active tab fill) as the shell paints them.
-fn tab_fills(colors: Palette) -> (u32, u32) {
-    (
-        colorref(colors.surface).expect("brand color"),
-        colorref(colors.elevated).expect("brand color"),
-    )
+/// The brand theme whose tab fills these are: the active tab is `elevated`,
+/// the inactive one `surface`, or `hover` while the runner's pointer rests
+/// on it (CI run 42446447292, x64).
+fn brand_theme_of(fills: (u32, u32)) -> Option<EffectiveTheme> {
+    [EffectiveTheme::Light, EffectiveTheme::Dark]
+        .into_iter()
+        .find(|theme| {
+            let colors: Palette = palette(*theme);
+            let inactive = [colors.surface, colors.hover].map(colorref);
+            colorref(colors.elevated) == Some(fills.1) && inactive.contains(&Some(fills.0))
+        })
 }
 
 /// The brand-only colors: accents and fills of both brand palettes.
@@ -865,17 +872,15 @@ fn runtime_high_contrast_repaints_chrome_and_page_and_restores_the_theme() {
     let shell = launch();
     let first = shell.select(0);
     let strip = Strip::locate(&shell);
-    let brand =
-        [EffectiveTheme::Light, EffectiveTheme::Dark].map(|theme| tab_fills(palette(theme)));
-
     // 1. Baseline: brand tab fills; remember the page background.
     let baseline = wait_until(&shell, &strip, "the brand baseline", |seen| {
-        if brand.contains(&seen.fills) {
+        if brand_theme_of(seen.fills).is_some() {
             Ok(())
         } else {
             Err(format!("tab fills {:06x?} are no brand pair", seen.fills))
         }
     });
+    let baseline_theme = brand_theme_of(baseline.fills);
 
     // 2. High contrast on, at runtime.
     restore.set(true);
@@ -909,10 +914,12 @@ fn runtime_high_contrast_repaints_chrome_and_page_and_restores_the_theme() {
     // 3. High contrast off: the brand theme and the page background return.
     restore.set(false);
     let restored = wait_until(&shell, &strip, "the brand theme again", |seen| {
-        if seen.fills != baseline.fills {
+        if brand_theme_of(seen.fills) != baseline_theme {
             return Err(format!(
-                "tab fills {:06x?}, baseline {:06x?}",
-                seen.fills, baseline.fills
+                "tab fills {:06x?} ({:?}), baseline {:06x?} ({baseline_theme:?})",
+                seen.fills,
+                brand_theme_of(seen.fills),
+                baseline.fills
             ));
         }
         if seen.page.0 != baseline.page.0 {
@@ -923,7 +930,7 @@ fn runtime_high_contrast_repaints_chrome_and_page_and_restores_the_theme() {
         }
         Ok(())
     });
-    assert!(brand.contains(&restored.fills));
+    assert!(brand_theme_of(restored.fills).is_some());
     assert_focus_usable(&shell, "high contrast off");
     eprintln!("uia-native-high-contrast passed for {first:?}");
     drop(shell);
