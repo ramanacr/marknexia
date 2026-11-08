@@ -326,14 +326,16 @@ try {
     $cold = foreach ($index in 1..$Runs) {
         $folder = Join-Path $profileRoot "cold-$index"
         Invoke-MeasuredRun $folder "cold-$index"
-        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+        # WebView2 can still be deleting profile files; a vanished file raises a
+        # terminating error despite SilentlyContinue, and the folder is temporary.
+        try { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
     $warmFolder = Join-Path $profileRoot 'warm'
     [void](Invoke-MeasuredRun $warmFolder 'warm-prime')
     $warm = foreach ($index in 1..$Runs) { Invoke-MeasuredRun $warmFolder "warm-$index" }
 }
 finally {
-    Remove-Item -LiteralPath $profileRoot -Recurse -Force -ErrorAction SilentlyContinue
+    try { Remove-Item -LiteralPath $profileRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     if ($generatedDocument) { Remove-Item -LiteralPath $generatedDocument -Force -ErrorAction SilentlyContinue }
 }
 

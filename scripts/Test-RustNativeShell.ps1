@@ -142,7 +142,11 @@ finally {
     $env:MARKNEXIA_INSTANCE_KEY = $previousKey
     # WebView2 processes release the profile shortly after the shell exits.
     for ($i = 0; $i -lt 60 -and (Test-Path $isolated); $i++) {
-        Remove-Item -LiteralPath $isolated -Recurse -Force -ErrorAction SilentlyContinue
+        # A file that WebView2 deletes during the recursive walk raises a
+        # terminating "cannot find the file" error despite SilentlyContinue
+        # (CI run 42396023451); the loop simply tries again.
+        try { Remove-Item -LiteralPath $isolated -Recurse -Force -ErrorAction SilentlyContinue }
+        catch { Write-Verbose "Profile cleanup retry: $_" }
         if (Test-Path $isolated) { Start-Sleep -Milliseconds 500 }
     }
 }
