@@ -1423,6 +1423,15 @@ pub(super) fn theme_changed(state: &Rc<RefCell<AppState>>) {
                 super::native_color(sidebar.text).0 as isize,
             )
         };
+        // Common controls cache the system colors and refresh them only on
+        // WM_SYSCOLORCHANGE, which Windows sends to top-level windows; the
+        // documented rule is to forward it (a runtime high-contrast switch).
+        send(
+            tree,
+            windows::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE,
+            0,
+            0,
+        );
         send(tree, TVM_SETBKCOLOR, 0, background);
         send(tree, TVM_SETTEXTCOLOR, 0, text);
         for window in all_windows(controls) {
@@ -2190,9 +2199,16 @@ fn order_controls(c: &ChromeControls, shell: ShellControls) {
     }
 }
 
-/// Tab and Shift+Tab move between the shell's tab stops (the WebView
-/// document is reached with F6, as before).
+/// Tab and Shift+Tab move between the shell's tab stops (F6 cycles the
+/// surfaces, the WebView document included; the `uia-native-keyboard` gate
+/// records that Tab also enters the document after the last chrome stop).
 fn move_focus(hwnd: HWND, backward: bool) -> bool {
+    // Tab is keyboard input: focus indicators show from here on.
+    if let Some(portable) = state_of(hwnd)
+        .and_then(|state| crate::reentry::read(&state, |state| Rc::clone(&state.portable)))
+    {
+        let _ = crate::reentry::write(&portable, |app| app.note_keyboard_input());
+    }
     // SAFETY: focus queries and changes on this thread's own windows.
     unsafe {
         let focus = GetFocus();

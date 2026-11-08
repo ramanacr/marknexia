@@ -451,7 +451,27 @@ pub mod native {
             )
         }
 
+        /// Whether the strip owns keyboard focus. Read from the window's
+        /// own GUI thread state, not from `GetFocus`: `GetFocus` answers
+        /// only for the calling thread's input queue, and UIA may call a
+        /// provider from another thread, where it reports no focus (the
+        /// `uia-native-keyboard` gate saw the tab control focused with no
+        /// focused tab).
         fn has_focus(&self) -> bool {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GUITHREADINFO, GetGUIThreadInfo, GetWindowThreadProcessId,
+            };
+            let thread = unsafe { GetWindowThreadProcessId(self.hwnd, None) };
+            if thread == 0 {
+                return false;
+            }
+            let mut info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_ok() {
+                return info.hwndFocus == self.hwnd;
+            }
             let focused = unsafe { GetFocus() };
             focused == self.hwnd
         }
@@ -499,6 +519,32 @@ pub mod native {
                     UiaRaiseAutomationEvent(&provider, UIA_AutomationFocusChangedEventId)
                 };
             }
+        }
+
+        /// The tab strip gained keyboard focus (Tab, Shift+Tab, F6 or a
+        /// click): focus belongs to the selected tab, so UIA clients hear a
+        /// focus change for that tab, not for the tab control (WinUI
+        /// `TabView` focuses its selected item the same way).
+        pub fn notify_focused(&self) {
+            if !self.state.connected.get()
+                || !self.state.has_focus()
+                || !unsafe { UiaClientsAreListening() }.as_bool()
+            {
+                return;
+            }
+            let Some(selected) = self
+                .state
+                .tabs()
+                .ok()
+                .and_then(|tabs| tabs.into_iter().find(|tab| tab.selected))
+            else {
+                return;
+            };
+            let Ok(provider) = child_simple(&self.state, selected.id) else {
+                return;
+            };
+            let _ =
+                unsafe { UiaRaiseAutomationEvent(&provider, UIA_AutomationFocusChangedEventId) };
         }
 
         /// Tell UIA clients the tab children changed (tab opened or closed).
