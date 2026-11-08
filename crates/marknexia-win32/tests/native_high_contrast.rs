@@ -879,6 +879,14 @@ fn runtime_high_contrast_repaints_chrome_and_page_and_restores_the_theme() {
 
     // 2. High contrast on, at runtime.
     restore.set(true);
+    let contrast = wait_until(
+        &shell,
+        &strip,
+        "system colors in chrome and page",
+        high_contrast_met,
+    );
+    // Read after the theme switch settled (right after the SPI call the
+    // system colors can still be the old ones).
     eprintln!(
         "high contrast on: COLOR_WINDOW {:06x}, COLOR_WINDOWTEXT {:06x}, COLOR_HIGHLIGHT {:06x}, \
          COLOR_BTNFACE {:06x}",
@@ -886,12 +894,6 @@ fn runtime_high_contrast_repaints_chrome_and_page_and_restores_the_theme() {
         sys(COLOR_WINDOWTEXT),
         sys(COLOR_HIGHLIGHT),
         sys(COLOR_BTNFACE)
-    );
-    let contrast = wait_until(
-        &shell,
-        &strip,
-        "system colors in chrome and page",
-        high_contrast_met,
     );
     if contrast.page.0 == baseline.page.0 {
         eprintln!(
