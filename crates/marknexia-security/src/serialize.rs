@@ -27,6 +27,12 @@
 //!   ancestor with no `<td>`, `<th>` or `<caption>` (the markers a sanitized
 //!   tree can hold) in between are left out, and its children are written in
 //!   its place. This only drops markup: the inner link and its attributes.
+//! * **Nested headings.** A heading can sit inside another one when the
+//!   element between them was not allowed and removed (`<h2><x><h2>`): the
+//!   tree builder closes an open heading only when it is the current node.
+//!   Re-parsing `<h2><h2>` closes the outer heading, so the tags of a heading
+//!   whose nearest written ancestor is a heading are left out and its
+//!   children are written in its place.
 //!
 //! The output budget is shared by every chunk of a document and charged while
 //! writing, so an expanding document fails once the total passes the limit.
@@ -167,7 +173,17 @@ impl Writer<'_> {
             Some(local_name!("td") | local_name!("th") | local_name!("caption")) => false,
             _ => parent_in_link,
         };
-        if self.round_trip && parent_in_link && html_name == Some(local_name!("a")) {
+        // A heading start tag closes a heading that is the current node on
+        // re-parsing; the inner heading's tags are left out instead.
+        let heading_in_heading = is_heading(html_name.as_ref())
+            && stack
+                .iter()
+                .rev()
+                .find(|parent| !parent.unwrapped)
+                .is_some_and(|parent| is_heading(parent.html_name.as_ref()));
+        if self.round_trip
+            && ((parent_in_link && html_name == Some(local_name!("a"))) || heading_in_heading)
+        {
             stack.push(ElemInfo {
                 html_name,
                 ignore_children: false,
@@ -256,6 +272,20 @@ impl Writer<'_> {
             self.escaped(text, false)
         }
     }
+}
+
+fn is_heading(name: Option<&LocalName>) -> bool {
+    matches!(
+        name,
+        Some(
+            &local_name!("h1")
+                | &local_name!("h2")
+                | &local_name!("h3")
+                | &local_name!("h4")
+                | &local_name!("h5")
+                | &local_name!("h6")
+        )
+    )
 }
 
 fn is_void(name: &LocalName) -> bool {
@@ -566,6 +596,26 @@ mod nested_link_tests {
                     <a href=\"https://h.test/i\">i</a></td></tr></tbody></table></a>";
         assert_eq!(sanitize(cell), cell);
         assert_eq!(sanitize(&sanitize(cell)), cell);
+    }
+
+    #[test]
+    fn a_heading_left_inside_a_heading_is_unwrapped() {
+        // The removed `<x>` left `<h2><h2>`; re-parsing would close the
+        // outer heading (fuzz crash-5a1eca84).
+        for input in [
+            "<h2>a<x><h2>b</h2></x>c</h2>",
+            "<h1>a<x><h3>b<x><h4>c</h4></x></h3></x></h1>",
+        ] {
+            let once = sanitize(input);
+            assert_eq!(sanitize(&once), once, "{input}");
+            assert_eq!(once.matches("<h").count(), 1, "{once}");
+        }
+        // A written element between them: re-parsing keeps the nesting.
+        let link = "<h2>a<a href=\"https://h.test/\">o<h2>b</h2></a></h2>";
+        assert_eq!(sanitize(link), link);
+        // Headings that are siblings are kept.
+        let siblings = "<h2>a</h2><div><h3>b</h3></div>";
+        assert_eq!(sanitize(siblings), siblings);
     }
 
     #[test]
