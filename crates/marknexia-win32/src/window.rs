@@ -62,9 +62,10 @@ use windows::{
                 TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
                 WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
                 WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-                WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE,
-                WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-                WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+                WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETTINGCHANGE,
+                WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
+                WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
             },
         },
     },
@@ -491,7 +492,9 @@ fn initialize(
             w!("STATIC"),
             w!("Ready"),
             // SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS: one centred line.
-            child_style(0x80 | 0x200 | 0x4000),
+            // Not a tab stop: a status text is not interactive and shows no
+            // focus (the .NET status TextBlock is not a tab stop either).
+            WINDOW_STYLE(child_style(0x80 | 0x200 | 0x4000).0 & !WS_TABSTOP.0),
             1005,
         )?,
     };
@@ -1431,6 +1434,24 @@ unsafe extern "system" fn tab_proc(
             paint_tabs(hwnd);
             LRESULT(0)
         }
+        // The focus rectangle follows real keyboard focus, and UIA clients
+        // hear focus land on the selected tab.
+        WM_SETFOCUS | WM_KILLFOCUS => {
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+            if message == WM_SETFOCUS
+                && let Ok(parent) =
+                    unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }
+                && let Some(state) = unsafe { app_state_handle(parent) }
+            {
+                // Sent synchronously by SetFocus, also into nested pumps.
+                let provider =
+                    crate::reentry::read(&state, |state| state.accessibility.clone()).flatten();
+                if let Some(provider) = provider {
+                    provider.notify_focused();
+                }
+            }
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
@@ -1473,6 +1494,9 @@ fn paint_tabs(hwnd: HWND) {
             state.chrome.text_fonts().map(|fonts| fonts.0),
         )
     };
+    // The focus rectangle shows only while the strip owns keyboard focus,
+    // so focus elsewhere never leaves a second focus indicator here.
+    let has_focus = unsafe { GetFocus() } == hwnd;
     let count = tabs.len();
     // The order a queued click is pinned against (`input`).
     input::snapshot_tabs(&tabs.iter().map(|(id, _)| *id).collect::<Vec<_>>());
@@ -1574,7 +1598,7 @@ fn paint_tabs(hwnd: HWND) {
                     .then(|| native_color(colors.hover)),
                 dpi,
             );
-            if active && focus_visible {
+            if active && focus_visible && has_focus {
                 let _ = unsafe { DrawFocusRect(dc, &style::inset(&tab, px(2), px(2))) };
             }
         }

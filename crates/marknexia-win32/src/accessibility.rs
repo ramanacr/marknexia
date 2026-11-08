@@ -501,6 +501,32 @@ pub mod native {
             }
         }
 
+        /// The tab strip gained keyboard focus (Tab, Shift+Tab, F6 or a
+        /// click): focus belongs to the selected tab, so UIA clients hear a
+        /// focus change for that tab, not for the tab control (WinUI
+        /// `TabView` focuses its selected item the same way).
+        pub fn notify_focused(&self) {
+            if !self.state.connected.get()
+                || !self.state.has_focus()
+                || !unsafe { UiaClientsAreListening() }.as_bool()
+            {
+                return;
+            }
+            let Some(selected) = self
+                .state
+                .tabs()
+                .ok()
+                .and_then(|tabs| tabs.into_iter().find(|tab| tab.selected))
+            else {
+                return;
+            };
+            let Ok(provider) = child_simple(&self.state, selected.id) else {
+                return;
+            };
+            let _ =
+                unsafe { UiaRaiseAutomationEvent(&provider, UIA_AutomationFocusChangedEventId) };
+        }
+
         /// Tell UIA clients the tab children changed (tab opened or closed).
         pub fn notify_children_changed(&self) {
             if !self.state.connected.get() || !unsafe { UiaClientsAreListening() }.as_bool() {
