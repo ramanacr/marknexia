@@ -1,6 +1,6 @@
 # Accessibility gates: runtime high contrast and keyboard reachability
 
-Status: **proposed**
+Status: **approved — owner decision 2026-11-08**
 
 Scope: `crates/marknexia-win32` (`window.rs` tab strip and status bar, `window/chrome.rs` Tab traversal and theme refresh, `accessibility.rs` tab-strip focus event) and the native gates `tests/native_high_contrast.rs` (`uia-native-high-contrast`) and `tests/native_keyboard.rs` (`uia-native-keyboard`). The .NET sources are `src/Marknexia.App/MainWindow.xaml` and `MainWindow.xaml.cs` (`ActualThemeChanged` → `RefreshWebViewBackgroundColors`, WinUI theme resources).
 
