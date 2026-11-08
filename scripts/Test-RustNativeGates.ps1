@@ -9,7 +9,9 @@ exit recovery test (terminating only the WebView2 browser process that the
 test itself started), the UI Automation smoke test against the built shell,
 the native accessibility gate (DPI awareness and target size, UIA structure
 events, and the high-contrast palette, read only), the WebView2
-missing-runtime state (read only), and the shell visibility contract.
+missing-runtime state (read only), the runtime high-contrast switch (GitHub
+Actions only; restored afterwards), the keyboard reachability audit, and the
+shell visibility contract.
 Intended for local evidence hosts and for CI runners with an interactive
 desktop, on x64 and native ARM64.
 
@@ -136,6 +138,22 @@ Invoke-Gate 'uia-native-runtime' {
 Invoke-Gate 'uia-native-links' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_links -- --ignored --test-threads=1 --nocapture
+} -Attempts 1
+# Runtime high contrast: SPI_SETHIGHCONTRAST on and off with a
+# WM_SETTINGCHANGE broadcast; chrome and page colors from DWM captures, the
+# original state restored by a drop guard. The test changes the setting only
+# on GitHub Actions (CI, GITHUB_ACTIONS and RUNNER_TEMP) and skips elsewhere.
+Invoke-Gate 'uia-native-high-contrast' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_high_contrast -- --ignored --test-threads=1 --nocapture
+} -Attempts 1
+# Keyboard reachability audit: Tab and Shift+Tab through the chrome (outline
+# view, find bar, repository view); every stop named, of a fitting control
+# type and keyboard-focused; the tab order is printed. Keys are sent only
+# while the launched shell owns the foreground.
+Invoke-Gate 'uia-native-keyboard' {
+    $env:MARKNEXIA_SHELL_EXE = $exe
+    cargo test --locked --target $Target -p marknexia-win32 --test native_keyboard -- --ignored --test-threads=1 --nocapture
 } -Attempts 1
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
