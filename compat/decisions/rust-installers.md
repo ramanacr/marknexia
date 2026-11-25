@@ -40,3 +40,7 @@ Evidence class: implemented, compiled and headless-tested. 50 unit tests in `cra
 ## Rollback
 
 Remove the setup and MSIX steps and their two uploads from `rust-release-build`, and the `crates/marknexia-setup` workspace member. The portable ZIP and its SBOM are unchanged (the new SBOM script parameters default to the ZIP's wording). An installed preview is removed with its own uninstaller (`--uninstall --silent`).
+
+## Update 2026-11-25: signed preview
+
+Owner decision: the preview is code-signed locally with the Certum certificate (docs/release-signing.md). RINST-14 still describes the unsigned CI evidence, which is unchanged. The signed path builds the same packages in the manual `Signed packages` workflow with `New-RustPortablePackage.ps1 -SignedShellPath` and `New-RustInstallerPackages.ps1 -Signed`: names drop `UNSIGNED-PREVIEW`, the MSIX publisher is the certificate subject (RINST-11's unsigned publisher stays for the evidence package), and the owner signs the setup and MSIX before publishing a `rust-preview-*` pre-release.

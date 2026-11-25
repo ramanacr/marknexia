@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Marknexia (Rust preview): MSIX manifest template for CI evidence packages only.
-  scripts/New-RustInstallerPackages.ps1 fills in the Identity Version (four numeric parts)
-  and ProcessorArchitecture (x64 or arm64) tokens. The package is UNSIGNED: the Publisher carries the
-  unsigned-package OID, so it can be added only with Add-AppxPackage -AllowUnsigned.
+  scripts/New-RustInstallerPackages.ps1 fills in the Identity Version (four numeric parts),
+  ProcessorArchitecture (x64 or arm64), Publisher and description tokens. By default the package
+  is UNSIGNED: the Publisher carries the unsigned-package OID, so it can be added only with
+  Add-AppxPackage -AllowUnsigned. With -Signed (docs/release-signing.md) the Publisher is the
+  release certificate's subject, which the owner's signature requires; that changes the
+  package family name, so an earlier unsigned preview must be removed before it is installed.
   The identity differs from the .NET edition (RRCLabs.Marknexia), so both install
   side by side. The file type association only adds an "Open with" entry; Windows
   never makes a newly installed package the default app.
@@ -17,14 +20,14 @@
   <Identity
     Name="Marknexia.RustPreview"
     ProcessorArchitecture="@ARCHITECTURE@"
-    Publisher="CN=Marknexia Rust Preview UNSIGNED, OID.2.25.311729368913984317654407730594956997722=1"
+    Publisher="@PUBLISHER@"
     Version="@VERSION@" />
 
   <Properties>
     <DisplayName>Marknexia (Rust preview)</DisplayName>
-    <PublisherDisplayName>Marknexia (unsigned preview)</PublisherDisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
-    <Description>Unsigned preview of the Rust edition of the Marknexia Markdown viewer. Not a release.</Description>
+    <Description>@DESCRIPTION@</Description>
   </Properties>
 
   <Dependencies>
@@ -41,7 +44,7 @@
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Marknexia (Rust preview)"
-        Description="Marknexia Markdown viewer (Rust preview, unsigned)"
+        Description="@TILE_DESCRIPTION@"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
