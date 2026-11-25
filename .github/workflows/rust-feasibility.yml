@@ -68,6 +68,7 @@ jobs:
           pwsh -NoProfile -NonInteractive -File tests/perf/stage_webview2_loader.tests.ps1
           pwsh -NoProfile -NonInteractive -File tests/perf/rust_sbom.tests.ps1 -PySpdxTools $env:PYSPDXTOOLS
           pwsh -NoProfile -NonInteractive -File tests/perf/rust_setup_payload.tests.ps1
+          pwsh -NoProfile -NonInteractive -File tests/signing/release_signing.tests.ps1
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
@@ -120,6 +121,29 @@ jobs:
           pwsh -NoProfile -NonInteractive -File source-a/scripts/Stage-WebView2Loader.ps1 -Architecture $architecture -PackagePath $sdkPackage -OutputPath (Join-Path $artifactRoot 'WebView2Loader.dll')
           $digest = (Get-FileHash -LiteralPath source-a/test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
           pwsh -NoProfile -NonInteractive -File source-a/scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifactRoot -NativeArtifactPath (Join-Path $artifactRoot 'marknexia-win32.exe') -OutputPath (Join-Path $reportRoot 'vertical-slice-artifacts.json') -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 1
+      # Stage 1 of the local signing flow (docs/release-signing.md): the unsigned shell that
+      # the owner signs on their PC. Not a release, never published from here. Pull requests
+      # from forks skip it.
+      - name: Stage the unsigned shell for local signing
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = '${{ matrix.target }}'
+          $out = Join-Path $env:RUNNER_TEMP 'rust-unsigned-binaries'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $shell = Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release/marknexia-win32.exe"
+          Copy-Item -LiteralPath $shell -Destination $out
+          [ordered]@{
+            schemaVersion = 'rust-unsigned-binaries-v1'; target = $target; sourceCommit = $env:GITHUB_SHA
+            files = @([ordered]@{ path = 'marknexia-win32.exe'; sha256 = (Get-FileHash -LiteralPath $shell -Algorithm SHA256).Hash.ToLowerInvariant() })
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'unsigned-binaries.json') -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: marknexia-rust-UNSIGNED-binaries-${{ matrix.target }}
+          path: ${{ runner.temp }}/rust-unsigned-binaries/
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-feasibility-${{ matrix.target }}

@@ -1,0 +1,341 @@
+name: Signed packages
+
+# Stage 3 of the local signing flow (docs/release-signing.md). Manual only.
+# - Builds the setup executables, portable ZIPs and MSIX packages from binaries that the
+#   owner signed on their PC and uploaded to a private draft release (stage 2).
+# - Every input executable must carry a valid, timestamped Authenticode signature by the
+#   release certificate in packaging/signing/release-signing.json and must equal the CI
+#   build of the source run except for that signature (scripts/Test-SignedHandoff.ps1).
+# - Nothing is signed and nothing is published here; no signing secret exists on GitHub.
+#   The owner downloads these packages, signs the setup executables and MSIX packages and
+#   publishes the release (stage 4).
+
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        description: "Edition: rust or dotnet"
+        required: true
+        type: choice
+        options: [rust, dotnet]
+      source_run_id:
+        description: "Green CI run whose binaries were signed (Rust Feasibility on main, or Package & Release for a v* tag)"
+        required: true
+      handoff_tag:
+        description: "Draft handoff release from Invoke-ReleaseSigning.ps1 -Stage Binaries (signing-handoff-<product>-<run id>)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check the source run and the handoff draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only a token with write access can list draft releases; nothing is written
+      actions: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      ref: ${{ steps.check.outputs.ref }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ inputs.product }}
+          RUN_ID: ${{ inputs.source_run_id }}
+          HANDOFF: ${{ inputs.handoff_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "source_run_id must be numeric"; exit 1; }
+          [[ "$HANDOFF" == "signing-handoff-${PRODUCT}-${RUN_ID}" ]] || { echo "handoff_tag must be signing-handoff-${PRODUCT}-${RUN_ID}"; exit 1; }
+          run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")
+          name=$(jq -r .name <<<"$run"); conclusion=$(jq -r .conclusion <<<"$run")
+          event=$(jq -r .event <<<"$run"); ref=$(jq -r .head_branch <<<"$run"); sha=$(jq -r .head_sha <<<"$run")
+          echo "source run: $name, $event, $ref at $sha, conclusion $conclusion"
+          [[ "$conclusion" == "success" && "$event" == "push" ]] || { echo "the source run must be a green push run"; exit 1; }
+          if [[ "$PRODUCT" == "rust" ]]; then
+            [[ "$name" == "Rust Feasibility" && "$ref" == "main" ]] || { echo "expected Rust Feasibility on main"; exit 1; }
+          else
+            [[ "$name" == "Package & Release" && "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "expected Package & Release for a v* tag"; exit 1; }
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "the source run has no commit SHA"; exit 1; }
+          drafts=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$HANDOFF\") | .draft")
+          [[ "$drafts" == "true" ]] || { echo "expected exactly one draft release $HANDOFF (found: ${drafts:-none})"; exit 1; }
+          { echo "sha=$sha"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+
+  rust:
+    name: Rust packages (${{ matrix.target }})
+    needs: check
+    if: inputs.product == 'rust'
+    runs-on: windows-latest
+    permissions:
+      contents: write # downloading draft release assets needs write access; nothing is written
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1-x86_64-pc-windows-msvc
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_SHA: ${{ needs.check.outputs.sha }}
+      SOURCE_REF: ${{ needs.check.outputs.ref }}
+      HANDOFF: ${{ inputs.handoff_tag }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          path: source-a
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          path: source-b
+      - name: Require signing support in the source commit
+        run: |
+          if (-not (Test-Path -LiteralPath source-a/scripts/Test-SignedHandoff.ps1)) {
+            throw 'The source commit predates the signing flow (docs/release-signing.md). Sign a newer run.'
+          }
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      - name: Download the unsigned shell of the source run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          name: marknexia-rust-UNSIGNED-binaries-${{ matrix.target }}
+          path: ${{ runner.temp }}/unsigned
+      - name: Download the signed handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download $env:HANDOFF --repo $env:GITHUB_REPOSITORY --dir (Join-Path $env:RUNNER_TEMP 'handoff')
+      - name: Verify the signed shell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-SignedHandoff.ps1 -Product rust -Architecture ${{ matrix.arch }} `
+            -ManifestPath (Join-Path $env:RUNNER_TEMP 'handoff/signing-manifest.json') -HandoffDir (Join-Path $env:RUNNER_TEMP 'handoff') `
+            -UnsignedRoot (Join-Path $env:RUNNER_TEMP 'unsigned') -DestinationRoot (Join-Path $env:RUNNER_TEMP 'signed') `
+            -SourceRunId $env:SOURCE_RUN_ID -SourceCommit $env:SOURCE_SHA -EvidencePath (Join-Path $env:RUNNER_TEMP 'signed-handoff-check.json')
+      - name: Build twice from clean copies
+        run: |
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $env:CARGO_INCREMENTAL = '0'
+          $first = (Resolve-Path source-a).Path
+          $second = (Resolve-Path source-b).Path
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$first=/workspace"
+          cargo build --manifest-path source-a/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RUSTFLAGS = "-C link-arg=/Brepro --cfg ammonia_unstable --remap-path-prefix=$second=/workspace"
+          cargo build --manifest-path source-b/Cargo.toml --workspace --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install pinned SPDX validator
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Get-Content source-a/tools/rust-tools.lock -Raw | ConvertFrom-Json
+          $venv = Join-Path $env:RUNNER_TEMP 'spdx-venv'
+          python -m venv $venv
+          & "$venv/Scripts/python.exe" -m pip install --disable-pip-version-check --no-input --only-binary ':all:' "spdx-tools==$($tools.tools.spdxTools)"
+      - name: Portable ZIP with the signed shell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $loaderLock = Get-Content source-a/packaging/webview/loader.lock.json -Raw | ConvertFrom-Json
+          Invoke-WebRequest -Uri $loaderLock.source -OutFile (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg')
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
+          $metadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json"
+          $hostMetadata = Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json"
+          $tree = Join-Path $env:RUNNER_TEMP "cargo-tree-$target.txt"
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $target
+          [IO.File]::WriteAllText($metadata, ($json -join "`n"), $utf8)
+          $json = cargo metadata --manifest-path source-a/Cargo.toml --format-version 1 --locked --filter-platform $hostTriple
+          [IO.File]::WriteAllText($hostMetadata, ($json -join "`n"), $utf8)
+          $lines = cargo tree --manifest-path source-a/Cargo.toml --locked -e normal,build -p marknexia-win32 --target $target --prefix none --format '{p}'
+          [IO.File]::WriteAllText($tree, ($lines -join "`n"), $utf8)
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustPortablePackage.ps1 `
+            -Target $target `
+            -FirstRoot (Join-Path $env:GITHUB_WORKSPACE "source-a/target/$target/release") `
+            -SecondRoot (Join-Path $env:GITHUB_WORKSPACE "source-b/target/$target/release") `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath $metadata `
+            -HostMetadataPath $hostMetadata `
+            -CargoTreePath $tree `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP 'rust-signed-preview') `
+            -SourceCommit $env:SOURCE_SHA `
+            -SignedShellPath (Join-Path $env:RUNNER_TEMP 'signed/marknexia-win32.exe')
+          $sboms = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'rust-signed-preview/out') -Filter '*.spdx.json')
+          if ($sboms.Count -ne 1) { throw "Expected one SBOM, found $($sboms.Count)." }
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $sboms[0].FullName
+      - name: Setup and MSIX with the signed shell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $target = '${{ matrix.target }}'
+          $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
+          $hostTriple = ((rustc -vV | Select-String '^host: ').Line -replace '^host: ', '').Trim()
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-signed-installers'
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/New-RustInstallerPackages.ps1 `
+            -Target $target `
+            -FirstSource (Join-Path $env:GITHUB_WORKSPACE 'source-a') `
+            -SecondSource (Join-Path $env:GITHUB_WORKSPACE 'source-b') `
+            -PortableOutputRoot (Join-Path $env:RUNNER_TEMP 'rust-signed-preview') `
+            -LoaderPackagePath (Join-Path $env:RUNNER_TEMP 'microsoft.web.webview2.nupkg') `
+            -MetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-$target.json") `
+            -HostMetadataPath (Join-Path $env:RUNNER_TEMP "cargo-metadata-host-$hostTriple.json") `
+            -OutputRoot $installers `
+            -SourceCommit $env:SOURCE_SHA `
+            -Signed
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.setupSbom
+          & (Join-Path $env:RUNNER_TEMP 'spdx-venv/Scripts/pyspdxtools.exe') -i $paths.msixSbom
+      # windows-latest is x64 and cannot run the ARM64 setup. The runner is ephemeral.
+      - name: Silent install, upgrade and uninstall round trip (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = Join-Path $env:RUNNER_TEMP 'rust-signed-installers'
+          $paths = Get-Content (Join-Path $installers 'installer-paths.json') -Raw | ConvertFrom-Json
+          $version = (Get-Content (Join-Path $installers 'setup/installer-verification.json') -Raw | ConvertFrom-Json).version
+          pwsh -NoProfile -NonInteractive -File source-a/scripts/Test-RustSetupInstall.ps1 `
+            -SetupPath $paths.setupPath -PayloadDir $paths.payloadDir -ExpectedVersion $version `
+            -OutputPath (Join-Path $installers 'setup/install-round-trip.json')
+      - name: Collect the packages and their provenance
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'signed-packages'
+          foreach ($pair in @(@('portable', 'rust-signed-preview/out'), @('setup', 'rust-signed-installers/setup'), @('msix', 'rust-signed-installers/msix'))) {
+            $destination = New-Item -ItemType Directory -Path (Join-Path $out $pair[0]) -Force
+            Copy-Item -Path (Join-Path $env:RUNNER_TEMP "$($pair[1])/*") -Destination $destination -Recurse
+          }
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'signed-handoff-check.json') -Destination $out
+          $manifestSha = (Get-FileHash -LiteralPath (Join-Path $env:RUNNER_TEMP 'handoff/signing-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            schemaVersion = 'marknexia-signed-packages-provenance-v1'; product = 'rust'; architecture = '${{ matrix.arch }}'
+            packagingRunId = $env:GITHUB_RUN_ID; sourceRunId = $env:SOURCE_RUN_ID; sourceCommit = $env:SOURCE_SHA; sourceRef = $env:SOURCE_REF
+            handoffTag = $env:HANDOFF; manifestSha256 = $manifestSha
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'packaging-provenance.json') -Encoding utf8NoBOM
+          Get-ChildItem -LiteralPath $out -Recurse -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetRelativePath($out, $_.FullName) }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marknexia-rust-SIGNED-INPUT-packages-${{ matrix.target }}
+          path: ${{ runner.temp }}/signed-packages/
+          if-no-files-found: error
+          retention-days: 7
+
+  dotnet:
+    name: .NET packages (x64 + ARM64)
+    needs: check
+    if: inputs.product == 'dotnet'
+    runs-on: windows-latest
+    permissions:
+      contents: write # downloading draft release assets needs write access; nothing is written
+      actions: read
+    env:
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_SHA: ${{ needs.check.outputs.sha }}
+      SOURCE_REF: ${{ needs.check.outputs.ref }}
+      HANDOFF: ${{ inputs.handoff_tag }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          fetch-depth: 0
+      - name: Require signing support in the source commit
+        run: |
+          if (-not (Test-Path -LiteralPath scripts/Test-SignedHandoff.ps1)) {
+            throw 'The source commit predates the signing flow (docs/release-signing.md). Sign a newer run.'
+          }
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Download the unsigned app output of the source run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          pattern: marknexia-dotnet-UNSIGNED-app-*
+          path: ${{ runner.temp }}/unsigned
+      - name: Download the signed handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download $env:HANDOFF --repo $env:GITHUB_REPOSITORY --dir (Join-Path $env:RUNNER_TEMP 'handoff')
+      - name: Verify the signed binaries and lay out the app output
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($package in @(@('x64', 'x64'), @('arm64', 'ARM64'))) {
+            $arch, $platform = $package
+            pwsh -NoProfile -NonInteractive -File scripts/Test-SignedHandoff.ps1 -Product dotnet -Architecture $arch `
+              -ManifestPath (Join-Path $env:RUNNER_TEMP 'handoff/signing-manifest.json') -HandoffDir (Join-Path $env:RUNNER_TEMP 'handoff') `
+              -UnsignedRoot (Join-Path $env:RUNNER_TEMP "unsigned/marknexia-dotnet-UNSIGNED-app-$arch") `
+              -DestinationRoot "src/Marknexia.App/bin/$platform/Release/net10.0-windows10.0.19041.0" `
+              -SourceRunId $env:SOURCE_RUN_ID -SourceCommit $env:SOURCE_SHA -EvidencePath (Join-Path $env:RUNNER_TEMP "signed-handoff-check-$arch.json")
+          }
+      - name: Calculate & Sync Version
+        run: ./scripts/set-version.ps1 -Version $env:SOURCE_REF -SyncManifestOnly
+      - name: Restore Dependencies
+        run: dotnet restore Marknexia.slnx
+      - name: Package ZIP, MSIX and setup from the signed app output
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ./scripts/signing/MarknexiaSigning.psm1 -Force
+          $signing = Get-ReleaseSigningConfig
+          $ver = $env:SOURCE_REF.TrimStart('v')
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') { throw "Release tag '$ver' must be a three-component semantic version." }
+          $packageVersion = "$ver.0"
+          $manifestSha = (Get-FileHash -LiteralPath (Join-Path $env:RUNNER_TEMP 'handoff/signing-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+          foreach ($package in @([pscustomobject]@{ Platform = 'x64'; AssetToken = 'x64' }, [pscustomobject]@{ Platform = 'ARM64'; AssetToken = 'arm64' })) {
+            $publishDir = "src/Marknexia.App/bin/$($package.Platform)/Release/net10.0-windows10.0.19041.0"
+            $out = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "signed-packages/$($package.AssetToken)") -Force
+            $zipName = Join-Path $out "Marknexia-v$ver-win-$($package.AssetToken).zip"
+            $msixName = Join-Path $out "Marknexia-v$ver-win-$($package.AssetToken).msix"
+            Compress-Archive -Path "$publishDir/*" -DestinationPath $zipName -Force
+            # GitHub MSIX only: the publisher is the release certificate's subject, so the owner
+            # can sign it. The Microsoft Store package keeps its Store identity (store-submission/).
+            ./scripts/prepare-store-package.ps1 -Platform $package.Platform -Version $packageVersion -PublisherId $signing.subject
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $preparedName = if ($package.Platform -eq 'x64') { 'Marknexia-Store-Ready.msix' } else { 'Marknexia-Store-Ready-ARM64.msix' }
+            Copy-Item "store-submission/$preparedName" -Destination $msixName -Force
+            if ((Get-MsixPublisher -Path $msixName) -cne $signing.subject) { throw 'The GitHub MSIX publisher is not the release certificate subject.' }
+            ./scripts/Build-Installer.ps1 -Configuration Release -Platform $package.Platform -Version $ver -OutputDirectory $out -NoRestore
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "signed-handoff-check-$($package.AssetToken).json") -Destination (Join-Path $out 'signed-handoff-check.json')
+            [ordered]@{
+              schemaVersion = 'marknexia-signed-packages-provenance-v1'; product = 'dotnet'; architecture = $package.AssetToken
+              packagingRunId = $env:GITHUB_RUN_ID; sourceRunId = $env:SOURCE_RUN_ID; sourceCommit = $env:SOURCE_SHA; sourceRef = $env:SOURCE_REF
+              handoffTag = $env:HANDOFF; manifestSha256 = $manifestSha
+            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'packaging-provenance.json') -Encoding utf8NoBOM
+            Get-ChildItem -LiteralPath $out -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marknexia-dotnet-SIGNED-INPUT-packages-x64
+          path: ${{ runner.temp }}/signed-packages/x64/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marknexia-dotnet-SIGNED-INPUT-packages-arm64
+          path: ${{ runner.temp }}/signed-packages/arm64/
+          if-no-files-found: error
+          retention-days: 7
