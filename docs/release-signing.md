@@ -155,3 +155,19 @@ The signer thumbprint must be `68572404AE99971D76B907D9452001DCEE7766F1` and a t
 
 `tests/signing/release_signing.tests.ps1` (run in Rust CI) tests the flow with signtool, gh and
 Get-AuthenticodeSignature replaced by script blocks; it writes no executable and no archive.
+
+## Rust updater publisher pin
+
+The Rust updater trusts a staged executable only when its Authenticode certificate matches a
+build-time pin (`crates/marknexia-update/src/config.rs`). The values for this certificate are:
+
+- `MARKNEXIA_UPDATE_PUBLISHER_SHA256=191db43c8e8c546a131a755aae71d55d9bc1a724acfdf9cb3c7647ef6d22589f`
+  (SHA-256 of the certificate DER, also `certificateSha256` in `packaging/signing/release-signing.json`)
+- `MARKNEXIA_UPDATE_PUBLISHER=Open Source Developer Ramana Reddy Chamakura` (the leaf simple name)
+
+They are not set in CI yet. The update channel also needs the owner's Ed25519 release public key,
+`MARKNEXIA_UPDATE_MANIFEST_URL` and `MARKNEXIA_UPDATE_ALLOWED_HOSTS`
+(`compat/decisions/portable-updater.md`, "Release key path"). Until all of them are set, a build
+reports "Updates are not configured for this build." and never contacts a server. Set the pin
+together with the rest of the channel. Before the certificate renews (2027-11-25), add the new
+certificate's SHA-256 to the comma-separated list and ship that build before switching.
