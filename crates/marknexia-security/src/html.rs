@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn ids_only_matter_for_removed_elements() {
-        // ammonia 4.2.4 consults its document-wide id map only for the SVG
+        // ammonia 4.2.5 consults its document-wide id map only for the SVG
         // animation elements; they must stay removed for chunked output to
         // equal whole output.
         for tag in [
