@@ -378,10 +378,24 @@ fn close_runner_sign_in_prompt() {
     let class_len = unsafe { GetClassNameW(foreground, &mut class) }.max(0) as usize;
     let mut title = [0u16; 256];
     let title_len = unsafe { GetWindowTextW(foreground, &mut title) }.max(0) as usize;
-    if String::from_utf16_lossy(&class[..class_len]) != "Windows.UI.Core.CoreWindow" {
+    let class = String::from_utf16_lossy(&class[..class_len]);
+    let title = String::from_utf16_lossy(&title[..title_len]);
+    // The ARM64 runner image opens a Windows Terminal tab running wsl.exe
+    // that takes the foreground during the UI gates (CI runs 45773720938,
+    // 45794553259). This function runs only on GitHub Actions runners.
+    if class == "CASCADIA_HOSTING_WINDOW_CLASS" && title.to_ascii_lowercase().ends_with("\\wsl.exe")
+    {
+        eprintln!(
+            "closing a runner terminal window ({})",
+            foreground_description()
+        );
+        // SAFETY: posting to a window of another process; no pointers.
+        let _ = unsafe { PostMessageW(Some(foreground), WM_CLOSE, WPARAM(0), LPARAM(0)) };
         return;
     }
-    let title = String::from_utf16_lossy(&title[..title_len]);
+    if class != "Windows.UI.Core.CoreWindow" {
+        return;
+    }
     let image = process_image(foreground_owner()).to_ascii_lowercase();
     // System shell surfaces only: the sign-in prompt (WWAHost) and system
     // flyouts such as Search (SystemApps), which took the foreground after
@@ -525,5 +539,28 @@ fn leave_menu_mode(hwnd: HWND) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The UIA element of the shell window. A shell still starting up can time
+/// out a UIA call (CI run 45801696505: `ElementFromHandle` failed with
+/// UIA_E_TIMEOUT 0x80131505), so this retries for up to 30 seconds.
+pub fn element_from_handle(
+    automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+    hwnd: HWND,
+) -> windows::Win32::UI::Accessibility::IUIAutomationElement {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match unsafe { automation.ElementFromHandle(hwnd) } {
+            Ok(root) => return root,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "ElementFromHandle: {error:?}"
+                );
+                eprintln!("ElementFromHandle failed ({error:?}); retrying");
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
     }
 }

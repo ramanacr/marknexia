@@ -191,7 +191,7 @@ fn command_line_markdown_file_opens_as_a_named_rendered_document() {
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .expect("CUIAutomation");
-    let root = unsafe { automation.ElementFromHandle(hwnd) }.expect("ElementFromHandle");
+    let root = shell_support::element_from_handle(&automation, hwnd);
     let tab_control = wait_for("the custom TabControl", || {
         children(&automation, &root).into_iter().find(|element| {
             unsafe { element.CurrentControlType() }.is_ok_and(|kind| kind == UIA_TabControlTypeId)
@@ -234,7 +234,7 @@ fn two_named_tab_items_expose_selection_and_change_active_tab() {
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .expect("CUIAutomation");
-    let root = unsafe { automation.ElementFromHandle(hwnd) }.expect("ElementFromHandle");
+    let root = shell_support::element_from_handle(&automation, hwnd);
     let tab_control = wait_for("the custom TabControl", || {
         children(&automation, &root).into_iter().find(|element| {
             unsafe { element.CurrentControlType() }.is_ok_and(|kind| kind == UIA_TabControlTypeId)

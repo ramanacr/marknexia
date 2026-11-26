@@ -100,7 +100,7 @@ fn a_missing_runtime_shows_the_install_state_and_keeps_the_shell_usable() {
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .expect("CUIAutomation");
-    let root = unsafe { automation.ElementFromHandle(hwnd) }.expect("ElementFromHandle");
+    let root = shell_support::element_from_handle(&automation, hwnd);
     let by_id = |id: &str| find_by(&automation, &root, UIA_AutomationIdPropertyId, id);
 
     // The document area explains the state.

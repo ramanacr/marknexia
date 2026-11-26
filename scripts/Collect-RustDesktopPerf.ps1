@@ -158,11 +158,13 @@ public static class PerfWindowProbe {
         return result.ToArray();
     }
     private static System.Threading.Timer watchdog;
+    // What the collector was doing last, named in the watchdog message.
+    public static volatile string Phase = "starting";
     // Ends the collector process if it has not finished in time. Pure .NET
     // timer callback: no PowerShell runspace is needed on the timer thread.
     public static void StartWatchdog(int minutes) {
         watchdog = new System.Threading.Timer(_ => {
-            Console.Error.WriteLine("Collector watchdog: no completion within " + minutes + " minutes; a call blocked without a timeout.");
+            Console.Error.WriteLine("Collector watchdog: no completion within " + minutes + " minutes; a call blocked without a timeout. Last phase: " + Phase);
             Environment.Exit(3);
         }, null, TimeSpan.FromMinutes(minutes), System.Threading.Timeout.InfiniteTimeSpan);
     }
@@ -232,6 +234,7 @@ function Invoke-Run([string]$UserData) {
     $start = [Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false
     if ($documentPath) { $start.ArgumentList.Add($documentPath) }
+    [PerfWindowProbe]::Phase = "$script:runLabel launch"
     $process = [Diagnostics.Process]::Start($start)
     $sample = [ordered]@{}
     $window = [IntPtr]::Zero
@@ -257,6 +260,7 @@ function Invoke-Run([string]$UserData) {
             }
             Start-Sleep -Milliseconds 2
         }
+        [PerfWindowProbe]::Phase = "$script:runLabel memory sample"
         # Let post-render work settle before sampling memory.
         Start-Sleep -Milliseconds 1500
         $process.Refresh()
@@ -271,6 +275,7 @@ function Invoke-Run([string]$UserData) {
         return $sample
     }
     finally {
+        [PerfWindowProbe]::Phase = "$script:runLabel close"
         $children = @(Get-DescendantProcesses $process.Id)
         if ($window -ne [IntPtr]::Zero) { [void][PerfWindowProbe]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
         if (-not $process.WaitForExit(10000)) {
@@ -303,6 +308,8 @@ function Invoke-MeasuredRun([string]$UserData, [string]$Label) {
     }
     for ($attempt = 1; ; $attempt++) {
         try {
+            $script:runLabel = "$Label attempt $attempt"
+            [PerfWindowProbe]::Phase = "$script:runLabel wait for first render"
             $run = [Diagnostics.Stopwatch]::StartNew()
             $sample = Invoke-Run $UserData
             Write-Host ("{0}: first render {1:N0} ms, run {2:N1} s" -f $Label, $sample.firstRenderMs, $run.Elapsed.TotalSeconds)
@@ -328,6 +335,7 @@ try {
         Invoke-MeasuredRun $folder "cold-$index"
         # WebView2 can still be deleting profile files; a vanished file raises a
         # terminating error despite SilentlyContinue, and the folder is temporary.
+        [PerfWindowProbe]::Phase = "cold-$index profile cleanup"
         try { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
     $warmFolder = Join-Path $profileRoot 'warm'
