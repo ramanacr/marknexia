@@ -333,19 +333,39 @@ impl Launched {
     }
 
     fn select(&self, index: usize) -> String {
-        let tabs = wait_for("two document tabs", || {
-            let tabs = self.tabs();
-            (tabs.len() == 2).then_some(tabs)
-        });
-        let pattern: IUIAutomationSelectionItemPattern =
-            unsafe { tabs[index].GetCurrentPattern(UIA_SelectionItemPatternId) }
-                .expect("SelectionItem pattern")
-                .cast()
-                .expect("SelectionItem interface");
         // A shell still starting up can refuse a selection for a moment
-        // (CI run 42446447292: 0x80040201); retry until it is accepted.
-        wait_for("UIA Select on the tab", || unsafe { pattern.Select() }.ok());
-        let title = name(&tabs[index]);
+        // (CI run 42446447292: 0x80040201), and the tab strip can rebuild its
+        // tab elements meanwhile, which leaves an element fetched earlier
+        // stale for good (CI run 45794553259). Each try therefore looks the
+        // tab up again and selects that fresh element.
+        let mut last_error = String::new();
+        let title = wait_for("UIA Select on the tab", || {
+            let tabs = self.tabs();
+            if tabs.len() != 2 {
+                last_error = format!("{} tabs", tabs.len());
+                return None;
+            }
+            let pattern: IUIAutomationSelectionItemPattern =
+                match unsafe { tabs[index].GetCurrentPattern(UIA_SelectionItemPatternId) }
+                    .and_then(|pattern| pattern.cast())
+                {
+                    Ok(pattern) => pattern,
+                    Err(error) => {
+                        last_error = format!("SelectionItem pattern: {error}");
+                        return None;
+                    }
+                };
+            match unsafe { pattern.Select() } {
+                Ok(()) => Some(name(&tabs[index])),
+                Err(error) => {
+                    if last_error != error.to_string() {
+                        eprintln!("UIA Select on tab {index} refused: {error}; retrying");
+                    }
+                    last_error = error.to_string();
+                    None
+                }
+            }
+        });
         wait_for(&format!("the document of tab {title:?}"), || {
             self.visible_document()
                 .filter(|(document, _)| *document == title)

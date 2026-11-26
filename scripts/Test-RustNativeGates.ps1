@@ -146,7 +146,7 @@ Invoke-Gate 'uia-native-links' {
 Invoke-Gate 'uia-native-high-contrast' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_high_contrast -- --ignored --test-threads=1 --nocapture
-} -Attempts 1
+} -Attempts 2
 # Keyboard reachability audit: Tab and Shift+Tab through the chrome (outline
 # view, find bar, repository view); every stop named, of a fitting control
 # type and keyboard-focused; the tab order is printed. Keys are sent only
