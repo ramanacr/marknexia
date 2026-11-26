@@ -1,29 +1,62 @@
 name: CI & Quality Assurance
 
+# Adaptive CI (docs/ci.md): on pull requests, the "changes" job classifies the changed files
+# and each job runs only when its area changed. Pushes to main, the merge queue, the nightly
+# schedule and manual runs always run everything. Branch protection requires "CI result".
+
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  merge_group:
+    types: [ checks_requested ]
+  schedule:
+    # Nightly full run on main: catches anything that path-based skipping missed.
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pull requests: a new push cancels the superseded run of the same pull request.
+# Every other event gets its own group (run id), so a push to main, a merge queue entry or a
+# scheduled run is never cancelled or replaced while pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-test:
-    name: Build & Test (x64 + ARM64)
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      dotnet: ${{ steps.areas.outputs.dotnet }}
+      bridge: ${{ steps.areas.outputs.bridge }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # The pull request merge commit and its first parent (the base branch tip).
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Test the change classifier
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -File tests/ci/changed_areas.tests.ps1
+      - name: Classify changed files
+        id: areas
+        shell: pwsh
+        run: ./scripts/ci/Get-ChangedAreas.ps1 -EventName '${{ github.event_name }}'
+
+  bridge-tests:
+    name: Rendered document bridge (Playwright)
+    needs: changes
+    if: needs.changes.outputs.bridge == 'true'
     runs-on: windows-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
 
       - name: Setup Node for Browser Regression Tests
         uses: actions/setup-node@v4
@@ -41,6 +74,36 @@ jobs:
           npx --no-install playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm test
+
+  build-and-test:
+    name: Build & Test (x64 + ARM64)
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Download cache only: package versions are pinned centrally in Directory.Packages.props,
+      # so restore resolves the same packages with or without it. Saved from main only.
+      - name: Restore NuGet package cache
+        id: nuget-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore Dependencies
         run: dotnet restore Marknexia.slnx
@@ -67,3 +130,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/Build-App.ps1 -Configuration Release -Platform ARM64 -NoRestore
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save NuGet package cache
+        if: github.ref == 'refs/heads/main' && steps.nuget-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget-cache.outputs.cache-primary-key }}
+
+  # The one check that branch protection requires. It always reports: it fails when a needed
+  # job failed or was cancelled, and passes when each needed job succeeded or was skipped
+  # because its area did not change.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, bridge-tests, build-and-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the needed jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if [ "$(echo "$NEEDS" | jq -r '.changes.result')" != "success" ]; then
+            echo "::error::Change detection did not succeed."
+            exit 1
+          fi
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::Failed or cancelled: $bad"
+            exit 1
+          fi
+          echo "All needed jobs succeeded or were skipped by design."

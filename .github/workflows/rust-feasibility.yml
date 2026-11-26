@@ -1,14 +1,31 @@
 name: Rust Feasibility
 
+# Adaptive CI (docs/ci.md): on pull requests, the "changes" job classifies the changed files
+# and each job runs only when its area changed. Pushes, the merge queue, the nightly schedule
+# and manual runs always run everything. Branch protection requires "Rust CI result".
+# signed-packages.yml accepts only a green *push* run of this workflow on main as its source.
+
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main, ramana_rust_win32_feasibility]
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    # Nightly full run on main: catches anything that path-based skipping missed.
+    - cron: '43 2 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Pull requests: a new push cancels the superseded run of the same pull request.
+# Every other event gets its own group (run id), so a push to main, a merge queue entry or a
+# scheduled run is never cancelled or replaced while pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUSTUP_TOOLCHAIN: 1.98.1-x86_64-pc-windows-msvc
@@ -18,8 +35,29 @@ defaults:
     shell: pwsh
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      dotnet: ${{ steps.areas.outputs.dotnet }}
+      rust: ${{ steps.areas.outputs.rust }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # The pull request merge commit and its first parent (the base branch tip).
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Test the change classifier
+        run: pwsh -NoProfile -NonInteractive -File tests/ci/changed_areas.tests.ps1
+      - name: Classify changed files
+        id: areas
+        run: ./scripts/ci/Get-ChangedAreas.ps1 -EventName '${{ github.event_name }}'
+
   rust-quality:
     name: Rust quality and policy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -27,6 +65,12 @@ jobs:
         run: |
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy
           rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc --toolchain $env:RUSTUP_TOOLCHAIN
+      # Cargo registry, ~/.cargo/bin (the pinned cargo-deny and cargo-fuzz) and the compiled
+      # dependencies in ./target. Keyed on the job, the rustc version and every Cargo.lock,
+      # Cargo.toml, rust-toolchain and .cargo/config.toml file. Saved from main only.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned policy tools
         run: |
           $tools = Get-Content tools/rust-tools.lock -Raw | ConvertFrom-Json
@@ -72,6 +116,8 @@ jobs:
 
   rust-release-build:
     name: Rust release build (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -88,6 +134,20 @@ jobs:
         run: |
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
           rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      # Downloaded crate sources only, never a target directory: both reproducibility builds
+      # still compile everything from clean target directories, and Cargo checks every crate
+      # against the checksums in Cargo.lock (--locked). Keyed per target triple, because a
+      # target downloads only the crates it needs. Saved from main only.
+      - name: Restore Cargo registry cache
+        id: cargo-registry
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('source-a/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-${{ matrix.target }}-
       - name: Build twice from clean unsigned copies
         run: |
           $env:SOURCE_DATE_EPOCH = git -C source-a show -s --format=%ct HEAD
@@ -121,6 +181,15 @@ jobs:
           pwsh -NoProfile -NonInteractive -File source-a/scripts/Stage-WebView2Loader.ps1 -Architecture $architecture -PackagePath $sdkPackage -OutputPath (Join-Path $artifactRoot 'WebView2Loader.dll')
           $digest = (Get-FileHash -LiteralPath source-a/test-fixtures/markdown/gfm/features.md -Algorithm SHA256).Hash.ToLowerInvariant()
           pwsh -NoProfile -NonInteractive -File source-a/scripts/Measure-RustArtifacts.ps1 -ArtifactsRoot $artifactRoot -NativeArtifactPath (Join-Path $artifactRoot 'marknexia-win32.exe') -OutputPath (Join-Path $reportRoot 'vertical-slice-artifacts.json') -Architecture $architecture -Commit $env:GITHUB_SHA -FixtureDigest $digest -RunCount 1
+      - name: Save Cargo registry cache
+        if: github.ref == 'refs/heads/main' && steps.cargo-registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
       # Stage 1 of the local signing flow (docs/release-signing.md): the unsigned shell that
       # the owner signs on their PC. Not a release, never published from here. Pull requests
       # from forks skip it.
@@ -261,6 +330,8 @@ jobs:
 
   rust-native-gates:
     name: Native gates (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     # Hosted Windows runners provide an interactive desktop, the shared
     # WebView2 Evergreen runtime and UI Automation. windows-11-arm is native
     # ARM64 hardware, which the local evidence host lacks.
@@ -284,6 +355,11 @@ jobs:
         run: |
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
           rustup target add ${{ matrix.target }} --toolchain $env:RUSTUP_TOOLCHAIN
+      # Keyed per target triple and, through rustc -vV, per host toolchain. Saved from main only.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Record WebView2 runtime
         run: (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
       # The hosted windows-11-arm image can start with a "Microsoft account"
@@ -326,6 +402,8 @@ jobs:
 
   rust-fuzz:
     name: Fuzz markdown_and_html (300 s) and settings_parse (60 s)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     # The content crates are portable; libFuzzer runs reliably on Linux.
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -336,9 +414,16 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - name: Install nightly and cargo-fuzz
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+      # The fuzz workspace (fuzz/target) and ~/.cargo/bin (cargo-fuzz). The nightly rustc
+      # version is part of the key, so a new nightly starts a new cache. Saved from main only.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-fuzz
         run: |
-          rustup toolchain install nightly --profile minimal
           cargo_fuzz=$(jq -r .tools.cargoFuzz tools/rust-tools.lock)
           cargo +nightly install cargo-fuzz --version "$cargo_fuzz" --locked
       - name: Fuzz
@@ -366,6 +451,8 @@ jobs:
 
   dotnet-preservation:
     name: .NET Release preservation
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -373,5 +460,49 @@ jobs:
           # The parity verifier checks provenance against the fixtures'
           # frozen source revision, which a shallow clone does not contain.
           fetch-depth: 0
+      # Download cache only: package versions are pinned centrally in Directory.Packages.props,
+      # so restore resolves the same packages with or without it. Saved from main only.
+      - name: Restore NuGet package cache
+        id: nuget-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-${{ runner.arch }}-
       - name: Run existing .NET Release suite
         run: dotnet test Marknexia.slnx --configuration Release
+      - name: Save NuGet package cache
+        if: github.ref == 'refs/heads/main' && steps.nuget-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget-cache.outputs.cache-primary-key }}
+
+  # The one check that branch protection requires. It always reports: it fails when a needed
+  # job failed or was cancelled, and passes when each needed job succeeded or was skipped
+  # because its area did not change.
+  rust-ci-result:
+    name: Rust CI result
+    if: always()
+    needs: [changes, rust-quality, rust-release-build, rust-native-gates, rust-fuzz, dotnet-preservation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the needed jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if [ "$(echo "$NEEDS" | jq -r '.changes.result')" != "success" ]; then
+            echo "::error::Change detection did not succeed."
+            exit 1
+          fi
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::Failed or cancelled: $bad"
+            exit 1
+          fi
+          echo "All needed jobs succeeded or were skipped by design."
