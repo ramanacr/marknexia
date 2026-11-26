@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-release:
-    name: Build & Package Windows Distribution
+    name: Build, test and upload unsigned app output
     runs-on: windows-latest
 
     steps:
@@ -70,49 +70,23 @@ jobs:
           ./scripts/Build-App.ps1 -Configuration Release -Platform ARM64 -Version $releaseVersion -NoRestore
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Package Distribution Zip and MSIX
-        shell: pwsh
-        run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
-          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Release tag '$ver' must be a three-component semantic version such as 1.0.12."
-          }
-          $packageVersion = "$ver.0"
-          $packages = @(
-            [pscustomobject]@{ Platform = "x64"; AssetToken = "x64" },
-            [pscustomobject]@{ Platform = "ARM64"; AssetToken = "arm64" }
-          )
-
-          foreach ($package in $packages) {
-            $publishDir = "src/Marknexia.App/bin/$($package.Platform)/Release/net10.0-windows10.0.19041.0"
-            if (-not (Test-Path "$publishDir/Marknexia.App.exe")) {
-              throw "Release output was not found for $($package.Platform): $publishDir"
-            }
-
-            $zipName = "Marknexia-v$ver-win-$($package.AssetToken).zip"
-            $msixName = "Marknexia-v$ver-win-$($package.AssetToken).msix"
-            Compress-Archive -Path "$publishDir/*" -DestinationPath $zipName -Force
-            Get-FileHash -Path $zipName -Algorithm SHA256 | Out-File -FilePath "$zipName.sha256"
-
-            ./scripts/prepare-store-package.ps1 -Platform $package.Platform -Version $packageVersion
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $preparedName = if ($package.Platform -eq "x64") { "Marknexia-Store-Ready.msix" } else { "Marknexia-Store-Ready-ARM64.msix" }
-            Copy-Item "store-submission/$preparedName" -Destination $msixName -Force
-            Get-FileHash -Path $msixName -Algorithm SHA256 | Out-File -FilePath "$msixName.sha256"
-
-            ./scripts/Build-Installer.ps1 -Configuration Release -Platform $package.Platform -Version $ver -OutputDirectory "." -NoRestore
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
+      # Stage 1 of the local signing flow (docs/release-signing.md). The app output is
+      # uploaded unsigned and nothing is published here: the owner signs the binaries on
+      # their PC, the "Signed packages" workflow builds the setup, ZIP and MSIX from them,
+      # and the owner signs and publishes the v* release. A tag push therefore no longer
+      # creates a GitHub release by itself, so the updater never sees unsigned files.
+      - name: Upload unsigned x64 app output for signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: |
-            Marknexia-*.zip
-            Marknexia-*.zip.sha256
-            Marknexia-*.msix
-            Marknexia-*.msix.sha256
-            Marknexia-*-setup.exe
-            Marknexia-*-setup.exe.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: marknexia-dotnet-UNSIGNED-app-x64
+          path: src/Marknexia.App/bin/x64/Release/net10.0-windows10.0.19041.0/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned ARM64 app output for signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marknexia-dotnet-UNSIGNED-app-arm64
+          path: src/Marknexia.App/bin/ARM64/Release/net10.0-windows10.0.19041.0/
+          if-no-files-found: error
+          retention-days: 14

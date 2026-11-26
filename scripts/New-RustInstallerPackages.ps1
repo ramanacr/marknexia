@@ -37,7 +37,8 @@ param(
     [Parameter(Mandatory)][string]$MetadataPath,
     [Parameter(Mandatory)][string]$HostMetadataPath,
     [Parameter(Mandatory)][string]$OutputRoot,
-    [string]$SourceCommit = 'NOASSERTION'
+    [string]$SourceCommit = 'NOASSERTION',
+    [switch]$Signed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,8 +83,26 @@ $version = $shellCrate[0].version
 if ($setupCrate[0].version -cne $version) { throw "marknexia-setup $($setupCrate[0].version) differs from marknexia-win32 $version." }
 if ($version -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "MSIX needs a numeric version; marknexia-win32 is $version." }
 $msixVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
-
-$staging = Join-Path $PortableOutputRoot "staging\marknexia-win32-$version-$archToken-unsigned-preview"
+# Names and MSIX publisher: unsigned CI evidence by default; with -Signed (stage 3 of
+# docs/release-signing.md) the payload shell is release-signed, the names drop
+# UNSIGNED-PREVIEW and the MSIX publisher is the release certificate's subject, which the
+# owner's local signature requires. The setup and MSIX written here are still unsigned;
+# the owner signs them locally in stage 4.
+$namePrefix = if ($Signed) { 'marknexia-rust-preview' } else { 'marknexia-rust-UNSIGNED-PREVIEW' }
+$portableEdition = if ($Signed) { 'preview' } else { 'unsigned-preview' }
+if ($Signed) {
+    $signing = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging\signing\release-signing.json') -Raw | ConvertFrom-Json
+    $msixPublisher = $signing.subject
+    $msixPublisherName = $signing.publisherDisplayName
+    $msixDescription = 'Preview of the Rust edition of the Marknexia Markdown viewer.'
+    $tileDescription = 'Marknexia Markdown viewer (Rust preview)'
+} else {
+    $msixPublisher = 'CN=Marknexia Rust Preview UNSIGNED, OID.2.25.311729368913984317654407730594956997722=1'
+    $msixPublisherName = 'Marknexia (unsigned preview)'
+    $msixDescription = 'Unsigned preview of the Rust edition of the Marknexia Markdown viewer. Not a release.'
+    $tileDescription = 'Marknexia Markdown viewer (Rust preview, unsigned)'
+}
+$staging = Join-Path $PortableOutputRoot "staging\marknexia-win32-$version-$archToken-$portableEdition"
 $stagedNames = Get-OrdinalSorted @(Get-ChildItem -LiteralPath $staging -File | ForEach-Object Name)
 if (($stagedNames -join '|') -cne ((Get-OrdinalSorted $runtimeFiles) -join '|')) { throw "Unexpected portable staging: $($stagedNames -join ', ')" }
 if ((Get-Digest (Join-Path $staging $loaderName)) -ne $loaderLock.loaders[$architecture].sha256) { throw 'Staged loader is not the pinned loader.' }
@@ -109,6 +128,7 @@ function New-Sbom([string]$PackageRoot, [string]$OutputPath, [string]$Distributi
         DistributionDescription = $Description; DistributionKind = $Kind
     }
     if ($loaderLicense) { $arguments.LoaderLicensePath = $loaderLicense }
+    if ($Signed) { $arguments.Signed = $true }
     & (Join-Path $PSScriptRoot 'Generate-RustSbom.ps1') @arguments | Out-Host
     $notices = Join-Path $PackageRoot 'THIRD-PARTY-NOTICES.txt'
     if ((Get-Digest $notices) -ne (Get-Digest (Join-Path $staging 'THIRD-PARTY-NOTICES.txt'))) { throw "Notices for $DistributionFileName differ from the portable ZIP's." }
@@ -119,7 +139,7 @@ function Test-Sbom([string]$SbomPath, [string]$PackageRoot, [string]$Distributio
 }
 
 # --- 1. Setup payload ----------------------------------------------------------------
-$setupBase = "marknexia-rust-UNSIGNED-PREVIEW-setup-$version-$archToken"
+$setupBase = "$namePrefix-setup-$version-$archToken"
 $setupName = "$setupBase.exe"
 $setupSbomRoot = New-Folder (Join-Path $work 'setup-sbom-root')
 Copy-RuntimeFiles $setupSbomRoot
@@ -174,7 +194,7 @@ $setupBytes = (Get-Item -LiteralPath $setupPath).Length
 [ordered]@{
     schemaVersion = 'rust-unsigned-preview-setup-v1'
     target = $Target; architecture = $architecture; version = $version; sourceCommit = $SourceCommit
-    signed = $false; published = $false
+    signed = $false; published = $false; payloadShellReleaseSigned = $Signed.IsPresent
     setup = [ordered]@{ name = $setupName; sha256 = (Get-Digest $setupPath); bytes = $setupBytes; reproducible = $true; withinPhase7Limit15MB = ($setupBytes -le 15MB) }
     sbom = [ordered]@{ name = "$setupBase.spdx.json"; format = 'SPDX-2.3'; sha256 = (Get-Digest $setupSbom); embeddedAs = 'marknexia-sbom.spdx.json' }
     payload = [ordered]@{ containerSha256 = $container.trailerSha256; containerBytes = $container.containerBytes; files = $container.files }
@@ -182,7 +202,7 @@ $setupBytes = (Get-Item -LiteralPath $setupPath).Length
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $setupOut 'installer-verification.json') -Encoding utf8NoBOM
 
 # --- 4. MSIX staging --------------------------------------------------------------------
-$msixBase = "marknexia-rust-UNSIGNED-PREVIEW-msix-$version-$archToken"
+$msixBase = "$namePrefix-msix-$version-$archToken"
 $msixName = "$msixBase.msix"
 $msixSbomRoot = New-Folder (Join-Path $work 'msix-sbom-root')
 Copy-RuntimeFiles $msixSbomRoot
@@ -196,7 +216,9 @@ $logos = @('Square150x150Logo.png', 'Square44x44Logo.png', 'StoreLogo.png')
 foreach ($logo in $logos) { Copy-Item -LiteralPath (Join-Path $repoRoot "store-submission\assets\$logo") -Destination (Join-Path $assets $logo) }
 $manifestText = [IO.File]::ReadAllText((Join-Path $repoRoot 'packaging\rust-msix\AppxManifest.xml'))
 $manifestText = $manifestText.Replace('@VERSION@', $msixVersion).Replace('@ARCHITECTURE@', $archToken)
-if ($manifestText -cmatch '@[A-Z]+@') { throw "Unreplaced manifest token: $($Matches[0])" }
+$manifestText = $manifestText.Replace('@PUBLISHER@', [Security.SecurityElement]::Escape($msixPublisher)).Replace('@PUBLISHER_DISPLAY_NAME@', [Security.SecurityElement]::Escape($msixPublisherName))
+$manifestText = $manifestText.Replace('@DESCRIPTION@', [Security.SecurityElement]::Escape($msixDescription)).Replace('@TILE_DESCRIPTION@', [Security.SecurityElement]::Escape($tileDescription))
+if ($manifestText -cmatch '@[A-Z_]+@') { throw "Unreplaced manifest token: $($Matches[0])" }
 [IO.File]::WriteAllText((Join-Path $msixRoot 'AppxManifest.xml'), $manifestText, $utf8)
 
 function Test-Manifest([string]$Path) {
@@ -209,7 +231,8 @@ function Test-Manifest([string]$Path) {
     if ($identity.GetAttribute('Name') -cne 'Marknexia.RustPreview') { throw 'MSIX identity must be Marknexia.RustPreview (not the .NET RRCLabs.Marknexia).' }
     if ($identity.GetAttribute('ProcessorArchitecture') -cne $archToken) { throw "MSIX architecture must be $archToken." }
     if ($identity.GetAttribute('Version') -cne $msixVersion) { throw "MSIX version must be $msixVersion." }
-    if ($identity.GetAttribute('Publisher') -cnotlike '*OID.2.25.311729368913984317654407730594956997722=1') { throw 'The unsigned MSIX must carry the unsigned-publisher OID.' }
+    if ($identity.GetAttribute('Publisher') -cne $msixPublisher) { throw "The MSIX publisher must be '$msixPublisher'." }
+    if (-not $Signed -and $identity.GetAttribute('Publisher') -cnotlike '*OID.2.25.311729368913984317654407730594956997722=1') { throw 'The unsigned MSIX must carry the unsigned-publisher OID.' }
     if ($application.GetAttribute('Executable') -cne $shellName -or $application.GetAttribute('Id') -cne 'MarknexiaRustPreview') { throw 'MSIX application entry is wrong.' }
     $types = @($xml.SelectNodes('//uap:FileType', $ns) | ForEach-Object InnerText)
     if (($types -join ',') -cne '.md,.markdown,.mdown,.mkdn') { throw "Unexpected file types: $($types -join ',')" }
@@ -258,8 +281,9 @@ Write-Sums $msixOut @($msixName, "$msixBase.spdx.json")
 [ordered]@{
     schemaVersion = 'rust-unsigned-preview-msix-v1'
     target = $Target; architecture = $architecture; version = $version; msixVersion = $msixVersion; sourceCommit = $SourceCommit
-    signed = $false; published = $false
+    signed = $false; published = $false; payloadShellReleaseSigned = $Signed.IsPresent
     identity = 'Marknexia.RustPreview'
+    publisher = $msixPublisher
     makeappx = $makeAppx
     msix = [ordered]@{ name = $msixName; sha256 = (Get-Digest $msixPath); bytes = (Get-Item -LiteralPath $msixPath).Length }
     sbom = [ordered]@{ name = "$msixBase.spdx.json"; format = 'SPDX-2.3'; sha256 = (Get-Digest $msixSbom); embeddedAs = 'marknexia-sbom.spdx.json' }

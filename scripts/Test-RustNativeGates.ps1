@@ -154,7 +154,7 @@ Invoke-Gate 'uia-native-high-contrast' {
 Invoke-Gate 'uia-native-keyboard' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_keyboard -- --ignored --test-threads=1 --nocapture
-} -Attempts 1
+} -Attempts 2
 Invoke-Gate 'shell-visible-contract' {
     pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'Test-RustNativeShell.ps1') -ExePath $exe
 }

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "marknexia-release-signing-v1",
+  "comment": "Public facts about the release code-signing certificate. The private key stays in Certum's cloud (SimplySign Desktop); nothing secret belongs in this file. See docs/release-signing.md.",
+  "thumbprint": "68572404AE99971D76B907D9452001DCEE7766F1",
+  "certificateSha256": "191db43c8e8c546a131a755aae71d55d9bc1a724acfdf9cb3c7647ef6d22589f",
+  "subject": "CN=Open Source Developer Ramana Reddy Chamakura, O=Open Source Developer, L=Hyderabad, S=Telangana, C=IN",
+  "issuer": "CN=Certum Code Signing 2021 CA, O=Asseco Data Systems S.A., C=PL",
+  "notAfter": "2027-11-25T10:16:39Z",
+  "publisherDisplayName": "Ramana Reddy Chamakura",
+  "timestampUrl": "http://time.certum.pl",
+  "description": "Marknexia",
+  "descriptionUrl": "https://github.com/ramanacr/marknexia"
+}

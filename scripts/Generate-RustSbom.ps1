@@ -44,7 +44,9 @@ param(
     [string]$LoaderFileName = 'WebView2Loader.dll',
     [string]$NoticesFileName = 'THIRD-PARTY-NOTICES.txt',
     [string]$ProductVersion,
-    [string]$SourceCommit = 'NOASSERTION'
+    [string]$SourceCommit = 'NOASSERTION',
+    # Wording and default names for the code-signed preview (docs/release-signing.md).
+    [switch]$Signed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -145,7 +147,9 @@ $rootIds = @($metadata.packages | Where-Object { $_.name -ceq $RootPackage -and 
 if ($rootIds.Count -ne 1) { throw "Root workspace package $RootPackage not found exactly once." }
 $rootId = $rootIds[0]
 if (-not $ProductVersion) { $ProductVersion = $packagesById[$rootId].version }
-if (-not $DistributionFileName) { $DistributionFileName = "marknexia-win32-$ProductVersion-$($Architecture.ToLowerInvariant())-unsigned-preview.zip" }
+$edition = if ($Signed) { 'preview' } else { 'unsigned-preview' }
+$editionText = if ($Signed) { 'code-signed preview' } else { 'unsigned preview' }
+if (-not $DistributionFileName) { $DistributionFileName = "marknexia-win32-$ProductVersion-$($Architecture.ToLowerInvariant())-$edition.zip" }
 
 function Get-EdgeKinds([hashtable]$Dependency) {
     @($Dependency.dep_kinds | ForEach-Object { if ($null -eq $_.kind) { 'normal' } else { [string]$_.kind } })
@@ -231,7 +235,7 @@ foreach ($crate in $crates) {
 }
 $rootSpdxId = $crateIdByPackageId[$rootId]
 $spdxPackages | Where-Object { $_.SPDXID -eq $rootSpdxId } | ForEach-Object {
-    $_.comment = "Marknexia Rust/Win32 shell crate (runtime) for $Architecture; unsigned preview built from source commit $SourceCommit."
+    $_.comment = "Marknexia Rust/Win32 shell crate (runtime) for $Architecture; $editionText built from source commit $SourceCommit."
 }
 
 $mermaidId = Get-SpdxId 'Asset' 'mermaid' $mermaidLock.version
@@ -266,7 +270,7 @@ $spdxPackages.Add([ordered]@{
 # --- Notices (written before the file inventory, so the SBOM hashes it) ----------
 $rule = '=' * 80
 $notice = [Text.StringBuilder]::new()
-[void]$notice.Append("THIRD-PARTY NOTICES`n`nMarknexia Rust/Win32 shell $ProductVersion ($Architecture), unsigned preview.`n")
+[void]$notice.Append("THIRD-PARTY NOTICES`n`nMarknexia Rust/Win32 shell $ProductVersion ($Architecture), $editionText.`n")
 [void]$notice.Append("This file lists the third-party components in this package and their license texts.`n")
 [void]$notice.Append("License identifiers are declared by each component; they are copied, not concluded.`n")
 [void]$notice.Append("`n$rule`nMarknexia $ProductVersion`nLicense: $(ConvertTo-SpdxLicense $packagesById[$rootId].license)`n$rule`n")
@@ -360,7 +364,7 @@ $spdxPackages.Insert(0, [ordered]@{
     licenseInfoFromFiles = @('NOASSERTION')
     licenseDeclared = 'NOASSERTION'
     copyrightText = 'NOASSERTION'
-    comment = "Unsigned, unpublished $DistributionDescription for $Architecture (CI evidence only, never released)."
+    comment = if ($Signed) { "Code-signed $DistributionDescription for $Architecture (preview, published as a GitHub pre-release)." } else { "Unsigned, unpublished $DistributionDescription for $Architecture (CI evidence only, never released)." }
 })
 Add-Relationship $rootSpdxId 'DEPENDS_ON' $webViewId
 foreach ($edge in $crateEdges) {
@@ -373,12 +377,12 @@ $sbom = [ordered]@{
     spdxVersion = 'SPDX-2.3'
     dataLicense = 'CC0-1.0'
     SPDXID = 'SPDXRef-DOCUMENT'
-    name = "marknexia-win32-$ProductVersion-$Architecture-unsigned-preview"
+    name = "marknexia-win32-$ProductVersion-$Architecture-$edition"
     creationInfo = [ordered]@{
         created = $created.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         creators = @('Tool: Marknexia-Rust-SBOM-1.0')
     }
-    comment = "Unsigned, unpublished preview package for $Architecture. Crates: cargo metadata resolve graphs (target for runtime, host for build-time) from $RootPackage over normal and build edges, dev-dependencies excluded; the scope is in each package comment. Files: every file in the $DistributionKind with SHA1 and SHA256. Licenses are declared by each component and not concluded."
+    comment = "$(if ($Signed) { 'Code-signed preview package' } else { 'Unsigned, unpublished preview package' }) for $Architecture. Crates: cargo metadata resolve graphs (target for runtime, host for build-time) from $RootPackage over normal and build edges, dev-dependencies excluded; the scope is in each package comment. Files: every file in the $DistributionKind with SHA1 and SHA256. Licenses are declared by each component and not concluded."
     packages = $spdxPackages.ToArray()
     files = $files
     relationships = @((Select-Ordinal @($edgeMap.Keys)) | ForEach-Object { $edgeMap[$_] })

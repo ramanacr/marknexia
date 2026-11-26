@@ -279,6 +279,22 @@ impl Launched {
         foreground_owner() == self.shell.id()
     }
 
+    /// Sends `keys` to the shell. Another window can take the foreground
+    /// during a walk (the ARM64 runner image opens Windows Terminal with
+    /// `wsl.exe`, CI run 45773720938), so the shell is activated again
+    /// first; the keys still go through `send_chord_to`, which refuses to
+    /// type unless the shell owns the foreground at that instant.
+    fn send(&self, keys: &[VIRTUAL_KEY]) {
+        if foreground_owner() != self.shell.id() {
+            eprintln!(
+                "the shell lost the foreground to {}; activating it again",
+                shell_support::foreground_description()
+            );
+            self.activate();
+        }
+        send_chord_to(self.shell.id(), keys);
+    }
+
     /// The automation id of `element` or of its nearest ancestor below the
     /// shell window that has one.
     fn control_id(&self, element: &IUIAutomationElement) -> String {
@@ -351,7 +367,7 @@ impl Launched {
         keys: &[VIRTUAL_KEY],
         previous: &IUIAutomationElement,
     ) -> Option<(IUIAutomationElement, Stop)> {
-        send_chord_to(self.shell.id(), keys);
+        self.send(keys);
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             thread::sleep(Duration::from_millis(60));
@@ -564,7 +580,7 @@ fn keyboard_reaches_every_control_in_the_outline_view_and_find_bar() {
     assert_reverse(&forward, &backward, "outline view");
 
     // The find bar: Ctrl+F shows it and focuses the box.
-    send_chord_to(shell.shell.id(), &[VK_CONTROL, VK_F]);
+    shell.send(&[VK_CONTROL, VK_F]);
     wait_for("the find box to take focus", || {
         shell.focused().filter(|(_, stop)| stop.control == "1004")
     });

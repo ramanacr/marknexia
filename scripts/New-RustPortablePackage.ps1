@@ -18,7 +18,9 @@ real release executable into an archive (local antivirus policy, see the product
 5. Extracts the ZIP to a fresh folder and checks every entry hash against staging, the shell
    against both builds, the loader against its lock, the SBOM (Test-RustSbom.ps1, including the
    cargo tree crate set) and SHA256SUMS.
-Nothing is signed, released or published.
+Nothing is signed, released or published here. With -SignedShellPath (stage 3 of
+docs/release-signing.md) the package holds the owner's release-signed shell instead of the
+build's unsigned one; the signed shell must equal the build except for its signature.
 #>
 [CmdletBinding()]
 param(
@@ -30,7 +32,8 @@ param(
     [Parameter(Mandatory)][string]$HostMetadataPath,
     [Parameter(Mandatory)][string]$CargoTreePath,
     [Parameter(Mandatory)][string]$OutputRoot,
-    [string]$SourceCommit = 'NOASSERTION'
+    [string]$SourceCommit = 'NOASSERTION',
+    [string]$SignedShellPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +53,9 @@ $metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json -AsHa
 $rootPackages = @($metadata.packages | Where-Object { $_.name -ceq 'marknexia-win32' -and $metadata.workspace_members -contains $_.id })
 if ($rootPackages.Count -ne 1 -or $rootPackages[0].version -notmatch '^\d+\.\d+\.\d+([-+].+)?$') { throw 'cargo metadata has no single marknexia-win32 workspace crate with a version.' }
 $version = $rootPackages[0].version
-$baseName = "marknexia-win32-$version-$($architecture.ToLowerInvariant())-unsigned-preview"
+$signed = [bool]$SignedShellPath
+$edition = if ($signed) { 'preview' } else { 'unsigned-preview' }
+$baseName = "marknexia-win32-$version-$($architecture.ToLowerInvariant())-$edition"
 # Ordinal sort, independent of the runner's culture, so output is byte-stable.
 function Select-Ordinal([object[]]$Items, [scriptblock]$Key = { $_ }) {
     if (-not $Items -or $Items.Count -eq 0) { return , @() }
@@ -77,16 +82,40 @@ foreach ($directory in $staging, $work, $out) {
 $firstShell = Get-Digest (Join-Path $FirstRoot $shellName)
 $secondShell = Get-Digest (Join-Path $SecondRoot $shellName)
 if ($firstShell -ne $secondShell) { throw 'The two release builds differ.' }
+$stagedShell = Join-Path $FirstRoot $shellName
+if ($signed) {
+    # The owner's release-signed shell replaces the build's: valid, timestamped, by the
+    # configured certificate, and byte-equal to this build except for the signature.
+    Import-Module (Join-Path $PSScriptRoot 'signing\MarknexiaSigning.psm1') -Force
+    $signingConfig = Get-ReleaseSigningConfig
+    $signature = Get-AuthenticodeSignature -LiteralPath $SignedShellPath
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $signingConfig.thumbprint -or -not $signature.TimeStamperCertificate) {
+        throw "The signed shell is not validly signed and timestamped by the release certificate ($($signature.Status))."
+    }
+    if ((Get-PeContentDigest -Path $SignedShellPath) -cne (Get-PeContentDigest -Path $stagedShell)) { throw 'The signed shell is not this build: it differs beyond its signature.' }
+    $stagedShell = $SignedShellPath
+}
+$packageShell = Get-Digest $stagedShell
 
 # 2. Stage the package files.
-Copy-Item -LiteralPath (Join-Path $FirstRoot $shellName) -Destination (Join-Path $staging $shellName)
+Copy-Item -LiteralPath $stagedShell -Destination (Join-Path $staging $shellName)
 & (Join-Path $PSScriptRoot 'Stage-WebView2Loader.ps1') -Architecture $architecture -PackagePath $LoaderPackagePath -OutputPath (Join-Path $staging $loaderName) -LockPath $loaderLockPath
-$readme = @"
+$unsignedIntro = @"
 Marknexia Rust/Win32 shell $version for Windows $architecture - UNSIGNED PREVIEW
 
 This is an unsigned, unpublished preview build produced by continuous integration
 for evidence only. It is not a release. Windows SmartScreen and antivirus products can
 warn about unsigned executables. The supported product is the .NET edition of Marknexia.
+"@
+$signedIntro = @"
+Marknexia Rust/Win32 shell $version for Windows $architecture - PREVIEW
+
+This is a code-signed preview of the Rust edition, published as a GitHub pre-release.
+It is not the supported product: that is the .NET edition of Marknexia.
+"@
+$readmeIntro = if ($signed) { $signedIntro } else { $unsignedIntro }
+$readme = @"
+$readmeIntro
 
 Contents:
   $shellName        the Rust/Win32 shell (portable; nothing is installed)
@@ -120,6 +149,7 @@ $sbomArguments = @{
     OutputPath = $sbomPath; DistributionFileName = "$baseName.zip"; SourceCommit = $SourceCommit; LoaderLockPath = $loaderLockPath
 }
 if ($loaderLicense) { $sbomArguments.LoaderLicensePath = $loaderLicense }
+if ($signed) { $sbomArguments.Signed = $true }
 & (Join-Path $PSScriptRoot 'Generate-RustSbom.ps1') @sbomArguments
 
 # 4. Deterministic ZIP, written twice and compared, then SHA256SUMS.
@@ -163,9 +193,10 @@ $entries = foreach ($file in $stagedFiles) {
     [ordered]@{ path = $file.Name; sha256 = $extracted; bytes = $file.Length }
 }
 $zipShell = Get-Digest (Join-Path $verify $shellName)
-if ($zipShell -ne $firstShell -or $zipShell -ne $secondShell) { throw 'ZIP shell does not match both reproducible builds.' }
+if ($zipShell -ne $packageShell) { throw 'ZIP shell is not the staged shell.' }
+if (-not $signed -and ($zipShell -ne $firstShell -or $zipShell -ne $secondShell)) { throw 'ZIP shell does not match both reproducible builds.' }
 if ((Get-Digest (Join-Path $verify $loaderName)) -ne $loaderLock.loaders[$architecture].sha256) { throw 'ZIP loader is not the pinned loader.' }
-& (Join-Path $PSScriptRoot 'Test-RustSbom.ps1') -SbomPath $sbomPath -PackageRoot $verify -MetadataPath $MetadataPath -HostMetadataPath $HostMetadataPath -CargoTreePath $CargoTreePath -Architecture $architecture -LoaderLockPath $loaderLockPath
+& (Join-Path $PSScriptRoot 'Test-RustSbom.ps1') -SbomPath $sbomPath -PackageRoot $verify -MetadataPath $MetadataPath -HostMetadataPath $HostMetadataPath -CargoTreePath $CargoTreePath -Architecture $architecture -LoaderLockPath $loaderLockPath -DistributionFileNamePattern ('^' + [regex]::Escape("$baseName.zip") + '$')
 $sumLines = @([IO.File]::ReadAllLines($sumsPath))
 if ($sumLines.Count -ne 2) { throw "SHA256SUMS must have exactly 2 lines (ZIP and SBOM); it has $($sumLines.Count)." }
 $sumNames = foreach ($line in $sumLines) {
@@ -177,18 +208,19 @@ $sumNames = foreach ($line in $sumLines) {
 if ((@($sumNames | Sort-Object) -join '|') -cne ((@("$baseName.spdx.json", "$baseName.zip") | Sort-Object) -join '|')) { throw 'SHA256SUMS must list the ZIP and the SBOM.' }
 
 $evidence = [ordered]@{
-    schemaVersion = 'rust-unsigned-preview-package-v1'
+    schemaVersion = if ($signed) { 'rust-signed-shell-preview-package-v1' } else { 'rust-unsigned-preview-package-v1' }
     target = $Target
     architecture = $architecture
     version = $version
     sourceCommit = $SourceCommit
     signed = $false
+    shellReleaseSigned = $signed
     published = $false
     zip = [ordered]@{ name = "$baseName.zip"; sha256 = (Get-Digest $zipPath); bytes = (Get-Item -LiteralPath $zipPath).Length; reproducible = $true; secondWriteSha256 = $zipDigests.second }
     sbom = [ordered]@{ name = "$baseName.spdx.json"; format = 'SPDX-2.3'; sha256 = (Get-Digest $sbomPath) }
-    reproducibleShell = [ordered]@{ firstBuildSha256 = $firstShell; secondBuildSha256 = $secondShell; zipSha256 = $zipShell }
+    reproducibleShell = [ordered]@{ firstBuildSha256 = $firstShell; secondBuildSha256 = $secondShell; zipSha256 = $zipShell; releaseSigned = $signed }
     entries = @($entries)
     unpackedBytes = [int64](($entries | Measure-Object -Property bytes -Sum).Sum)
 }
 $evidence | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'package-verification.json') -Encoding utf8NoBOM
-Write-Output "Unsigned preview package verified: $zipPath"
+Write-Output "$(if ($signed) { 'Signed-shell' } else { 'Unsigned' }) preview package verified: $zipPath"
