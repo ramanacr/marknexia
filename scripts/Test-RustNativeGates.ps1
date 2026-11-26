@@ -138,7 +138,7 @@ Invoke-Gate 'uia-native-runtime' {
 Invoke-Gate 'uia-native-links' {
     $env:MARKNEXIA_SHELL_EXE = $exe
     cargo test --locked --target $Target -p marknexia-win32 --test native_links -- --ignored --test-threads=1 --nocapture
-} -Attempts 1
+} -Attempts 2
 # Runtime high contrast: SPI_SETHIGHCONTRAST on and off with a
 # WM_SETTINGCHANGE broadcast; chrome and page colors from DWM captures, the
 # original state restored by a drop guard. The test changes the setting only

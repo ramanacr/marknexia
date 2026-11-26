@@ -248,7 +248,7 @@ fn launch(repository: &Repository, settings: &str) -> Launched {
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .expect("CUIAutomation");
-    let root = unsafe { automation.ElementFromHandle(hwnd) }.expect("ElementFromHandle");
+    let root = shell_support::element_from_handle(&automation, hwnd);
     Launched {
         root,
         automation,
